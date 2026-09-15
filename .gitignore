@@ -1,0 +1,35 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+auth/
+credentials/
+secrets/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+backups/
+logs/
+*.log
+
+# Dependencies and build output
+node_modules/
+dist/
+.vitepress/cache/
+.vitepress/dist/
+coverage/
+
+# Local tools and editors
+.playwright-cli/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,16 @@
+{
+  "name": "ai-operations-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vitepress dev --host 127.0.0.1 --port 4173 --strictPort",
+    "build": "vitepress build",
+    "preview": "vitepress preview --host 127.0.0.1 --port 4173 --strictPort",
+    "check": "node scripts/check.mjs"
+  },
+  "devDependencies": {
+    "vitepress": "2.0.0-alpha.20",
+    "vue": "3.5.41",
+    "mermaid": "11.17.2"
+  }
+}

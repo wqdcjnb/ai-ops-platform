@@ -1,0 +1,7 @@
+node_modules/
+.vitepress/cache/
+.vitepress/dist/
+content/public/raw/
+.playwright-cli/
+output/playwright/
+*.log
