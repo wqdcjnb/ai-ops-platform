@@ -54,6 +54,16 @@ npm.cmd run check
 
 也可以在 Windows 中双击 `docs-site/启动文档中心.cmd`。
 
+## 业务应用依赖
+
+前端与 BFF 使用 npm workspaces 管理。首次安装：
+
+```powershell
+npm.cmd ci
+```
+
+目录分别为 `apps/web` 和 `apps/server`。当前只完成依赖初始化，依赖用途和验证结果见[依赖基线](docs-site/content/technical/dependency-baseline.md)。
+
 ## 安全边界
 
 本仓库是公开仓库，不得提交以下内容：
@@ -68,4 +78,3 @@ npm.cmd run check
 ## 项目状态
 
 下一阶段将先完成数据模型、页面信息架构和接口边界设计，再进入可运行原型开发。进度以[项目待办](docs-site/content/records/todo.md)和[方案决策](docs-site/content/records/decisions.md)为准。
-

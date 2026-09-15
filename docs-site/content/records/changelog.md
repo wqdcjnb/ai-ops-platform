@@ -1,5 +1,13 @@
 # 更新记录
 
+## 2026-09-15 · 初始化业务依赖
+
+- 建立 `apps/web` 和 `apps/server` 两个 npm 工作区。
+- 前端加入 Vue、Router、Pinia、Tabler、ECharts、Zod、Vite、Vitest 和 Playwright。
+- BFF 加入 Fastify、CORS、Helmet、限流、Zod、TypeScript、tsx 和 Vitest。
+- 固定根目录锁文件，并显式批准 Vite 与 tsx 使用的 `esbuild` 安装脚本。
+- 验证依赖树、核心命令和 npm 安全审计；当前没有已知漏洞。
+
 ## 2026-09-15 · UI 确定为 Tabler
 
 - 统一运营控制台确定使用 Tabler 高密度工具风。

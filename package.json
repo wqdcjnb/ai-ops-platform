@@ -1,0 +1,22 @@
+{
+  "name": "ai-ops-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI operations API management platform",
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22 <25",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev:web": "npm run dev --workspace @ai-ops/web",
+    "dev:server": "npm run dev --workspace @ai-ops/server",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
