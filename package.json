@@ -16,6 +16,9 @@
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"
   },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  },
   "allowScripts": {
     "esbuild@0.28.2": true
   }

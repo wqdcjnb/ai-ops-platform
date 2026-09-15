@@ -25,6 +25,7 @@ dist/
 .vitepress/cache/
 .vitepress/dist/
 coverage/
+/output/
 
 # Local tools and editors
 .playwright-cli/
@@ -32,4 +33,3 @@ coverage/
 .vscode/
 .DS_Store
 Thumbs.db
-

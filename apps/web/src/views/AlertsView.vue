@@ -1,0 +1,119 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  IconAlertCircle, IconAlertTriangle, IconArrowLeft, IconArrowRight, IconBell, IconBellOff,
+  IconChevronRight, IconCircleCheck, IconClock, IconFilter, IconRefresh, IconSearch, IconSettings, IconShieldCheck, IconX,
+} from '@tabler/icons-vue'
+import { AlertsApiError, fetchAlertDetail, fetchAlertRules, fetchAlerts, fetchAlertSummary, type AlertDetail, type AlertEvent, type AlertFilters, type AlertRules, type AlertsResponse, type AlertSummary } from '../alerts-api'
+
+const summary = ref<AlertSummary | null>(null)
+const alerts = ref<AlertsResponse | null>(null)
+const rules = ref<AlertRules | null>(null)
+const detail = ref<AlertDetail | null>(null)
+const activeTab = ref<'events' | 'rules'>('events')
+const search = ref('')
+const severity = ref<AlertFilters['severity']>('all')
+const status = ref<AlertFilters['status']>('all')
+const source = ref<AlertFilters['source']>('all')
+const environment = ref<AlertFilters['environment']>('all')
+const page = ref(1)
+const pageSize = 10
+const isLoading = ref(false)
+const detailLoadingId = ref('')
+const errorMessage = ref('')
+let request: AbortController | undefined
+let detailRequest: AbortController | undefined
+
+const severityText = { critical: '严重', warning: '警告', info: '提示' }
+const statusText = { open: '待处理', acknowledged: '已确认', closed: '已关闭' }
+const sourceText = { quota: '额度', traffic: '流量', error_rate: '错误率', balance: '余额', credential: '凭证', upstream: '上游' }
+const environmentText = { production: '生产', experiment: '实验' }
+const updatedAt = computed(() => summary.value ? timeText(summary.value.meta.generatedAt) : '—')
+const summaryCards = computed(() => {
+  const value = summary.value?.summary
+  return [
+    { label: '待处理', value: value?.open ?? '—', hint: '需要跟进的事件', icon: IconAlertCircle, tone: 'red' },
+    { label: '严重', value: value?.critical ?? '—', hint: '待处理严重事件', icon: IconAlertTriangle, tone: 'red' },
+    { label: '警告', value: value?.warning ?? '—', hint: '待处理警告事件', icon: IconBell, tone: 'amber' },
+    { label: '实验环境', value: value?.experiment ?? '—', hint: '未关闭实验事件', icon: IconShieldCheck, tone: 'violet' },
+    { label: '已确认', value: value?.acknowledged ?? '—', hint: `另有 ${value?.closed ?? 0} 条已关闭`, icon: IconCircleCheck, tone: 'teal' },
+  ]
+})
+
+function filters(): AlertFilters { return { search: search.value.trim(), severity: severity.value, status: status.value, source: source.value, environment: environment.value, page: page.value, pageSize } }
+function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
+function applyFilters() { page.value = 1; void loadEvents() }
+function clearFilters() { search.value = ''; severity.value = 'all'; status.value = 'all'; source.value = 'all'; environment.value = 'all'; applyFilters() }
+function changePage(next: number) { if (!alerts.value || next < 1 || next > alerts.value.pagination.totalPages) return; page.value = next; void loadEvents() }
+
+async function loadEvents(signal?: AbortSignal) { alerts.value = await fetchAlerts(filters(), signal) }
+async function loadData() {
+  request?.abort()
+  const next = new AbortController()
+  request = next
+  isLoading.value = true
+  errorMessage.value = ''
+  try {
+    const [summaryValue, alertsValue, rulesValue] = await Promise.all([fetchAlertSummary(next.signal), fetchAlerts(filters(), next.signal), fetchAlertRules(next.signal)])
+    summary.value = summaryValue; alerts.value = alertsValue; rules.value = rulesValue
+  } catch (error) {
+    if (next.signal.aborted) return
+    const requestId = error instanceof AlertsApiError ? error.requestId : undefined
+    errorMessage.value = `${error instanceof Error ? error.message : '告警中心暂时无法加载'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { if (request === next) isLoading.value = false }
+}
+
+async function openDetail(item: AlertEvent) {
+  detailRequest?.abort()
+  const next = new AbortController()
+  detailRequest = next
+  detailLoadingId.value = item.id
+  try { detail.value = await fetchAlertDetail(item.id, next.signal) }
+  catch (error) { if (!next.signal.aborted) errorMessage.value = error instanceof Error ? error.message : '告警详情暂时无法加载' }
+  finally { if (detailRequest === next) detailLoadingId.value = '' }
+}
+
+onMounted(() => void loadData())
+onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
+</script>
+
+<template>
+  <div class="dashboard alerts-dashboard">
+    <section class="page-heading"><div><div class="eyebrow">ALERT CENTER</div><h1>告警中心</h1><p>集中查看额度、错误率、流量、余额、凭证与上游异常。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="规则写接口与操作审计完成后开放"><IconSettings :size="16" />新建规则</button></div></section>
+    <div v-if="summary" class="source-banner"><span>DEMO</span>{{ summary.meta.notice }}</div>
+    <section class="alerts-summary-grid" aria-label="告警汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
+
+    <div v-if="!summary && !errorMessage" class="panel data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在聚合告警</strong><p>正在读取事件、规则和通知配置状态…</p></div></div>
+    <div v-else-if="errorMessage && !summary" class="panel data-state failed"><div class="state-icon"><IconAlertTriangle :size="22" /></div><div><strong>告警中心加载失败</strong><p>{{ errorMessage }}</p></div><button class="btn btn-white" @click="loadData">重试</button></div>
+
+    <template v-else-if="summary && alerts && rules">
+      <section class="notification-banner"><span><IconBellOff :size="19" /></span><div><strong>外部通知尚未配置</strong><p>{{ summary.notificationConfig.notice }}</p></div><div class="notification-channels"><em v-for="channel in summary.notificationConfig.channels" :key="channel.type">{{ channel.type === 'wecom' ? '企业微信' : '钉钉' }} · 未配置</em></div></section>
+
+      <section class="panel alert-workbench">
+        <header class="alert-tabs" role="tablist" aria-label="告警中心视图"><button :class="{ active: activeTab === 'events' }" role="tab" :aria-selected="activeTab === 'events'" @click="activeTab = 'events'">事件 <span>{{ alerts.pagination.total }}</span></button><button :class="{ active: activeTab === 'rules' }" role="tab" :aria-selected="activeTab === 'rules'" @click="activeTab = 'rules'">规则 <span>{{ rules.items.length }}</span></button><small>只读演示</small></header>
+
+        <template v-if="activeTab === 'events'">
+          <form class="alert-filters" @submit.prevent="applyFilters"><label class="alert-search"><IconSearch :size="15" /><input v-model="search" maxlength="80" type="search" placeholder="事件、对象、规则或告警 ID" /></label><label><IconAlertTriangle :size="14" /><select v-model="severity" @change="applyFilters"><option value="all">全部严重度</option><option value="critical">严重</option><option value="warning">警告</option><option value="info">提示</option></select></label><label><IconCircleCheck :size="14" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="open">待处理</option><option value="acknowledged">已确认</option><option value="closed">已关闭</option></select></label><label><IconFilter :size="14" /><select v-model="source" @change="applyFilters"><option value="all">全部来源</option><option v-for="option in alerts.options.sources" :key="option.id" :value="option.id">{{ option.label }}</option></select></label><label><IconShieldCheck :size="14" /><select v-model="environment" @change="applyFilters"><option value="all">全部环境</option><option value="production">生产</option><option value="experiment">实验</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
+          <div v-if="alerts.items.length" class="alert-event-list"><article v-for="item in alerts.items" :key="item.id" class="alert-event" :class="`severity-${item.severity}`"><span class="alert-severity-icon"><IconAlertTriangle v-if="item.severity !== 'info'" :size="18" /><IconAlertCircle v-else :size="18" /></span><div class="alert-event-main"><div><span class="severity-chip" :class="item.severity">{{ severityText[item.severity] }}</span><span class="environment-tag" :class="item.environment">{{ environmentText[item.environment] }}</span><code>{{ item.id }}</code></div><strong>{{ item.title }}</strong><p>{{ item.summary }}</p><small>{{ item.subject.name }} · {{ sourceText[item.source] }} · {{ item.rule.name }}</small></div><div class="alert-trigger"><small>触发值 / 阈值</small><strong>{{ item.trigger.valueLabel }}</strong><span>{{ item.rule.thresholdLabel }}</span></div><div class="alert-history"><small>最近发生</small><strong>{{ timeText(item.lastOccurredAt) }}</strong><span>{{ item.occurrences }} 次 · {{ item.silence.active ? '静默中' : '未静默' }}</span></div><div class="alert-owner"><span class="alert-state" :class="item.status"><i />{{ statusText[item.status] }}</span><small>{{ item.assignee?.name ?? '未分派' }}</small><em>{{ item.notification.state === 'not_configured' ? '通知未配置' : '通知已处理' }}</em></div><button class="row-action enabled" :disabled="detailLoadingId === item.id" :aria-label="`查看 ${item.title} 详情`" @click="openDetail(item)"><IconRefresh v-if="detailLoadingId === item.id" :size="15" class="spinning" /><IconChevronRight v-else :size="17" /></button></article></div>
+          <div v-else class="people-empty"><IconBellOff :size="25" /><strong>没有符合条件的告警事件</strong><span>调整严重度、状态、来源或环境筛选。</span><button class="text-button" @click="clearFilters">清除筛选</button></div>
+          <footer class="usage-pagination"><span>共 {{ alerts.pagination.total }} 条 · 第 {{ alerts.pagination.page }}/{{ Math.max(alerts.pagination.totalPages, 1) }} 页</span><div><button :disabled="alerts.pagination.page <= 1" aria-label="上一页" @click="changePage(alerts.pagination.page - 1)"><IconArrowLeft :size="15" /></button><button :disabled="alerts.pagination.page >= alerts.pagination.totalPages" aria-label="下一页" @click="changePage(alerts.pagination.page + 1)"><IconArrowRight :size="15" /></button></div></footer>
+        </template>
+
+        <template v-else>
+          <div class="alert-rules-heading"><div><strong>规则目录</strong><p>阈值、窗口与冷却时间均为演示配置；持久化和操作审计接入前不可编辑。</p></div><span class="source-tag demo">DEMO</span></div>
+          <div class="alert-rule-grid"><article v-for="rule in rules.items" :key="rule.id" class="alert-rule-card"><header><span class="severity-chip" :class="rule.severity">{{ severityText[rule.severity] }}</span><span class="environment-tag" :class="rule.environment">{{ environmentText[rule.environment] }}</span><span class="rule-enabled"><i />已启用</span></header><strong>{{ rule.name }}</strong><p>{{ rule.description }}</p><dl><div><dt>监控范围</dt><dd>{{ rule.scope }}</dd></div><div><dt>触发条件</dt><dd>{{ rule.condition }}</dd></div><div><dt>统计窗口</dt><dd>{{ rule.window }}</dd></div><div><dt>冷却时间</dt><dd>{{ rule.cooldownMinutes }} 分钟</dd></div><div><dt>近 7 天触发</dt><dd>{{ rule.triggerCount7d }} 次</dd></div><div><dt>外部通知</dt><dd class="not-configured">未配置</dd></div></dl><footer><small>最近触发 {{ rule.lastTriggeredAt ? timeText(rule.lastTriggeredAt) : '—' }}</small><button class="btn btn-white" disabled>编辑规则</button></footer></article></div>
+        </template>
+      </section>
+      <footer class="page-footer">数据来源：DEMO · 所有确认、关闭、静默与规则编辑操作保持禁用 · 不返回凭证或上游完整错误正文</footer>
+    </template>
+
+    <div v-if="detail" class="drawer-backdrop" @click.self="detail = null"><aside class="model-drawer alert-drawer" role="dialog" aria-modal="true" aria-label="告警事件详情"><header><div><span class="source-tag demo">DEMO</span><h2>告警详情</h2></div><button class="icon-button" aria-label="关闭详情" @click="detail = null"><IconX :size="20" /></button></header>
+      <section class="alert-drawer-hero" :class="detail.item.severity"><span><IconAlertTriangle :size="21" /></span><div><div><span class="severity-chip" :class="detail.item.severity">{{ severityText[detail.item.severity] }}</span><span class="environment-tag" :class="detail.item.environment">{{ environmentText[detail.item.environment] }}</span></div><strong>{{ detail.item.title }}</strong><code>{{ detail.item.id }}</code></div><span class="alert-state" :class="detail.item.status"><i />{{ statusText[detail.item.status] }}</span></section>
+      <section class="drawer-section"><h3>事件概况</h3><dl class="model-facts"><div><dt>告警对象</dt><dd>{{ detail.item.subject.name }}</dd></div><div><dt>来源</dt><dd>{{ sourceText[detail.item.source] }}</dd></div><div><dt>规则</dt><dd>{{ detail.item.rule.name }}</dd></div><div><dt>触发值</dt><dd>{{ detail.item.trigger.valueLabel }}</dd></div><div><dt>阈值</dt><dd>{{ detail.item.rule.thresholdLabel }}</dd></div><div><dt>发生次数</dt><dd>{{ detail.item.occurrences }} 次</dd></div><div><dt>首次发生</dt><dd>{{ timeText(detail.item.firstOccurredAt) }}</dd></div><div><dt>最近发生</dt><dd>{{ timeText(detail.item.lastOccurredAt) }}</dd></div></dl></section>
+      <section class="drawer-section"><h3>安全分析</h3><div class="alert-analysis"><article><small>原因摘要</small><p>{{ detail.analysis.cause }}</p></article><article><small>影响范围</small><p>{{ detail.analysis.impact }}</p></article><article><small>建议动作</small><p>{{ detail.analysis.recommendation }}</p></article></div><div class="usage-content-boundary"><IconShieldCheck :size="19" /><div><strong>不保留上游完整正文</strong><p>详情仅展示可审计的脱敏摘要和请求 ID。</p></div></div></section>
+      <section class="drawer-section"><h3>处理记录</h3><div class="alert-timeline"><article v-for="entry in detail.timeline" :key="entry.id"><i /><div><strong>{{ entry.title }}</strong><p>{{ entry.description }}</p><small>{{ timeText(entry.occurredAt) }}</small></div></article></div></section>
+      <section class="drawer-section"><h3>关联请求</h3><div v-if="detail.item.relatedRequestIds.length" class="related-requests"><code v-for="id in detail.item.relatedRequestIds" :key="id">{{ id }}</code></div><p v-else class="drawer-empty">此事件没有关联请求 ID。</p></section>
+      <footer class="drawer-actions alert-actions"><button class="btn btn-white" disabled><IconClock :size="16" />静默</button><button class="btn btn-white" disabled><IconCircleCheck :size="16" />确认告警</button><button class="btn" disabled><IconX :size="16" />关闭告警</button></footer>
+    </aside></div>
+  </div>
+</template>

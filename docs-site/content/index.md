@@ -11,7 +11,7 @@
 <div class="card"><small>01 / REQUIREMENTS</small><strong><a href="/requirements/core">明确要做什么 →</a></strong><p>八个核心模块、一期范围与验收条件。</p></div>
 <div class="card"><small>02 / ARCHITECTURE</small><strong><a href="/technical/architecture">理解系统如何协作 →</a></strong><p>客户端、管理网关与账号适配层的职责。</p></div>
 <div class="card"><small>03 / WORKSPACE</small><strong><a href="/portal">打开本机后台 →</a></strong><p>经过检查的服务入口与最近可用状态。</p></div>
-<div class="card"><small>04 / PROGRESS</small><strong><a href="/records/todo">查看下一步工作 →</a></strong><p>接入验证、预算规则与待办清单。</p></div>
+<div class="card"><small>04 / DELIVERY</small><strong><a href="/technical/development-steps">按步骤开始开发 →</a></strong><p>里程碑、任务顺序、交付物与阶段门禁。</p></div>
 </div>
 
 ## 项目目标
@@ -37,6 +37,6 @@
 
 ## 阅读顺序
 
-[核心功能](/requirements/core) → [实施范围](/requirements/phases) → [架构与职责](/technical/architecture) → [验收标准](/requirements/acceptance)。
+[核心功能](/requirements/core) → [实施范围](/requirements/phases) → [架构与职责](/technical/architecture) → [开发实施步骤](/technical/development-steps) → [验收标准](/requirements/acceptance)。
 
 每页顶部可以下载对应 Markdown 原文。后续文档在此维护，历史交付文件仍保留。
