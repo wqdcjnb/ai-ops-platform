@@ -1,5 +1,5 @@
 :root {
-  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
   color: #182433;
   background: #f6f8fb;
   font-synthesis: none;
@@ -16,7 +16,13 @@
 
 * { box-sizing: border-box; }
 html, body, #app { min-height: 100%; margin: 0; }
-body { background: #f6f8fb; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  background: #f6f8fb;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: optimizeLegibility;
+}
 button, input { font: inherit; }
 button { cursor: pointer; }
 
@@ -457,4 +463,63 @@ button { cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+
+/* Readability baseline: the original prototype used 7–10px helper text throughout,
+   which is difficult to read on Windows displays. Keep the information density but
+   give the entire interface a slightly larger, sharper rendering baseline. */
+#app {
+  zoom: 1.08;
+}
+
+.nav-section-label { font-size: 9px; }
+.nav-item { font-size: 14px; }
+.nav-item.disabled small { font-size: 9px; }
+.brand-caption { font-size: 12px; }
+.environment-pill { font-size: 12px; }
+.environment-pill strong { font-size: 10px; }
+.operator-card strong { font-size: 13px; }
+.operator-card small { font-size: 11px; }
+.global-search input { font-size: 14px; }
+.service-status { font-size: 13px; }
+.service-status small { font-size: 11px; }
+.page-heading h1 { font-size: 27px; }
+.page-heading p { font-size: 13px; }
+.updated-at { font-size: 11px; }
+.btn { font-size: 13px; }
+.panel-header h2 { font-size: 15px; }
+.panel-header p { font-size: 11px; }
+.data-state strong { font-size: 14px; }
+.data-state p { font-size: 11px; }
+.metric-label { font-size: 12px; }
+.metric-value { font-size: 25px; }
+.metric-foot { font-size: 10px; }
+.entry-title h2 { font-size: 15px; }
+.entry-title > span { font-size: 24px; }
+.entry-card > p { font-size: 11px; }
+.entry-foot small { font-size: 10px; }
+.entry-foot a, .entry-foot > span { font-size: 10px; }
+.service-copy strong { font-size: 12px; }
+.service-copy small { font-size: 10px; }
+.service-check strong { font-size: 10px; }
+.service-check small { font-size: 9px; }
+.home-task-item strong { font-size: 12px; }
+.home-task-item small { font-size: 10px; }
+.home-task-item em { font-size: 9px; }
+.panel-empty { font-size: 11px; }
+.setup-item strong { font-size: 11px; }
+.setup-item small { font-size: 9px; }
+.quick-links strong { font-size: 12px; }
+.quick-links small { font-size: 9px; }
+.data-table { font-size: 11px; }
+.data-table th { font-size: 9px; }
+.table-stack strong { font-size: 11px; }
+.table-stack small { font-size: 9px; }
+.purpose-tag, .person-status { font-size: 9px; }
+.filter-submit, .text-button, .period-switch button { font-size: 11px; }
+.people-filters input, .people-filters select, .key-filters input, .key-filters select { font-size: 11px; }
+.page-footer { font-size: 10px; }
+
+@media (max-width: 560px) {
+  #app { zoom: 1; }
 }
