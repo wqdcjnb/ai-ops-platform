@@ -131,11 +131,13 @@ describe('BFF', () => {
     expect(JSON.stringify(body)).not.toContain('ACCESS_TOKEN')
   })
 
-  it('returns configuration tasks without secret values', async () => {
+  it('returns SQLite operational tasks without secret values', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/tasks/summary' })
+    const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(response.json().source).toBe('configuration')
-    expect(JSON.stringify(response.json())).not.toContain('Bearer')
+    expect(body).toMatchObject({ source: 'database', simulated: true, summary: { openAlerts: 4, criticalAlerts: 1 } })
+    expect(body.items.map((item: { target: string }) => item.target)).toEqual(expect.arrayContaining(['alerts', 'keys']))
+    expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|sk-[A-Za-z0-9_-]{8,}/i)
   })
 
   it('filters the demo people list using validated query parameters', async () => {

@@ -30,9 +30,13 @@ const serviceLabels: Record<PlatformServiceState, string> = {
 }
 
 const taskTargets: Record<TaskSummary['items'][number]['target'], string> = {
-  settings: '系统配置',
-  upstreams: '上游连接',
-  docs: '验证文档',
+  alerts: '告警中心',
+  keys: 'Key 管理',
+}
+
+const taskRoutes: Record<TaskSummary['items'][number]['target'], string> = {
+  alerts: '/alerts',
+  keys: '/keys',
 }
 
 const setupDone = computed(() => platform.value?.setup.filter((item) => item.state === 'done').length ?? 0)
@@ -74,9 +78,9 @@ const entryCards = computed<EntryCard[]>(() => [
     description: '管理人员归属、访问凭据和软额度目标',
     icon: IconUsers,
     tone: 'blue',
-    source: '待认证',
-    value: '—',
-    detail: '需完成 New API 管理认证',
+    source: tasks.value ? 'SQLITE' : '等待数据',
+    value: tasks.value ? tasks.value.summary.activeKeys.toLocaleString('zh-CN') : '—',
+    detail: tasks.value ? `${tasks.value.summary.activeKeys} 个有效 Key · ${tasks.value.summary.expiringKeys} 个临期` : 'SQLite Key 摘要暂未加载',
     to: '/people',
   },
   {
@@ -90,12 +94,12 @@ const entryCards = computed<EntryCard[]>(() => [
   },
   {
     title: '待处理事项',
-    description: '集中查看认证、部署和客户端验证任务',
+    description: '集中查看告警和临期 Key 风险',
     icon: IconAlertTriangle,
     tone: 'amber',
-    source: 'CONFIG',
+    source: tasks.value ? 'SQLITE' : '等待数据',
     value: tasks.value ? String(tasks.value.total) : '—',
-    detail: tasks.value ? (tasks.value.total ? '项配置任务等待处理' : '当前没有待处理事项') : '配置检查暂未加载',
+    detail: tasks.value ? (tasks.value.total ? `${tasks.value.summary.openAlerts} 项告警与 ${tasks.value.summary.expiringKeys} 个临期 Key` : '当前没有待处理事项') : 'SQLite 任务摘要暂未加载',
   },
 ])
 
@@ -186,18 +190,18 @@ onBeforeUnmount(() => activeRequest?.abort())
 
       <article class="panel task-panel">
         <div class="panel-header">
-          <div><h2>待处理事项</h2><p>根据当前部署配置生成，不包含任何密钥内容</p></div>
-          <span class="source-tag config">CONFIG</span>
+          <div><h2>待处理事项</h2><p>根据 SQLite 模拟告警和掩码 Key 汇总，不包含完整凭据</p></div>
+          <span class="source-tag sqlite">SQLITE</span>
         </div>
         <div v-if="tasks?.items.length" class="home-task-list">
           <div v-for="task in tasks.items" :key="task.id" class="home-task-item">
             <span class="task-symbol" :class="`level-${task.level}`"><IconAlertTriangle :size="17" /></span>
             <div><strong>{{ task.title }}</strong><small>{{ task.detail }}</small></div>
-            <em>{{ taskTargets[task.target] }}</em>
+            <RouterLink class="task-target-link" :to="taskRoutes[task.target]" :aria-label="`进入${taskTargets[task.target]}`">{{ taskTargets[task.target] }} <IconArrowUpRight :size="13" /></RouterLink>
           </div>
         </div>
-        <div v-else-if="tasks" class="panel-empty success"><IconCheck :size="20" />当前没有待处理配置事项</div>
-        <div v-else class="panel-empty">{{ isLoading ? '正在汇总配置检查…' : '待处理事项暂时不可用' }}</div>
+        <div v-else-if="tasks" class="panel-empty success"><IconCheck :size="20" />当前没有待处理事项</div>
+        <div v-else class="panel-empty">{{ isLoading ? '正在汇总 SQLite 模拟任务…' : '待处理事项暂时不可用' }}</div>
       </article>
     </section>
 
@@ -230,6 +234,6 @@ onBeforeUnmount(() => activeRequest?.abort())
       </article>
     </section>
 
-    <footer class="page-footer">服务状态：LIVE · 运营摘要：SQLite 模拟数据 · 待办来源：CONFIGURATION</footer>
+    <footer class="page-footer">服务状态：LIVE · 运营摘要与待办：SQLite 模拟数据 · 不代表真实网关事件或 Key 到期状态</footer>
   </div>
 </template>

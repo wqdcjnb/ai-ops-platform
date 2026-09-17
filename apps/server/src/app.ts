@@ -184,7 +184,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/tasks/summary', {
     schema: { response: { 200: taskSummarySchema } },
-  }, async () => createTaskSummary())
+  }, async () => createTaskSummary(database))
 
   app.get('/api/people', {
     schema: {

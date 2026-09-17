@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const platformServiceStateSchema = z.enum(['healthy', 'reachable', 'auth_required', 'offline'])
 
@@ -36,15 +37,22 @@ export type PlatformStatus = z.infer<typeof platformStatusSchema>
 export type PlatformServiceState = z.infer<typeof platformServiceStateSchema>
 
 export const taskSummarySchema = z.object({
-  source: z.literal('configuration'),
+  source: z.literal('database'),
+  simulated: z.literal(true),
   generatedAt: z.string().datetime(),
   total: z.number().int().nonnegative(),
+  summary: z.object({
+    openAlerts: z.number().int().nonnegative(),
+    criticalAlerts: z.number().int().nonnegative(),
+    activeKeys: z.number().int().nonnegative(),
+    expiringKeys: z.number().int().nonnegative(),
+  }),
   items: z.array(z.object({
     id: z.string(),
-    level: z.enum(['warning', 'experiment', 'info']),
+    level: z.enum(['critical', 'warning', 'info']),
     title: z.string(),
     detail: z.string(),
-    target: z.enum(['settings', 'upstreams', 'docs']),
+    target: z.enum(['alerts', 'keys']),
   })),
 })
 
@@ -120,16 +128,54 @@ export function createPlatformStatus(options: CreatePlatformStatusOptions): Plat
   }
 }
 
-export function createTaskSummary(now = new Date()): TaskSummary {
+export function createTaskSummary(database: PlatformDatabase, now = new Date()): TaskSummary {
+  const timestamp = now.getTime()
+  const openAlerts = database.listAlertEvents().filter((event) => event.status === 'open')
+  const criticalAlerts = openAlerts.filter((event) => event.severity === 'critical')
+  const keys = database.listApiKeys()
+  const activeKeys = keys.filter((key) => key.status !== 'revoked')
+  const expiringKeys = activeKeys.filter((key) => {
+    if (key.status === 'expiring') return true
+    const expiresAt = key.expiresAt ? new Date(key.expiresAt).getTime() : Number.NaN
+    return Number.isFinite(expiresAt) && expiresAt >= timestamp && expiresAt - timestamp <= 30 * 86_400_000
+  })
   const items: TaskSummary['items'] = []
-  if (!process.env.NEW_API_ACCESS_TOKEN?.trim()) {
-    items.push({ id: 'new-api-auth', level: 'warning', title: '配置 New API 管理认证', detail: '服务已可达，但人员、Key 和用量接口尚未授权', target: 'settings' })
+
+  if (criticalAlerts.length) {
+    items.push({
+      id: 'critical-alerts',
+      level: 'critical',
+      title: '处理严重告警',
+      detail: `${criticalAlerts.length} 项严重事件待跟进；先在告警中心查看脱敏摘要和关联请求。`,
+      target: 'alerts',
+    })
   }
-  if (!process.env.CPA_MANAGEMENT_KEY?.trim()) {
-    items.push({ id: 'cpa-auth', level: 'experiment', title: '连接 CPA 隔离实验服务', detail: '仅用于 ecommerce-pro-lab，不得作为正式渠道回退', target: 'upstreams' })
+  const nonCriticalAlerts = openAlerts.filter((event) => event.severity !== 'critical')
+  if (nonCriticalAlerts.length) {
+    items.push({
+      id: 'open-alerts',
+      level: 'warning',
+      title: '跟进待处理告警',
+      detail: `${nonCriticalAlerts.length} 项警告或提示事件仍处于待处理状态；当前不开放确认或关闭操作。`,
+      target: 'alerts',
+    })
   }
-  if (process.env.CLIENT_VALIDATION_COMPLETE !== 'true') {
-    items.push({ id: 'client-validation', level: 'info', title: '完成客户端最小链路验证', detail: '依次验证普通请求、流式、工具调用、取消与重启', target: 'docs' })
+  if (expiringKeys.length) {
+    items.push({
+      id: 'expiring-keys',
+      level: 'info',
+      title: '核查临期 Key',
+      detail: `${expiringKeys.length} 个有效 Key 将在 30 天内到期；列表仅显示掩码，不回显完整凭据。`,
+      target: 'keys',
+    })
   }
-  return { source: 'configuration', generatedAt: now.toISOString(), total: items.length, items }
+
+  return {
+    source: 'database',
+    simulated: true,
+    generatedAt: now.toISOString(),
+    total: items.length,
+    summary: { openAlerts: openAlerts.length, criticalAlerts: criticalAlerts.length, activeKeys: activeKeys.length, expiringKeys: expiringKeys.length },
+    items,
+  }
 }

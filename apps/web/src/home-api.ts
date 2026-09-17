@@ -28,15 +28,22 @@ export const platformStatusSchema = z.object({
 })
 
 export const taskSummarySchema = z.object({
-  source: z.literal('configuration'),
+  source: z.literal('database'),
+  simulated: z.literal(true),
   generatedAt: z.string(),
   total: z.number().int().nonnegative(),
+  summary: z.object({
+    openAlerts: z.number().int().nonnegative(),
+    criticalAlerts: z.number().int().nonnegative(),
+    activeKeys: z.number().int().nonnegative(),
+    expiringKeys: z.number().int().nonnegative(),
+  }),
   items: z.array(z.object({
     id: z.string(),
-    level: z.enum(['warning', 'experiment', 'info']),
+    level: z.enum(['critical', 'warning', 'info']),
     title: z.string(),
     detail: z.string(),
-    target: z.enum(['settings', 'upstreams', 'docs']),
+    target: z.enum(['alerts', 'keys']),
   })),
 })
 

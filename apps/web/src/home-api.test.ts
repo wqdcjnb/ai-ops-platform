@@ -32,7 +32,9 @@ describe('home API contracts', () => {
       ],
     })
     const tasks = taskSummarySchema.safeParse({
-      source: 'configuration', generatedAt: time, total: 0, items: [], accessToken: 'secret',
+      source: 'database', simulated: true, generatedAt: time, total: 0,
+      summary: { openAlerts: 0, criticalAlerts: 0, activeKeys: 0, expiringKeys: 0 },
+      items: [], accessToken: 'secret',
     })
     expect(platform.success).toBe(false)
     expect(tasks.success).toBe(true)
