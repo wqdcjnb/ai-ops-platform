@@ -15,6 +15,7 @@ describe('settings contract', () => {
     )
     expect(settingsResponseSchema.safeParse(value).success).toBe(true)
     expect(value.access).toMatchObject({ serverRbacVerified: true, writeAllowed: false })
+    expect(value.organization).toMatchObject({ source: 'database', company: '新知科技', departments: 5, people: 12 })
     expect(value.connections.items.every((item) => item.credentialValueAvailable === false)).toBe(true)
     expect(value.businessRules).toMatchObject({ source: 'database', version: 'draft-v0.1' })
     expect(value.features.source).toBe('database')

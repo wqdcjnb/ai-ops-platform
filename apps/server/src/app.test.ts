@@ -25,8 +25,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(6)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags']))
+    expect(body.migrationVersion).toBe(7)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions']))
   })
 
   it('requires a session for protected resources', async () => {
@@ -502,6 +502,7 @@ describe('BFF', () => {
     expect(response.statusCode).toBe(200)
     expect(body.meta.source).toBe('partial')
     expect(body.summary).toMatchObject({ sections: 6, roles: 5, servicesTotal: 4, enabledFeatures: 0, backupsVerified: 0 })
+    expect(body.organization).toMatchObject({ source: 'database', company: '新知科技', departments: 5, people: 12 })
     expect(body.businessRules).toMatchObject({ source: 'database', version: 'draft-v0.1' })
     expect(body.connections).toMatchObject({ source: 'live' })
     expect(body.connections.items.every((item: { credentialValueAvailable: boolean }) => item.credentialValueAvailable === false)).toBe(true)

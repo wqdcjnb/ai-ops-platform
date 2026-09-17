@@ -169,6 +169,15 @@ const migrationSql = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS system_role_definitions (
+    id TEXT PRIMARY KEY CHECK (id IN ('super_admin', 'admin', 'department_lead', 'finance', 'employee')),
+    name TEXT NOT NULL,
+    data_scope TEXT NOT NULL,
+    permission_summary TEXT NOT NULL,
+    high_privilege INTEGER NOT NULL CHECK (high_privilege IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -342,6 +351,14 @@ export interface PlatformFeatureFlagSeed {
   enabled: boolean
   reason: string
   risk: 'low' | 'medium' | 'high'
+}
+
+export interface PlatformRoleDefinitionSeed {
+  id: PlatformUserRole
+  name: string
+  dataScope: string
+  permissionSummary: string
+  highPrivilege: boolean
 }
 
 export function hashPlatformPassword(value: string) {
@@ -546,6 +563,18 @@ export class PlatformDatabase {
     )
   }
 
+  seedRoleDefinition(seed: PlatformRoleDefinitionSeed, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO system_role_definitions(
+      id, name, data_scope, permission_summary, high_privilege, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET name = excluded.name, data_scope = excluded.data_scope,
+    permission_summary = excluded.permission_summary, high_privilege = excluded.high_privilege,
+    updated_at = excluded.updated_at`).run(
+      seed.id, seed.name, seed.dataScope, seed.permissionSummary, Number(seed.highPrivilege), timestamp, timestamp,
+    )
+  }
+
   setUserDepartment(userId: string, departmentId: string | null) {
     this.db.prepare('UPDATE users SET department_id = ?, updated_at = ? WHERE id = ?').run(departmentId, this.now().toISOString(), userId)
   }
@@ -744,7 +773,36 @@ export class PlatformDatabase {
         enabled: number
         reason: string
         risk: 'low' | 'medium' | 'high'
+    }>
+  }
+
+  getOrganizationSummary() {
+    const company = this.db.prepare(`SELECT name FROM departments
+      WHERE parent_id IS NULL AND status = 'active' ORDER BY created_at, id LIMIT 1`).get() as { name: string } | undefined
+    const departmentCount = (this.db.prepare(`SELECT COUNT(*) AS count FROM departments
+      WHERE parent_id IS NOT NULL AND status = 'active'`).get() as { count: number }).count
+    const peopleCount = (this.db.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'employee'").get() as { count: number }).count
+    const roles = this.db.prepare(`SELECT d.id, d.name, d.data_scope AS dataScope,
+      d.permission_summary AS permissionSummary, d.high_privilege AS highPrivilege,
+      COUNT(u.id) AS memberCount
+      FROM system_role_definitions d LEFT JOIN users u ON u.role = d.id
+      GROUP BY d.id, d.name, d.data_scope, d.permission_summary, d.high_privilege
+      ORDER BY CASE d.id
+        WHEN 'super_admin' THEN 1 WHEN 'admin' THEN 2 WHEN 'department_lead' THEN 3
+        WHEN 'finance' THEN 4 WHEN 'employee' THEN 5 ELSE 99 END`).all() as Array<{
+        id: PlatformUserRole
+        name: string
+        dataScope: string
+        permissionSummary: string
+        highPrivilege: number
+        memberCount: number
       }>
+    return {
+      company: company?.name ?? '未配置组织',
+      departments: departmentCount,
+      people: peopleCount,
+      roles: roles.map((role) => ({ ...role, highPrivilege: role.highPrivilege === 1 })),
+    }
   }
 
   recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now()) {
@@ -783,6 +841,7 @@ export class PlatformDatabase {
       conversationAccessEvents: count('conversation_access_events'),
       businessRules: count('system_business_rules'),
       featureFlags: count('system_feature_flags'),
+      roleDefinitions: count('system_role_definitions'),
     }
   }
 
@@ -817,6 +876,15 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
   ]
   for (const department of departments) database.seedDepartment(department)
 
+  const roleDefinitions: PlatformRoleDefinitionSeed[] = [
+    { id: 'super_admin', name: '超级管理员', dataScope: '全公司', permissionSummary: '组织、服务、策略与敏感审计', highPrivilege: true },
+    { id: 'admin', name: '运营管理员', dataScope: '全公司运营数据', permissionSummary: '人员、Key、额度、路由与告警', highPrivilege: true },
+    { id: 'department_lead', name: '部门负责人', dataScope: '本部门', permissionSummary: '人员、Key、用量与额度只读', highPrivilege: false },
+    { id: 'finance', name: '财务只读', dataScope: '全公司汇总', permissionSummary: '成本、额度和用量只读', highPrivilege: false },
+    { id: 'employee', name: '员工', dataScope: '本人', permissionSummary: '个人 Key、模型与用量', highPrivilege: false },
+  ]
+  for (const role of roleDefinitions) database.seedRoleDefinition(role)
+
   database.seedUser({
     id: 'user-super-admin',
     username: process.env.AUTH_ADMIN_USERNAME ?? 'admin',
@@ -837,6 +905,12 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
 
   const people: PlatformUserSeed[] = [
     { id: 'user-ops-admin', username: 'ops-admin', displayName: '运营管理员', role: 'admin', roleLabel: '运营管理员', password: 'demo-ops-admin' },
+    { id: 'user-service-admin', username: 'service-admin', displayName: '服务管理员', role: 'admin', roleLabel: '运营管理员', password: 'demo-service-admin' },
+    { id: 'lead-content', username: 'lead-content', displayName: '内容运营负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-content', departmentId: 'content' },
+    { id: 'lead-ads', username: 'lead-ads', displayName: '广告投放负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-ads', departmentId: 'ads' },
+    { id: 'lead-global', username: 'lead-global', displayName: '跨境运营负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-global', departmentId: 'global' },
+    { id: 'lead-service', username: 'lead-service', displayName: '客户服务负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-service', departmentId: 'service' },
+    { id: 'user-finance', username: 'finance-reader', displayName: '财务只读', role: 'finance', roleLabel: '财务只读', password: 'demo-finance-reader' },
     { id: 'person-zhou', username: 'demo-zhou', displayName: '周明远', role: 'employee', roleLabel: '员工', password: 'demo-person-zhou', departmentId: 'ads' },
     { id: 'person-chen', username: 'demo-chen', displayName: '陈安琪', role: 'employee', roleLabel: '员工', password: 'demo-person-chen', departmentId: 'global' },
     { id: 'person-xu', username: 'demo-xu', displayName: '许嘉禾', role: 'employee', roleLabel: '员工', password: 'demo-person-xu', departmentId: 'service' },

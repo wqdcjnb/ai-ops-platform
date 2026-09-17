@@ -11,7 +11,7 @@ export const settingsResponseSchema = z.object({
   meta: z.object({ source: z.literal('partial'), generatedAt: z.string().datetime(), notice: z.string() }),
   access: z.object({ currentRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), serverRbacVerified: z.literal(true), writeAllowed: z.literal(false), notice: z.string() }),
   summary: z.object({ sections: z.literal(6), roles: z.number().int().nonnegative(), servicesOnline: z.number().int().nonnegative(), servicesTotal: z.number().int().positive(), enabledFeatures: z.number().int().nonnegative(), backupsVerified: z.literal(0) }),
-  organization: z.object({ source: sourceStateSchema, company: z.string(), departments: z.number().int().nonnegative(), people: z.number().int().nonnegative(), roles: z.array(z.object({ id: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), name: z.string(), memberCount: z.number().int().nonnegative(), dataScope: z.string(), permissionSummary: z.string(), highPrivilege: z.boolean() })) }),
+  organization: z.object({ source: z.literal('database'), company: z.string(), departments: z.number().int().nonnegative(), people: z.number().int().nonnegative(), roles: z.array(z.object({ id: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), name: z.string(), memberCount: z.number().int().nonnegative(), dataScope: z.string(), permissionSummary: z.string(), highPrivilege: z.boolean() })) }),
   businessRules: z.object({ source: z.literal('database'), version: z.string(), verified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), value: z.string(), impact: z.string(), status: z.enum(['fixed', 'unverified']) })) }),
   connections: z.object({ source: z.literal('live'), items: z.array(z.object({ id: z.enum(['bff', 'new-api', 'cpa', 'docs']), name: z.string(), category: z.string(), url: z.string().url(), state: serviceStateSchema, credentialConfigured: z.boolean(), credentialValueAvailable: z.literal(false), checkedAt: z.string().datetime(), detail: z.string() })).length(4) }),
   retention: z.object({ source: sourceStateSchema, cleanupJobVerified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), days: z.number().int().nonnegative(), appliesTo: z.string(), cleanupState: z.enum(['not_configured', 'unverified']), minimumNecessary: z.boolean() })) }),
@@ -35,6 +35,7 @@ function probeState(value: PlatformProbeResult['state']) { return value === 'rea
 
 export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, docs: PlatformProbeResult, database: PlatformDatabase, now = new Date(), currentRole: AppRole = 'super_admin') {
   const newApiState = newApi.state === 'ready' ? 'ready' as const : newApi.state
+  const organization = database.getOrganizationSummary()
   const businessRuleItems = database.listBusinessRules()
   const featureItems = database.listFeatureFlags().map((item) => ({ ...item, enabled: item.enabled === 1, editable: false as const }))
   const businessRuleVersion = businessRuleItems[0]?.version ?? 'unavailable'
@@ -45,16 +46,10 @@ export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, d
     { id: 'docs' as const, name: '项目文档', category: 'VitePress', url: safeHttpUrl(process.env.DOCS_BASE_URL, 'http://127.0.0.1:4173'), state: probeState(docs.state), credentialConfigured: false, credentialValueAvailable: false as const, checkedAt: docs.checkedAt, detail: docs.state === 'reachable' ? '文档中心可达。' : '文档中心当前不可达。' },
   ]
   return {
-    meta: { source: 'partial' as const, generatedAt: now.toISOString(), notice: '服务连通状态为实时探测；业务口径和功能开关读取 SQLite 模拟配置；组织、留存和备份仍明确标注为演示或未验证。' },
+    meta: { source: 'partial' as const, generatedAt: now.toISOString(), notice: '服务连通状态为实时探测；组织与角色、业务口径和功能开关读取 SQLite 模拟配置；留存和备份仍明确标注为演示或未验证。' },
     access: { currentRole, serverRbacVerified: true as const, writeAllowed: false as const, notice: '当前会话已通过服务端 RBAC 校验；设置写操作、二次确认与变更审计仍未接入。' },
-    summary: { sections: 6 as const, roles: 5, servicesOnline: connections.filter((item) => item.state !== 'offline').length, servicesTotal: connections.length, enabledFeatures: featureItems.filter((item) => item.enabled).length, backupsVerified: 0 as const },
-    organization: { source: 'demo' as const, company: '新知科技', departments: 4, people: 12, roles: [
-      { id: 'super_admin' as const, name: '超级管理员', memberCount: 1, dataScope: '全公司', permissionSummary: '组织、服务、策略与敏感审计', highPrivilege: true },
-      { id: 'admin' as const, name: '运营管理员', memberCount: 2, dataScope: '全公司运营数据', permissionSummary: '人员、Key、额度、路由与告警', highPrivilege: true },
-      { id: 'department_lead' as const, name: '部门负责人', memberCount: 4, dataScope: '本部门', permissionSummary: '人员、Key、用量与额度只读', highPrivilege: false },
-      { id: 'finance' as const, name: '财务只读', memberCount: 1, dataScope: '全公司汇总', permissionSummary: '成本、额度和用量只读', highPrivilege: false },
-      { id: 'employee' as const, name: '员工', memberCount: 12, dataScope: '本人', permissionSummary: '个人 Key、模型与用量', highPrivilege: false },
-    ] },
+    summary: { sections: 6 as const, roles: organization.roles.length, servicesOnline: connections.filter((item) => item.state !== 'offline').length, servicesTotal: connections.length, enabledFeatures: featureItems.filter((item) => item.enabled).length, backupsVerified: 0 as const },
+    organization: { source: 'database' as const, ...organization },
     businessRules: { source: 'database' as const, version: businessRuleVersion, verified: false as const, items: businessRuleItems },
     connections: { source: 'live' as const, items: connections },
     retention: { source: 'demo' as const, cleanupJobVerified: false as const, items: [
