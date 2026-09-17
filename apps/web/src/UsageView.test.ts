@@ -24,7 +24,7 @@ function response(): UsageResponse {
   }
 }
 function detail(): UsageDetail {
-  return { meta: { source: 'database', simulated: true, generatedAt: '2026-09-17T10:00:00.000Z', notice: 'SQLite 模拟调用元数据' }, item, route: { alias: 'ecommerce-copy', retryCount: 0, requestIdPropagated: true }, client: { name: 'Codex Desktop', mode: 'stream' }, content: { stored: false, reason: '不保存认证 Header、完整 Key 或对话正文。' } }
+  return { meta: { source: 'database', simulated: true, generatedAt: '2026-09-17T10:00:00.000Z', notice: 'SQLite 模拟调用元数据' }, item, route: { alias: 'ecommerce-copy', retryCount: 0, requestIdPropagated: true }, client: { name: 'Codex Desktop', mode: 'stream' }, content: { stored: false, reason: '不保存认证 Header、完整 Key 或对话正文。' }, conversationAudit: { accessible: true, recordId: 'conv-audit-copy-01', href: '/conversation-audit?recordId=conv-audit-copy-01', source: 'synthetic_seed', notice: '已关联合成映射。' } }
 }
 
 let host: HTMLDivElement
@@ -56,6 +56,7 @@ describe('usage view database simulation', () => {
     await vi.waitFor(() => expect(host.querySelector('[role="dialog"]')).not.toBeNull())
     expect(host.querySelector('[role="dialog"]')!.textContent).toContain('无对话正文')
     expect(host.querySelector('[role="dialog"]')!.textContent).toContain('不保存认证 Header')
+    expect(host.querySelector<HTMLAnchorElement>('[aria-label="进入关联的对话审计"]')?.getAttribute('href')).toBe('/conversation-audit?recordId=conv-audit-copy-01')
   })
 
   it('shows a retryable error without displaying a stale table', async () => {

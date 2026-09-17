@@ -587,3 +587,8 @@ button { cursor: pointer; }
 .usage-linked-notice p { margin: 3px 0 0; color: #66858a; font-size: 6.8px; line-height: 1.45; }
 .usage-linked-notice code { margin-left: auto; color: #326b70; font: 7px ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
 .usage-linked-notice .text-button { flex: 0 0 auto; font-size: 6.8px; white-space: nowrap; }
+.usage-conversation-link { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 9px; margin: 0 17px 12px; padding: 10px; border: 1px solid #c8e1e3; border-radius: 7px; color: #3c7076; background: #edf8f8; }
+.usage-conversation-link > div { min-width: 0; display: grid; }
+.usage-conversation-link strong { font-size: 8px; }
+.usage-conversation-link p { margin: 3px 0 0; color: #66858a; font-size: 6.8px; line-height: 1.45; }
+.usage-conversation-link .btn { min-height: 28px; padding: 0 9px; font-size: 7px; white-space: nowrap; }

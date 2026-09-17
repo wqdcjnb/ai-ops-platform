@@ -503,6 +503,11 @@ export interface PlatformConversationUsageLink {
   linkSource: 'synthetic_seed'
 }
 
+export interface PlatformUsageConversationLink {
+  recordId: string
+  linkSource: 'synthetic_seed'
+}
+
 export interface PlatformAuthSessionCreate {
   id: string
   userId: string
@@ -1337,6 +1342,12 @@ export class PlatformDatabase {
   getConversationUsageLink(recordId: string): PlatformConversationUsageLink | null {
     const row = this.db.prepare(`SELECT usage_request_id AS usageRequestId, link_source AS linkSource
       FROM conversation_usage_links WHERE record_id = ?`).get(recordId) as PlatformConversationUsageLink | undefined
+    return row ?? null
+  }
+
+  getUsageConversationLink(usageRequestId: string): PlatformUsageConversationLink | null {
+    const row = this.db.prepare(`SELECT record_id AS recordId, link_source AS linkSource
+      FROM conversation_usage_links WHERE usage_request_id = ?`).get(usageRequestId) as PlatformUsageConversationLink | undefined
     return row ?? null
   }
 

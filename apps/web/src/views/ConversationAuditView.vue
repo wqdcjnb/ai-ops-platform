@@ -27,6 +27,12 @@ const isHistoryLoading = ref(false)
 const errorMessage = ref('')
 const accessError = ref('')
 const historyError = ref('')
+function linkedRecordFromLocation() {
+  if (typeof window === 'undefined') return ''
+  const value = new URLSearchParams(window.location.search).get('recordId')?.trim() ?? ''
+  return /^conv-audit-[a-z0-9-]{1,80}$/.test(value) ? value : ''
+}
+const linkedRecordId = ref(linkedRecordFromLocation())
 let request: AbortController | undefined
 let accessRequest: AbortController | undefined
 let historyRequest: AbortController | undefined
@@ -54,11 +60,25 @@ function applyFilters() { page.value = 1; closeSelection(); void loadData() }
 function clearFilters() { period.value = '7d'; search.value = ''; person.value = 'all'; key.value = 'all'; purpose.value = 'all'; model.value = 'all'; policy.value = 'all'; state.value = 'all'; redaction.value = 'all'; grouping.value = 'all'; applyFilters() }
 function changePage(next: number) { if (!data.value || next < 1 || next > data.value.pagination.totalPages) return; page.value = next; closeSelection(); void loadData() }
 function selectRecord(item: ConversationAuditRecord) { selected.value = item; access.value = null; accessHistory.value = null; reason.value = ''; acknowledged.value = false; accessError.value = ''; historyError.value = ''; void loadAccessHistory(item.id) }
-function closeSelection() { selected.value = null; access.value = null; accessHistory.value = null; reason.value = ''; acknowledged.value = false; accessError.value = ''; historyError.value = ''; accessRequest?.abort(); historyRequest?.abort() }
+function closeSelection() {
+  const selectedFromUsageLink = selected.value?.id === linkedRecordId.value
+  selected.value = null; access.value = null; accessHistory.value = null; reason.value = ''; acknowledged.value = false; accessError.value = ''; historyError.value = ''; accessRequest?.abort(); historyRequest?.abort()
+  if (selectedFromUsageLink && typeof window !== 'undefined') {
+    linkedRecordId.value = ''
+    const url = new URL(window.location.href)
+    url.searchParams.delete('recordId')
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+  }
+}
 
 async function loadData() {
   request?.abort(); const next = new AbortController(); request = next; isLoading.value = true; errorMessage.value = ''
-  try { data.value = await fetchConversationAudits(filters(), next.signal) }
+  try {
+    data.value = await fetchConversationAudits(filters(), next.signal)
+    const linked = linkedRecordId.value
+    const record = linked ? data.value.items.find((item) => item.id === linked) : null
+    if (record && selected.value?.id !== record.id) selectRecord(record)
+  }
   catch (error) { if (next.signal.aborted) return; const requestId = error instanceof ConversationAuditApiError ? error.requestId : undefined; errorMessage.value = `${error instanceof Error ? error.message : '对话审计暂时无法加载'}${requestId ? ` · 请求 ID ${requestId}` : ''}` }
   finally { if (request === next) isLoading.value = false }
 }

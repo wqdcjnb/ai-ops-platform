@@ -530,11 +530,25 @@ describe('BFF', () => {
     expect(body.content).toMatchObject({ stored: false })
     expect(body.route.requestIdPropagated).toBe(true)
     expect(body.item.key.masked).toContain('••••••')
+    expect(body.conversationAudit).toMatchObject({ accessible: true, recordId: 'conv-audit-copy-01', href: '/conversation-audit?recordId=conv-audit-copy-01', source: 'synthetic_seed' })
 
     const missing = await createApp().inject({ method: 'GET', url: '/api/usage/req-missing-1' })
     expect(missing.statusCode).toBe(404)
     expect(missing.json().error.code).toBe('USAGE_NOT_FOUND')
     expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
+  })
+
+  it('does not return conversation-audit mappings to roles without conversation-audit access', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'lead-content', password: 'demo-lead-content' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const response = await app.inject({ method: 'GET', url: '/api/usage/req-demo-001', headers: { cookie } })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().conversationAudit).toEqual({
+      accessible: false, recordId: null, href: null, source: 'not_authorized',
+      notice: '当前角色没有对话审计权限，因此不返回可能关联的对话审计记录。',
+    })
   })
 
   it('returns filterable alert events and explicit notification configuration state', async () => {

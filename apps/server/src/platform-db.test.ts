@@ -41,6 +41,8 @@ describe('platform database migrations', () => {
     ]))
     expect(database.getConversationUsageLink('conv-audit-copy-01')).toEqual({ usageRequestId: 'req-demo-001', linkSource: 'synthetic_seed' })
     expect(database.getConversationUsageLink('conv-audit-missing')).toBeNull()
+    expect(database.getUsageConversationLink('req-demo-001')).toEqual({ recordId: 'conv-audit-copy-01', linkSource: 'synthetic_seed' })
+    expect(database.getUsageConversationLink('req-demo-missing')).toBeNull()
     expect(JSON.stringify(database.listConversationAuditRecords())).not.toMatch(/rawPrompt|rawResponse|viewReason|reasonText/i)
     expect(database.listBusinessRules()).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'timezone', version: 'draft-v0.1', status: 'fixed' }),

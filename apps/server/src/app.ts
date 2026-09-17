@@ -435,7 +435,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { params: usageRequestParamsSchema, response: { 200: usageDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDatabaseUsageDetail(database, request.params.requestId, newApi, new Date(), dataScopeFor(request.authUser))
+    const result = createDatabaseUsageDetail(database, request.params.requestId, newApi, new Date(), dataScopeFor(request.authUser), authMode === 'disabled' || request.authUser?.role === 'super_admin')
     if (result) return result
     return reply.status(404).send({ error: { code: 'USAGE_NOT_FOUND', message: '未找到指定调用记录', requestId: request.id } })
   })
