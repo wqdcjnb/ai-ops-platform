@@ -578,3 +578,12 @@ button { cursor: pointer; }
   .auth-demo-panel { align-items: flex-start; flex-direction: column; }
   .auth-account-actions { width: 100%; grid-template-columns: repeat(2, 1fr); flex-basis: auto; }
 }
+
+.conversation-linked-usage-actions { justify-items: end; gap: 5px; }
+.conversation-linked-usage-actions .text-button { font-size: 6.5px; white-space: nowrap; }
+.usage-linked-notice { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; padding: 10px 12px; border: 1px solid #bedde0; border-radius: 7px; color: #3d7075; background: #edf8f8; }
+.usage-linked-notice > div { min-width: 0; }
+.usage-linked-notice strong { font-size: 8px; }
+.usage-linked-notice p { margin: 3px 0 0; color: #66858a; font-size: 6.8px; line-height: 1.45; }
+.usage-linked-notice code { margin-left: auto; color: #326b70; font: 7px ui-monospace, SFMono-Regular, Consolas, monospace; white-space: nowrap; }
+.usage-linked-notice .text-button { flex: 0 0 auto; font-size: 6.8px; white-space: nowrap; }

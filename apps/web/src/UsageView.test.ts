@@ -29,7 +29,7 @@ function detail(): UsageDetail {
 
 let host: HTMLDivElement
 let app: App
-function mount() { app = createApp(UsageView); app.mount(host) }
+function mount(path = '/usage') { window.history.replaceState({}, '', path); app = createApp(UsageView); app.mount(host) }
 function button(label: string) {
   const found = [...host.querySelectorAll('button')].find((node) => node.getAttribute('aria-label') === label || node.textContent?.trim() === label)
   if (!found) throw new Error('Missing button: ' + label)
@@ -41,7 +41,7 @@ beforeEach(() => {
   vi.mocked(fetchUsage).mockResolvedValue(response())
   vi.mocked(fetchUsageDetail).mockResolvedValue(detail())
 })
-afterEach(() => { app?.unmount(); host.remove() })
+afterEach(() => { app?.unmount(); window.history.replaceState({}, '', '/'); host.remove() })
 
 describe('usage view database simulation', () => {
   it('marks SQLite records as simulated, applies a result filter, and opens metadata-only detail', async () => {
@@ -65,5 +65,15 @@ describe('usage view database simulation', () => {
     expect(host.querySelector('.usage-table')).toBeNull()
     button('重试').click()
     await vi.waitFor(() => expect(host.querySelector('.usage-table')).not.toBeNull())
+  })
+
+  it('accepts a safe synthetic request ID from conversation audit and allows clearing it', async () => {
+    mount('/usage?requestId=req-demo-001')
+    await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledWith(expect.objectContaining({ search: 'req-demo-001', page: 1 }), expect.any(AbortSignal)))
+    expect(host.textContent).toContain('来自对话审计的模拟用量关联')
+    expect(host.textContent).toContain('不代表真实网关请求链路')
+    button('清除对话审计关联筛选').click()
+    await vi.waitFor(() => expect(fetchUsage).toHaveBeenLastCalledWith(expect.objectContaining({ search: '', page: 1 }), expect.any(AbortSignal)))
+    expect(window.location.search).toBe('')
   })
 })

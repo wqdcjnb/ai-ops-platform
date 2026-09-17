@@ -12,7 +12,13 @@ const detailLoadingId = ref('')
 const errorMessage = ref('')
 const isLoading = ref(false)
 const period = ref<UsageFilters['period']>('7d')
-const search = ref('')
+function linkedUsageRequestFromLocation() {
+  if (typeof window === 'undefined') return ''
+  const value = new URLSearchParams(window.location.search).get('requestId')?.trim() ?? ''
+  return /^req-[A-Za-z0-9-]{1,80}$/.test(value) ? value : ''
+}
+const linkedUsageRequestId = ref(linkedUsageRequestFromLocation())
+const search = ref(linkedUsageRequestId.value)
 const person = ref('all')
 const department = ref('all')
 const purpose = ref('all')
@@ -50,6 +56,15 @@ function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { mon
 function usd(value: number) { return `$${value.toFixed(value >= 1 ? 2 : 4)}` }
 function applyFilters() { page.value = 1; void loadData() }
 function clearFilters() { period.value = '7d'; search.value = ''; person.value = 'all'; department.value = 'all'; purpose.value = 'all'; key.value = 'all'; model.value = 'all'; channel.value = 'all'; status.value = 'all'; costType.value = 'all'; applyFilters() }
+function clearLinkedUsageFilter() {
+  linkedUsageRequestId.value = ''
+  if (typeof window !== 'undefined') {
+    const url = new URL(window.location.href)
+    url.searchParams.delete('requestId')
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+  }
+  clearFilters()
+}
 function changePage(next: number) { if (!usage.value || next < 1 || next > usage.value.pagination.totalPages) return; page.value = next; void loadData() }
 
 async function loadData() {
@@ -80,6 +95,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 <template>
   <div class="dashboard usage-dashboard">
     <section class="page-heading"><div><div class="eyebrow">USAGE &amp; REQUEST LOGS</div><h1>用量与日志</h1><p>按请求 ID 核对调用归属、Token、点数、延迟、渠道和安全错误摘要。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="异步导出、权限过滤和审计完成后开放"><IconFileAnalytics :size="16" />导出</button></div></section>
+    <div v-if="linkedUsageRequestId" class="usage-linked-notice"><div><strong>来自对话审计的模拟用量关联</strong><p>当前仅筛选 SQLite 合成映射的模拟记录，不代表真实网关请求链路。</p></div><code>{{ linkedUsageRequestId }}</code><button class="text-button" type="button" aria-label="清除对话审计关联筛选" @click="clearLinkedUsageFilter">清除关联</button></div>
     <div v-if="usage" class="source-banner"><span>{{ sourceLabel }}</span>{{ usage.meta.notice }}</div>
     <section class="usage-summary-grid" aria-label="调用汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
