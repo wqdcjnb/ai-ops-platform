@@ -14,6 +14,7 @@ import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, creat
 import { createDatabaseLimits, createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
+import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDemoUsage, createDemoUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDemoAlertDetail, createDemoAlertRules, createDemoAlerts, createDemoAlertSummary } from './alerts.js'
@@ -33,6 +34,7 @@ const errorResponseSchema = z.object({
 })
 
 export interface BuildAppOptions {
+  catalogReader?: CatalogReader
   logger?: boolean
   authMode?: 'required' | 'disabled'
   authService?: AuthService
@@ -66,9 +68,11 @@ export function buildApp(options: BuildAppOptions = {}) {
   seedDemoUsers(database)
   seedDemoData(database)
   const auth = options.authService ?? createAuthService({ database })
+  const catalog = createModelCatalog(options.catalogReader)
   if (!options.database) app.addHook('onClose', async () => database.close())
 
-  const requiredRoles = (path: string, method: string): readonly AppRole[] => {
+  const requiredRoles = (path: string, method: string, source?: string): readonly AppRole[] => {
+    if ((path === '/api/models' || path === '/api/channels') && source === 'new_api') return ['super_admin', 'admin']
     if (path.startsWith('/api/me')) return ['employee']
     if (path.startsWith('/api/conversation-audits')) return ['super_admin']
     if (path.startsWith('/api/integrations/new-api/management')) return ['super_admin', 'admin']
@@ -88,7 +92,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '请先登录后再访问该资源', requestId: request.id } })
     }
     request.authUser = user
-    if (!isRoleAllowed(user, requiredRoles(path, request.method))) {
+    if (!isRoleAllowed(user, requiredRoles(path, request.method, (request.query as { source?: string })?.source))) {
       return reply.status(403).send({ error: { code: 'AUTH_FORBIDDEN', message: '当前身份没有访问该资源的权限', requestId: request.id } })
     }
   })
@@ -321,15 +325,27 @@ export function buildApp(options: BuildAppOptions = {}) {
   })
 
   app.get('/api/models', {
-    schema: { querystring: modelsQuerySchema, response: { 200: modelsResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => {
+    schema: { querystring: modelsQuerySchema, response: { 200: modelsResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema, 503: errorResponseSchema } },
+  }, async (request, reply) => {
+    if (request.query.source === 'new_api') {
+      try { return await catalog.models(request.query) } catch (error) {
+        if (!(error instanceof CatalogError)) throw error
+        return reply.status(error.code === 'NEW_API_AUTH_REQUIRED' ? 503 : 502).send({ error: { code: error.code, message: error.message, requestId: request.id } })
+      }
+    }
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
     return createDemoModels(request.query, newApi)
   })
 
   app.get('/api/channels', {
-    schema: { querystring: channelsQuerySchema, response: { 200: channelsResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => {
+    schema: { querystring: channelsQuerySchema, response: { 200: channelsResponseSchema, 400: errorResponseSchema, 502: errorResponseSchema, 503: errorResponseSchema } },
+  }, async (request, reply) => {
+    if (request.query.source === 'new_api') {
+      try { return await catalog.channels(request.query) } catch (error) {
+        if (!(error instanceof CatalogError)) throw error
+        return reply.status(error.code === 'NEW_API_AUTH_REQUIRED' ? 503 : 502).send({ error: { code: error.code, message: error.message, requestId: request.id } })
+      }
+    }
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
     return createDemoChannels(request.query, newApi)
   })

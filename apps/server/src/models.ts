@@ -2,15 +2,17 @@ import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
 
 export const modelsQuerySchema = z.object({
+  source: z.enum(['demo', 'new_api']).default('demo'),
   search: z.string().trim().max(60).default(''),
   capability: z.enum(['all', 'text', 'reasoning', 'translation', 'vision', 'batch']).default('all'),
-  environment: z.enum(['all', 'production', 'experiment']).default('all'),
-  status: z.enum(['all', 'available', 'degraded', 'unavailable']).default('all'),
+  environment: z.enum(['all', 'production', 'experiment', 'unassigned']).default('all'),
+  status: z.enum(['all', 'available', 'degraded', 'unavailable', 'unverified']).default('all'),
 })
 
 export const channelsQuerySchema = z.object({
-  environment: z.enum(['all', 'production', 'experiment']).default('all'),
-  status: z.enum(['all', 'healthy', 'degraded', 'offline']).default('all'),
+  source: z.enum(['demo', 'new_api']).default('demo'),
+  environment: z.enum(['all', 'production', 'experiment', 'unassigned']).default('all'),
+  status: z.enum(['all', 'healthy', 'degraded', 'offline', 'unverified']).default('all'),
 })
 
 export const modelItemSchema = z.object({
@@ -20,11 +22,11 @@ export const modelItemSchema = z.object({
   actualModel: z.string(),
   aliases: z.array(z.string()),
   capabilities: z.array(z.enum(['text', 'reasoning', 'translation', 'vision', 'batch'])),
-  contextWindow: z.number().int().positive(),
+  contextWindow: z.number().int().positive().nullable(),
   region: z.string(),
-  environment: z.enum(['production', 'experiment']),
-  status: z.enum(['available', 'degraded', 'unavailable']),
-  pricing: z.object({ inputPerMillion: z.number().nonnegative(), outputPerMillion: z.number().nonnegative(), currency: z.literal('USD'), basis: z.enum(['official', 'estimated']), updatedAt: z.string().datetime() }),
+  environment: z.enum(['production', 'experiment', 'unassigned']),
+  status: z.enum(['available', 'degraded', 'unavailable', 'unverified']),
+  pricing: z.object({ inputPerMillion: z.number().nonnegative(), outputPerMillion: z.number().nonnegative(), currency: z.literal('USD'), basis: z.enum(['official', 'estimated']), updatedAt: z.string().datetime() }).nullable(),
   purposes: z.array(z.object({ name: z.string(), alias: z.string(), role: z.enum(['primary', 'fallback']) })),
   channelIds: z.array(z.string()),
 })
@@ -33,21 +35,21 @@ export const channelItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   provider: z.string(),
-  type: z.enum(['official_api', 'cpa_oauth']),
-  environment: z.enum(['production', 'experiment']),
-  status: z.enum(['healthy', 'degraded', 'offline']),
+  type: z.enum(['official_api', 'cpa_oauth', 'unknown']),
+  environment: z.enum(['production', 'experiment', 'unassigned']),
+  status: z.enum(['healthy', 'degraded', 'offline', 'unverified']),
   modelIds: z.array(z.string()),
-  latencyMs: z.number().int().nonnegative(),
-  successRate: z.number().min(0).max(100),
+  latencyMs: z.number().int().nonnegative().nullable(),
+  successRate: z.number().min(0).max(100).nullable(),
   balanceState: z.enum(['sufficient', 'low', 'unknown']),
-  rateLimits: z.object({ rpm: z.number().int().positive(), tpm: z.number().int().positive() }),
+  rateLimits: z.object({ rpm: z.number().int().positive().nullable(), tpm: z.number().int().positive().nullable() }),
   recentError: z.object({ category: z.enum(['rate_limit', 'timeout', 'authentication', 'server']), summary: z.string(), occurredAt: z.string().datetime() }).nullable(),
-  checkedAt: z.string().datetime(),
-  credentialConfigured: z.boolean(),
+  checkedAt: z.string().datetime().nullable(),
+  credentialConfigured: z.boolean().nullable(),
 })
 
 export const modelsResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'new_api']), generatedAt: z.string().datetime(), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), available: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), production: z.number().int().nonnegative(), experiment: z.number().int().nonnegative() }),
   options: z.object({ capabilities: z.array(z.object({ id: z.enum(['text', 'reasoning', 'translation', 'vision', 'batch']), label: z.string() })) }),
   items: z.array(modelItemSchema),
@@ -55,7 +57,7 @@ export const modelsResponseSchema = z.object({
 })
 
 export const channelsResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string(), healthCacheSeconds: z.number().int().positive() }),
+  meta: z.object({ source: z.enum(['demo', 'new_api']), generatedAt: z.string().datetime(), notice: z.string(), healthCacheSeconds: z.number().int().nonnegative() }),
   summary: z.object({ total: z.number().int().nonnegative(), healthy: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }),
   items: z.array(channelItemSchema),
   total: z.number().int().nonnegative(),
@@ -65,8 +67,8 @@ export type ModelsQuery = z.infer<typeof modelsQuerySchema>
 export type ChannelsQuery = z.infer<typeof channelsQuerySchema>
 export type ModelsResponse = z.infer<typeof modelsResponseSchema>
 export type ChannelsResponse = z.infer<typeof channelsResponseSchema>
-type ModelItem = z.infer<typeof modelItemSchema>
-type ChannelItem = z.infer<typeof channelItemSchema>
+export type ModelItem = z.infer<typeof modelItemSchema>
+export type ChannelItem = z.infer<typeof channelItemSchema>
 
 const pricedAt = '2026-09-15T00:00:00.000Z'
 const demoModels: ModelItem[] = [
@@ -88,7 +90,7 @@ function createChannels(now: Date): ChannelItem[] {
 }
 
 function noticeFor(newApi: NewApiStatus, subject: string) {
-  if (newApi.state === 'ready') return `New API 管理连接已验证；${subject}字段映射完成前仍使用演示数据`
+  if (newApi.state === 'ready') return `当前为模拟数据，供开发与演示使用；可切换到 New API 查看已配置的${subject}。`
   if (newApi.state === 'reachable') return `New API 服务可达但尚未配置管理认证；${subject}为演示数据`
   if (newApi.state === 'auth_required') return `New API 管理认证未通过；${subject}为演示数据`
   return `New API 当前离线；${subject}为演示数据`

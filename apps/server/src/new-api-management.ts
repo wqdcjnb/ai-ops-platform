@@ -77,15 +77,15 @@ export class NewApiManagementClient {
       try { body = await response.json() } catch { body = null }
       const parsed = envelope(body)
       if (response.status === 401 || response.status === 403) return { state: 'auth_required', statusCode: response.status, data: null, message: parsed.message ?? '管理凭据未通过验证' }
-      if (!response.ok || parsed.success === false) return { state: 'unavailable', statusCode: response.status, data: null, message: parsed.message ?? 'New API 管理接口不可用' }
+      if (!response.ok || parsed.success !== true || parsed.data === undefined || parsed.data === null) return { state: 'unavailable', statusCode: response.status, data: null, message: 'New API 管理接口返回失败或无效数据' }
       return { state: 'ready', statusCode: response.status, data: (parsed.data ?? body) as T, message: parsed.message ?? null }
     } catch {
       return { state: 'unavailable', statusCode: 0, data: null, message: 'New API 管理接口当前不可达' }
     }
   }
 
-  getModelMetadata() { return this.get<unknown>('/api/models/') }
-  getChannels() { return this.get<unknown>('/api/channel/?p=1&page_size=100&id_sort=false&tag_mode=false&status=all') }
+  getModelMetadata(page?: number, pageSize = 100) { return this.get<unknown>(page === undefined ? '/api/models/' : `/api/models/?p=${page}&page_size=${pageSize}`) }
+  getChannels(page = 1, pageSize = 100) { return this.get<unknown>(`/api/channel/?p=${page}&page_size=${pageSize}&id_sort=false&tag_mode=false&status=all`) }
   getChannelModels() { return this.get<unknown>('/api/channel/models') }
 }
 

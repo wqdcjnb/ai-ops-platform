@@ -2,6 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { createNewApiManagementClient, newApiManagementResponseSchema, probeNewApiManagement } from './new-api-management.js'
 
 describe('New API management adapter', () => {
+  it.each(['<html>login</html>', '{"message":"private-error"}', '{"success":false,"message":"private-error"}', '{"success":true,"data":null}'])('rejects an invalid HTTP 200 envelope', async (body) => {
+    const fetchImpl = vi.fn(async () => new Response(body)) as unknown as typeof fetch
+    const result = await createNewApiManagementClient({ accessToken: 'fixture-token', fetchImpl }).getChannels()
+    expect(result).toMatchObject({ state: 'unavailable', data: null })
+    expect(result.message).not.toContain('private-error')
+  })
   it('does not make a network request without a management credential', async () => {
     const fetchImpl = vi.fn() as unknown as typeof fetch
     const result = await createNewApiManagementClient({ fetchImpl }).getChannels()
