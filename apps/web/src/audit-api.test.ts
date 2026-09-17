@@ -7,11 +7,27 @@ const meta = { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', period: 
 describe('audit API contracts', () => {
   it('validates filters and metadata-only audit events', () => {
     expect(auditFiltersSchema.safeParse({ period: '7d', search: '', actor: 'all', action: 'rotate', resource: 'key', result: 'success', source: 'api', page: 1, pageSize: 10 }).success).toBe(true)
+    expect(auditFiltersSchema.safeParse({ period: '7d', search: '', actor: 'all', action: 'access', resource: 'authorization', result: 'denied', source: 'web', page: 1, pageSize: 10 }).success).toBe(true)
     expect(auditFiltersSchema.safeParse({ period: '90d', search: '', actor: 'all', action: 'delete', resource: 'key', result: 'success', source: 'api', page: 0, pageSize: 10 }).success).toBe(false)
     const response = { meta, summary: { total: 1, success: 1, failed: 0, denied: 0, sensitiveChanges: 1 }, options: { actors: [] }, items: [event], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 }, retention: { mode: 'demo', deletionAllowed: false, appendOnlyVerified: false, notice: '待验证' } }
     expect(auditResponseSchema.safeParse(response).success).toBe(true)
     expect(auditResponseSchema.safeParse({ ...response, meta: { ...response.meta, source: 'database' }, retention: { ...response.retention, mode: 'database' } }).success).toBe(true)
     expect(auditResponseSchema.safeParse({ ...response, retention: { ...response.retention, deletionAllowed: true } }).success).toBe(false)
+  })
+
+  it('accepts a safe anonymous authentication-denial event', () => {
+    const securityEvent = {
+      ...event,
+      id: 'audit-auth-test',
+      actor: { id: 'anonymous', name: '未识别身份', role: 'system' },
+      action: 'access', actionLabel: '访问被拒绝',
+      resource: { type: 'authorization', id: 'authorization-check', name: '权限校验' },
+      result: { status: 'denied', code: 'AUTH_REQUIRED' },
+      source: { type: 'web', label: '管理控制台', ipMasked: null, client: '客户端信息未采集' },
+      summary: '未建立有效本地会话的访问被拒绝；不记录 Cookie、令牌、查询参数或请求正文。',
+      changes: [],
+    }
+    expect(auditResponseSchema.safeParse({ meta, summary: { total: 1, success: 0, failed: 0, denied: 1, sensitiveChanges: 0 }, options: { actors: [{ id: 'anonymous', label: '未识别身份' }] }, items: [securityEvent], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 }, retention: { mode: 'database', deletionAllowed: false, appendOnlyVerified: false, notice: '待验证' } }).success).toBe(true)
   })
 
   it('requires safe detail boundaries and unverified integrity states', () => {

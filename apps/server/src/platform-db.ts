@@ -557,7 +557,7 @@ export class PlatformDatabase {
     )
   }
 
-  private appendAuditEvent(seed: PlatformAuditEventSeed, now: Date) {
+  appendAuditEvent(seed: PlatformAuditEventSeed, now = this.now()) {
     this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       seed.id, seed.actorUserId ?? null, seed.action, seed.resourceType, seed.resourceId ?? null, seed.result,
@@ -1120,6 +1120,10 @@ export class PlatformDatabase {
     const row = this.db.prepare(`SELECT id, username, display_name AS displayName, role, status, department_id AS departmentId
       FROM users WHERE username = ? LIMIT 1`).get(username) as (PlatformUser & { status: PlatformUser['status'] }) | undefined
     return row ?? null
+  }
+
+  userExists(userId: string) {
+    return Boolean(this.db.prepare('SELECT 1 FROM users WHERE id = ? LIMIT 1').get(userId))
   }
 
   passwordMatches(username: string, password: string) {

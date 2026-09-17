@@ -73,6 +73,26 @@ export function buildApp(options: BuildAppOptions = {}) {
   const catalog = createModelCatalog(options.catalogReader)
   if (!options.database) app.addHook('onClose', async () => database.close())
 
+  const recordAuthenticationAudit = (event: {
+    actorUserId?: string | null
+    action: 'login' | 'logout' | 'access'
+    result: 'success' | 'failed' | 'denied'
+    requestId: string
+    code: 'AUTH_INVALID' | 'AUTH_REQUIRED' | 'AUTH_FORBIDDEN' | 'CSRF_INVALID' | 'AUTH_OK' | 'LOGOUT_OK'
+    message: string
+  }) => {
+    database.appendAuditEvent({
+      id: `audit-auth-${crypto.randomUUID()}`,
+      actorUserId: event.actorUserId && database.userExists(event.actorUserId) ? event.actorUserId : null,
+      action: event.action,
+      resourceType: event.action === 'access' ? 'authorization' : 'session',
+      resourceId: event.action === 'access' ? 'authorization-check' : 'local-session',
+      result: event.result,
+      requestId: event.requestId,
+      summary: { code: event.code, message: event.message },
+    })
+  }
+
   const requiredRoles = (path: string, method: string, source?: string): readonly AppRole[] => {
     if ((path === '/api/models' || path === '/api/channels') && source === 'new_api') return ['super_admin', 'admin']
     if (path.startsWith('/api/me')) return ['employee']
@@ -91,13 +111,25 @@ export function buildApp(options: BuildAppOptions = {}) {
     if (authMode === 'disabled') return
     const user = auth.authenticate(request)
     if (!user) {
+      recordAuthenticationAudit({
+        action: 'access', result: 'denied', requestId: request.id, code: 'AUTH_REQUIRED',
+        message: '未建立有效本地会话的访问被拒绝；不记录 Cookie、令牌、查询参数或请求正文。',
+      })
       return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '请先登录后再访问该资源', requestId: request.id } })
     }
     request.authUser = user
     if (!isRoleAllowed(user, requiredRoles(path, request.method, (request.query as { source?: string })?.source))) {
+      recordAuthenticationAudit({
+        actorUserId: user.id, action: 'access', result: 'denied', requestId: request.id, code: 'AUTH_FORBIDDEN',
+        message: '角色权限拒绝了受保护的管理接口访问；不记录查询参数、请求正文或认证信息。',
+      })
       return reply.status(403).send({ error: { code: 'AUTH_FORBIDDEN', message: '当前身份没有访问该资源的权限', requestId: request.id } })
     }
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !auth.verifyCsrf(request)) {
+      recordAuthenticationAudit({
+        actorUserId: user.id, action: 'access', result: 'denied', requestId: request.id, code: 'CSRF_INVALID',
+        message: 'CSRF 请求安全校验未通过；不记录会话 Cookie、令牌或 CSRF 值。',
+      })
       return reply.status(403).send({ error: { code: 'CSRF_INVALID', message: '请求安全校验未通过，请刷新页面后重试', requestId: request.id } })
     }
   })
@@ -128,9 +160,17 @@ export function buildApp(options: BuildAppOptions = {}) {
   }, async (request, reply) => {
     const session = auth.login(request.body.username, request.body.password)
     if (!session) {
+      recordAuthenticationAudit({
+        action: 'login', result: 'failed', requestId: request.id, code: 'AUTH_INVALID',
+        message: '本地登录校验失败；未记录输入的用户名或密码。',
+      })
       return reply.status(401).send({ error: { code: 'AUTH_INVALID', message: '用户名或密码不正确', requestId: request.id } })
     }
     auth.setSessionCookie(reply, session.token, session.csrfToken, session.expiresAt)
+    recordAuthenticationAudit({
+      actorUserId: session.user.id, action: 'login', result: 'success', requestId: request.id, code: 'AUTH_OK',
+      message: '本地管理会话已创建；会话令牌与 CSRF 值仅以哈希形式保存。',
+    })
     return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
   })
 
@@ -146,6 +186,10 @@ export function buildApp(options: BuildAppOptions = {}) {
   }, async (request, reply) => {
     auth.revoke(request)
     auth.clearSessionCookie(reply)
+    recordAuthenticationAudit({
+      actorUserId: request.authUser?.id ?? null, action: 'logout', result: 'success', requestId: request.id, code: 'LOGOUT_OK',
+      message: '本地管理会话已撤销；不记录会话 Cookie、令牌或 CSRF 值。',
+    })
     return reply.status(204).send()
   })
 

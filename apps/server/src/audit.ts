@@ -2,8 +2,8 @@ import { z } from 'zod'
 import type { PlatformDatabase } from './platform-db.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
-const actionSchema = z.enum(['login', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
-const resourceTypeSchema = z.enum(['session', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
+const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
+const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
 
@@ -21,7 +21,7 @@ export const auditQuerySchema = z.object({
 
 export const auditParamsSchema = z.object({ id: z.string().regex(/^audit-[a-z0-9-]+$/) })
 
-const actorSchema = z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'system']) })
+const actorSchema = z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']) })
 const resourceSchema = z.object({ type: resourceTypeSchema, id: z.string(), name: z.string() })
 const changeSchema = z.object({ field: z.string(), label: z.string(), before: z.string().nullable(), after: z.string().nullable(), sensitive: z.boolean() })
 
@@ -108,9 +108,10 @@ export function createDemoAuditDetail(id: string, now = new Date()) {
   }
 }
 
-const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', create: '创建', update: '更新', disable: '停用', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', view: '查看' }
-const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', export: '数据导出', settings: '系统设置', alert: '告警事件' }
+const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', logout: '退出登录', access: '访问被拒绝', create: '创建', update: '更新', disable: '停用', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', view: '查看' }
+const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', authorization: '权限校验', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', export: '数据导出', settings: '系统设置', alert: '告警事件' }
 const auditSummarySchema = z.object({
+  code: z.string().trim().min(1).max(64).optional(),
   message: z.string().trim().min(1).max(240).optional(),
   resourceName: z.string().trim().min(1).max(100).optional(),
   changes: z.array(changeSchema).max(8).optional(),
@@ -137,7 +138,7 @@ function databaseResourceName(type: AuditEvent['resource']['type'], id: string, 
 }
 
 function databaseSource(type: AuditEvent['resource']['type'], action: AuditEvent['action']) {
-  if (action === 'login') return { type: 'web' as const, label: '管理控制台', ipMasked: '192.168.1.*', client: 'Chrome · Windows' }
+  if (action === 'login' || action === 'logout' || type === 'authorization') return { type: 'web' as const, label: '管理控制台', ipMasked: null, client: '客户端信息未采集' }
   if (type === 'export') return { type: 'web' as const, label: '用量与日志', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
   if (type === 'quota') return { type: 'web' as const, label: '额度与限流', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
   return { type: 'api' as const, label: 'BFF 管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }
@@ -159,18 +160,19 @@ function databaseChanges(row: ReturnType<PlatformDatabase['listAuditEvents']>[nu
 function databaseEvent(row: ReturnType<PlatformDatabase['listAuditEvents']>[number]): AuditEvent {
   const action = row.action as AuditEvent['action']
   const resourceType = row.resourceType as AuditEvent['resource']['type']
-  const actorRole = row.actorRole === 'super_admin' ? 'super_admin' : row.actorRole === 'admin' ? 'admin' : 'system'
+  const actorRole = row.actorRole ?? 'system'
   const auditSummary = safeAuditSummary(row)
   const summary = auditSummary.message ? redactAuditText(auditSummary.message) : '已记录字段级操作摘要。'
   const actionCode = actionLabels[action].replaceAll(' ', '_').toUpperCase()
+  const isAnonymous = !row.actorUserId && (action === 'login' || action === 'access')
   return {
     id: row.id,
     occurredAt: row.occurredAt,
-    actor: { id: row.actorUserId ?? 'system', name: row.actorName ?? '平台任务', role: actorRole },
+    actor: { id: isAnonymous ? 'anonymous' : row.actorUserId ?? 'system', name: isAnonymous ? '未识别身份' : row.actorName ?? '平台任务', role: actorRole },
     action,
     actionLabel: actionLabels[action],
     resource: { type: resourceType, id: row.resourceId ?? `${resourceType}-unknown`, name: databaseResourceName(resourceType, row.resourceId ?? '', auditSummary) },
-    result: { status: row.result, code: row.result === 'success' ? (action === 'login' ? 'AUTH_OK' : `${actionCode}_OK`) : row.result === 'denied' ? 'SCOPE_DENIED' : 'DEPENDENCY_UNAVAILABLE' },
+    result: { status: row.result, code: auditSummary.code ?? (row.result === 'success' ? (action === 'login' ? 'AUTH_OK' : `${actionCode}_OK`) : row.result === 'denied' ? 'SCOPE_DENIED' : 'DEPENDENCY_UNAVAILABLE') },
     source: databaseSource(resourceType, action),
     requestId: row.requestId ?? `req-${row.id.replace(/^audit-/, '')}`,
     summary,
@@ -195,11 +197,11 @@ export function createDatabaseAudit(database: PlatformDatabase, query: AuditQuer
   const start = (query.page - 1) * query.pageSize
   const actors = [...new Map(all.map((item) => [item.actor.id, { id: item.actor.id, label: item.actor.name }])).values()]
   return {
-    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: '审计事件已从平台 SQLite 读取；本地演示人员与 Key 创建会在同一事务中追加安全摘要。真实 x-request-id 全链路、失败审计和哈希链仍待验证。' },
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: '审计事件已从平台 SQLite 读取；本地登录、退出和安全拒绝，以及人员与 Key 创建会追加安全摘要。哈希链与生产审计完整性仍待验证。' },
     summary: { total: filtered.length, success: filtered.filter((item) => item.result.status === 'success').length, failed: filtered.filter((item) => item.result.status === 'failed').length, denied: filtered.filter((item) => item.result.status === 'denied').length, sensitiveChanges: filtered.filter((item) => item.changes.some((change) => change.sensitive)).length },
     options: { actors }, items: filtered.slice(start, start + query.pageSize),
     pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
-    retention: { mode: 'database' as const, deletionAllowed: false as const, appendOnlyVerified: false as const, notice: '页面不提供删除能力；本地人员与 Key 创建已同事务写入 SQLite 审计事件，哈希链与受限数据库权限仍待验证。' },
+    retention: { mode: 'database' as const, deletionAllowed: false as const, appendOnlyVerified: false as const, notice: '页面不提供删除能力；本地认证安全摘要、人员与 Key 创建已写入 SQLite 审计事件，哈希链与受限数据库权限仍待验证。' },
   }
 }
 
@@ -211,7 +213,7 @@ export function createDatabaseAuditDetail(database: PlatformDatabase, id: string
   return {
     meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '详情仅展示 SQLite 字段级摘要，不包含完整密钥、认证信息、请求正文或对话正文' }, event,
     request: { requestId: event.requestId, traceState: 'database_unverified' as const, responseCode: event.result.status === 'success' ? 200 : event.result.status === 'denied' ? 403 : 503, durationMs: 86 + index * 41 },
-    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false as const, notice: 'SQLite 记录不可在页面删除；本地人员与 Key 创建会同事务追加安全摘要，正式追加日志、失败审计与哈希链校验尚未接入。' },
+    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false as const, notice: 'SQLite 记录不可在页面删除；本地认证安全摘要、人员与 Key 创建会追加安全摘要，正式追加日志与哈希链校验尚未接入。' },
     relatedAuditIds: index > 0 ? [all[index - 1]!.id] : [],
   }
 }

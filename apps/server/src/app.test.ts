@@ -138,6 +138,49 @@ describe('BFF', () => {
     expect(response.headers['set-cookie']).toBeUndefined()
   })
 
+  it('appends safe authentication and access-denial audit summaries', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    const app = buildApp({ database, probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    try {
+      const wrongPassword = 'audit-test-wrong-password'
+      const invalidLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: wrongPassword } })
+      expect(invalidLogin.statusCode).toBe(401)
+
+      const adminLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+      const adminCookie = cookieHeader(adminLogin.headers['set-cookie'])
+      const csrfToken = cookieValue(adminLogin.headers['set-cookie'], 'ai_ops_csrf')
+      const sessionToken = cookieValue(adminLogin.headers['set-cookie'], 'ai_ops_session')
+      const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+      const roleDenied = await app.inject({ method: 'GET', url: '/api/settings', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) } })
+      expect(roleDenied.statusCode).toBe(403)
+      const csrfDenied = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { cookie: adminCookie } })
+      expect(csrfDenied.statusCode).toBe(403)
+      const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { cookie: adminCookie, 'x-csrf-token': csrfToken } })
+      expect(logout.statusCode).toBe(204)
+
+      const events = database.listAuditEvents()
+      expect(events.find((item) => item.requestId === invalidLogin.headers['x-request-id'])).toMatchObject({ actorUserId: null, action: 'login', resourceType: 'session', result: 'failed', summary: { code: 'AUTH_INVALID' } })
+      expect(events.find((item) => item.requestId === roleDenied.headers['x-request-id'])).toMatchObject({ action: 'access', resourceType: 'authorization', result: 'denied', summary: { code: 'AUTH_FORBIDDEN' } })
+      expect(events.find((item) => item.requestId === csrfDenied.headers['x-request-id'])).toMatchObject({ action: 'access', resourceType: 'authorization', result: 'denied', summary: { code: 'CSRF_INVALID' } })
+      expect(events.find((item) => item.requestId === logout.headers['x-request-id'])).toMatchObject({ action: 'logout', resourceType: 'session', result: 'success', summary: { code: 'LOGOUT_OK' } })
+      const serializedEvents = JSON.stringify(events)
+      expect(serializedEvents).not.toContain(wrongPassword)
+      expect(serializedEvents).not.toContain(sessionToken)
+      expect(serializedEvents).not.toContain(csrfToken)
+
+      const auditLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+      const auditResponse = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=access&resource=authorization&result=denied', headers: { cookie: cookieHeader(auditLogin.headers['set-cookie']) } })
+      expect(auditResponse.statusCode).toBe(200)
+      expect(auditResponse.json().items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: 'access', resource: expect.objectContaining({ type: 'authorization' }), result: expect.objectContaining({ code: 'AUTH_FORBIDDEN' }) }),
+        expect.objectContaining({ action: 'access', resource: expect.objectContaining({ type: 'authorization' }), result: expect.objectContaining({ code: 'CSRF_INVALID' }) }),
+      ]))
+    } finally {
+      await app.close()
+      database.close()
+    }
+  })
+
   it('keeps a hashed SQLite session valid after the BFF restarts', async () => {
     const database = createPlatformDatabase({ filename: ':memory:' })
     const first = buildApp({ database, probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })

@@ -1,8 +1,8 @@
 import { z } from 'zod'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
-const actionSchema = z.enum(['login', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
-const resourceTypeSchema = z.enum(['session', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
+const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
+const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
 
@@ -10,7 +10,7 @@ export const auditFiltersSchema = z.object({ period: periodSchema, search: z.str
 
 const changeSchema = z.object({ field: z.string(), label: z.string(), before: z.string().nullable(), after: z.string().nullable(), sensitive: z.boolean() })
 export const auditEventSchema = z.object({
-  id: z.string(), occurredAt: z.string().datetime(), actor: z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'system']) }), action: actionSchema, actionLabel: z.string(),
+  id: z.string(), occurredAt: z.string().datetime(), actor: z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']) }), action: actionSchema, actionLabel: z.string(),
   resource: z.object({ type: resourceTypeSchema, id: z.string(), name: z.string() }), result: z.object({ status: resultStatusSchema, code: z.string() }),
   source: z.object({ type: sourceTypeSchema, label: z.string(), ipMasked: z.string().nullable(), client: z.string() }), requestId: z.string().regex(/^req-[a-z0-9-]+$/), summary: z.string(), changes: z.array(changeSchema), contentAvailable: z.literal(false), credentialValueAvailable: z.literal(false),
 })
