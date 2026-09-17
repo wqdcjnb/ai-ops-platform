@@ -91,6 +91,7 @@ const entryCards = computed<EntryCard[]>(() => [
     source: 'LIVE',
     value: platform.value ? `${reachableUpstreams.value}/2` : '—',
     detail: platform.value ? '上游入口当前可达' : '服务状态暂未加载',
+    to: '/upstreams',
   },
   {
     title: '待处理事项',
@@ -100,6 +101,7 @@ const entryCards = computed<EntryCard[]>(() => [
     source: tasks.value ? 'SQLITE' : '等待数据',
     value: tasks.value ? String(tasks.value.total) : '—',
     detail: tasks.value ? (tasks.value.total ? `${tasks.value.summary.openAlerts} 项告警与 ${tasks.value.summary.expiringKeys} 个临期 Key` : '当前没有待处理事项') : 'SQLite 任务摘要暂未加载',
+    to: '/alerts',
   },
 ])
 
