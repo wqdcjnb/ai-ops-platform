@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const keysQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
@@ -11,7 +12,7 @@ export const keysQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
 })
 
-export const keyIdParamsSchema = z.object({ id: z.string().regex(/^key-[a-z]+-[1-9][0-9]*$/).max(64) })
+export const keyIdParamsSchema = z.object({ id: z.string().regex(/^key-[a-z0-9-]+-[1-9][0-9]*$/).max(96) })
 
 const keyListItemSchema = z.object({
   id: z.string(),
@@ -32,7 +33,7 @@ const connectionSchema = z.object({
 })
 
 export const keysResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), active: z.number().int().nonnegative(), disabled: z.number().int().nonnegative(), expiring: z.number().int().nonnegative() }),
   options: z.object({
     owners: z.array(z.object({ id: z.string(), name: z.string() })),
@@ -47,7 +48,7 @@ export const keysResponseSchema = z.object({
 })
 
 export const keyDetailResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai') }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai') }),
   key: keyListItemSchema.extend({
     createdAt: z.string().datetime(),
     deviceNote: z.string(),
@@ -57,9 +58,25 @@ export const keyDetailResponseSchema = z.object({
   connection: connectionSchema.extend({ instructions: z.array(z.string()) }),
 })
 
+export const keyCreateBodySchema = z.object({
+  ownerId: z.string().regex(/^person-[a-z0-9-]+$/).max(96),
+  purpose: z.string().trim().min(2).max(40),
+  models: z.array(z.string().trim().min(2).max(64)).min(1).max(8),
+  expiresInDays: z.coerce.number().int().min(1).max(365),
+  deviceNote: z.string().trim().max(120).default('本地演示设备'),
+})
+
+export const keyCreateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), createdAt: z.string().datetime(), notice: z.string() }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string().datetime() }),
+  secret: z.string().min(20),
+})
+
 export type KeysQuery = z.infer<typeof keysQuerySchema>
 export type KeysResponse = z.infer<typeof keysResponseSchema>
 export type KeyDetailResponse = z.infer<typeof keyDetailResponseSchema>
+export type KeyCreateBody = z.infer<typeof keyCreateBodySchema>
+export type KeyCreateResponse = z.infer<typeof keyCreateResponseSchema>
 
 interface KeySeed {
   id: string
@@ -184,5 +201,69 @@ export function createDemoKeyDetail(id: string, now = new Date()): KeyDetailResp
       note: '复制非敏感配置后，由员工自行填写仅属于本人的 Key。',
       instructions: ['Base URL 指向统一 New API 入口', '模型填写已授权的业务别名', 'API Key 仅在员工自己的客户端中保存', '认证失败时先确认 Key 状态与到期时间'],
     },
+  }
+}
+
+function databaseNotice(newApi: NewApiStatus) {
+  if (newApi.state === 'ready') return 'Key 列表已从平台 SQLite 读取；New API 管理映射仍待接入'
+  if (newApi.state === 'reachable') return 'Key 列表来自平台 SQLite；New API 服务可达但尚未配置管理认证'
+  if (newApi.state === 'auth_required') return 'Key 列表来自平台 SQLite；New API 管理认证未通过'
+  return 'Key 列表来自平台 SQLite；New API 当前离线'
+}
+
+function keyExpiryState(expiresAt: string, now: Date): 'normal' | 'expiring' | 'expired' {
+  const remaining = new Date(expiresAt).getTime() - now.getTime()
+  if (remaining < 0) return 'expired'
+  return remaining <= 30 * 86_400_000 ? 'expiring' : 'normal'
+}
+
+export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery, newApi: NewApiStatus, now = new Date()): KeysResponse {
+  const demo = createDemoKeys({ search: '', owner: 'all', purpose: 'all', model: 'all', status: 'all', page: 1, pageSize: 50 }, newApi, now)
+  const demoById = new Map(demo.items.map((item) => [item.id, item]))
+  const keys = database.listApiKeys().map((row) => {
+    const existing = demoById.get(row.id)
+    const expiresAt = row.expiresAt ?? existing?.expiresAt ?? new Date(now.getTime() + 90 * 86_400_000).toISOString()
+    const status = row.status === 'revoked' ? 'disabled' as const : existing?.status ?? 'active' as const
+    return {
+      id: row.id,
+      masked: row.maskedValue,
+      owner: { id: row.ownerUserId, name: row.ownerName, department: row.departmentName ?? '待分配部门', initials: existing?.owner.initials ?? row.ownerName.slice(0, 2) },
+      purpose: row.purpose,
+      models: row.models.length ? row.models : existing?.models ?? ['ecommerce-general'],
+      status,
+      expiryState: keyExpiryState(expiresAt, now),
+      expiresAt,
+      lastUsedAt: existing?.lastUsedAt ?? null,
+      usage: existing?.usage ?? { requests: 0, points: 0 },
+    }
+  })
+  const search = query.search.toLocaleLowerCase('zh-CN')
+  const filtered = keys.filter((key) => {
+    const matchesSearch = !search || [key.masked, key.owner.name, key.owner.department, key.purpose, ...key.models].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
+    const matchesOwner = query.owner === 'all' || key.owner.id === query.owner
+    const matchesPurpose = query.purpose === 'all' || key.purpose === query.purpose
+    const matchesModel = query.model === 'all' || key.models.includes(query.model)
+    const matchesStatus = query.status === 'all' || (query.status === 'expiring' ? key.expiryState === 'expiring' : key.status === query.status)
+    return matchesSearch && matchesOwner && matchesPurpose && matchesModel && matchesStatus
+  })
+  const owners = [...new Map(keys.map((key) => [key.owner.id, { id: key.owner.id, name: key.owner.name }])).values()]
+  const start = (query.page - 1) * query.pageSize
+  return {
+    meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: databaseNotice(newApi) },
+    summary: { total: keys.length, active: keys.filter((key) => key.status === 'active').length, disabled: keys.filter((key) => key.status === 'disabled').length, expiring: keys.filter((key) => key.expiryState === 'expiring').length },
+    options: { owners, purposes: [...new Set(keys.map((key) => key.purpose))], models: [...new Set(keys.flatMap((key) => key.models))] },
+    connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '员工只使用平台地址和个人 Key；不得接触管理凭据或上游密钥。' },
+    items: filtered.slice(start, start + query.pageSize), page: query.page, pageSize: query.pageSize, total: filtered.length,
+  }
+}
+
+export function createDatabaseKeyDetail(database: PlatformDatabase, id: string, now = new Date()): KeyDetailResponse | null {
+  const key = createDatabaseKeys(database, { search: '', owner: 'all', purpose: 'all', model: 'all', status: 'all', page: 1, pageSize: 50 }, { state: 'offline', authConfigured: false, checkedAt: now.toISOString() }, now).items.find((item) => item.id === id)
+  if (!key) return null
+  const row = database.listApiKeys().find((item) => item.id === id)
+  return {
+    meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai' },
+    key: { ...key, createdAt: row?.createdAt ?? now.toISOString(), deviceNote: '本地演示设备', allowedIps: ['未限制'], limits: { rpm: 60, tpm: 120_000, concurrent: 4 } },
+    connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '复制非敏感配置后，由员工自行填写仅属于本人的 Key。', instructions: ['Base URL 指向统一 New API 入口', '模型填写已授权的业务别名', 'API Key 仅在员工自己的客户端中保存', '认证失败时先确认 Key 状态与到期时间'] },
   }
 }

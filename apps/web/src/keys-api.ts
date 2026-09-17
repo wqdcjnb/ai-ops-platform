@@ -14,7 +14,7 @@ const keyListItemSchema = z.object({
 const connectionSchema = z.object({ baseUrl: z.string().url(), note: z.string() })
 
 export const keysResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), active: z.number().int().nonnegative(), disabled: z.number().int().nonnegative(), expiring: z.number().int().nonnegative() }),
   options: z.object({ owners: z.array(z.object({ id: z.string(), name: z.string() })), purposes: z.array(z.string()), models: z.array(z.string()) }),
   connection: connectionSchema,
@@ -22,7 +22,7 @@ export const keysResponseSchema = z.object({
 })
 
 export const keyDetailResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai') }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai') }),
   key: keyListItemSchema.extend({
     createdAt: z.string(), deviceNote: z.string(), allowedIps: z.array(z.string()),
     limits: z.object({ rpm: z.number().int().positive(), tpm: z.number().int().positive(), concurrent: z.number().int().positive() }),
@@ -34,6 +34,20 @@ export type KeyFilters = z.infer<typeof keyFiltersSchema>
 export type KeysResponse = z.infer<typeof keysResponseSchema>
 export type KeyListItem = KeysResponse['items'][number]
 export type KeyDetailResponse = z.infer<typeof keyDetailResponseSchema>
+export const keyCreateBodySchema = z.object({
+  ownerId: z.string().regex(/^person-[a-z0-9-]+$/).max(96),
+  purpose: z.string().trim().min(2).max(40),
+  models: z.array(z.string().trim().min(2).max(64)).min(1).max(8),
+  expiresInDays: z.number().int().min(1).max(365),
+  deviceNote: z.string().trim().max(120),
+})
+export const keyCreateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
+  secret: z.string().min(20),
+})
+export type KeyCreateBody = z.infer<typeof keyCreateBodySchema>
+export type KeyCreateResponse = z.infer<typeof keyCreateResponseSchema>
 
 export class KeysApiError extends Error {
   constructor(message: string, readonly requestId?: string) { super(message); this.name = 'KeysApiError' }
@@ -57,4 +71,17 @@ export function fetchKeys(filters: KeyFilters, signal?: AbortSignal) {
 
 export function fetchKeyDetail(id: string, signal?: AbortSignal) {
   return getResource(`/api/keys/${encodeURIComponent(id)}`, keyDetailResponseSchema, signal)
+}
+
+export async function createKey(payload: KeyCreateBody): Promise<KeyCreateResponse> {
+  const body = keyCreateBodySchema.parse(payload)
+  const response = await fetch('/api/keys', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new KeysApiError(detail?.error?.message ?? '创建 Key 失败', requestId)
+  }
+  const result = keyCreateResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new KeysApiError('创建 Key 响应格式不符合接口约定', requestId)
+  return result.data
 }

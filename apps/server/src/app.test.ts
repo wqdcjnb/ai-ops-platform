@@ -25,7 +25,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(1)
+    expect(body.migrationVersion).toBe(2)
     expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events']))
   })
 
@@ -190,10 +190,31 @@ describe('BFF', () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/keys?owner=person-lin&status=active&pageSize=10' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta.source).toBe('demo')
+    expect(body.meta.source).toBe('database')
     expect(body.items).toHaveLength(2)
     expect(body.items.every((key: { masked: string; owner: { id: string } }) => key.owner.id === 'person-lin' && key.masked.includes('••••••'))).toBe(true)
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey/i)
+  })
+
+  it('allows administrators to create a masked Key and shows the secret only once', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = login.headers['set-cookie']
+    const created = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie }, payload: { ownerId: 'person-lin', purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'], expiresInDays: 30, deviceNote: '本地演示设备' } })
+    expect(created.statusCode).toBe(201)
+    expect(created.json().secret).toMatch(/^sk-ops-/)
+    expect(created.json().key.masked).toContain('••••••')
+    expect(created.json().key.masked).not.toContain(created.json().secret)
+
+    const listed = await app.inject({ method: 'GET', url: `/api/keys?search=${encodeURIComponent('大促文案')}`, headers: { cookie } })
+    expect(listed.statusCode).toBe(200)
+    expect(listed.json().items[0]).toMatchObject({ purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'] })
+    expect(JSON.stringify(listed.json())).not.toContain(created.json().secret)
+
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: employeeLogin.headers['set-cookie'] }, payload: { ownerId: 'person-lin', purpose: '越权 Key', models: ['ecommerce-general'], expiresInDays: 30, deviceNote: '测试' } })
+    expect(employeeCreate.statusCode).toBe(403)
   })
 
   it('returns safe Key detail configuration and stable not-found errors', async () => {

@@ -54,6 +54,7 @@ const migrationSql = [
     summary_json TEXT NOT NULL,
     occurred_at TEXT NOT NULL
   );`,
+  `ALTER TABLE api_keys ADD COLUMN models_json TEXT NOT NULL DEFAULT '["ecommerce-general"]';`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -100,6 +101,7 @@ export interface PlatformApiKeySeed {
   purpose: string
   status: 'active' | 'expiring' | 'revoked'
   expiresAt?: string | null
+  models?: string[]
 }
 
 export interface PlatformQuotaPolicySeed {
@@ -128,6 +130,15 @@ export interface PlatformPersonCreate {
   displayName: string
   departmentId: string
   password: string
+}
+
+export interface PlatformApiKeyCreate {
+  id: string
+  ownerUserId: string
+  maskedValue: string
+  purpose: string
+  expiresAt: string
+  models: string[]
 }
 
 export function hashPlatformPassword(value: string) {
@@ -200,11 +211,11 @@ export class PlatformDatabase {
 
   seedApiKey(seed: PlatformApiKeySeed, now = this.now()) {
     const timestamp = now.toISOString()
-    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET owner_user_id = excluded.owner_user_id, masked_value = excluded.masked_value,
-      purpose = excluded.purpose, status = excluded.status, expires_at = excluded.expires_at, updated_at = excluded.updated_at`).run(
-      seed.id, seed.ownerUserId, seed.maskedValue, seed.purpose, seed.status, seed.expiresAt ?? null, timestamp, timestamp,
+      purpose = excluded.purpose, status = excluded.status, expires_at = excluded.expires_at, models_json = excluded.models_json, updated_at = excluded.updated_at`).run(
+      seed.id, seed.ownerUserId, seed.maskedValue, seed.purpose, seed.status, seed.expiresAt ?? null, JSON.stringify(seed.models ?? ['ecommerce-general']), timestamp, timestamp,
     )
   }
 
@@ -265,6 +276,40 @@ export class PlatformDatabase {
       throw error
     }
     return this.listPeople().find((item) => item.id === person.id) ?? null
+  }
+
+  listApiKeys() {
+    const rows = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
+      k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson, k.created_at AS createdAt,
+      u.display_name AS ownerName, d.id AS departmentId, d.name AS departmentName
+      FROM api_keys k JOIN users u ON u.id = k.owner_user_id
+      LEFT JOIN departments d ON d.id = u.department_id ORDER BY k.created_at DESC, k.id`).all() as Array<{
+        id: string
+        ownerUserId: string
+        maskedValue: string
+        purpose: string
+        status: 'active' | 'expiring' | 'revoked'
+        expiresAt: string | null
+        modelsJson: string
+        createdAt: string
+        ownerName: string
+        departmentId: string | null
+        departmentName: string | null
+      }>
+    return rows.map((row) => ({ ...row, models: JSON.parse(row.modelsJson) as string[] }))
+  }
+
+  ownerExists(ownerUserId: string) {
+    return Boolean(this.db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'employee' AND status = 'active' LIMIT 1").get(ownerUserId))
+  }
+
+  createApiKey(key: PlatformApiKeyCreate, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
+      key.id, key.ownerUserId, key.maskedValue, key.purpose, key.expiresAt, JSON.stringify(key.models), timestamp, timestamp,
+    )
+    return this.listApiKeys().find((item) => item.id === key.id) ?? null
   }
 
   tableCounts() {
@@ -346,11 +391,11 @@ export function seedDemoData(database: PlatformDatabase) {
   database.setUserDepartment('person-lin', 'content')
 
   const keys: PlatformApiKeySeed[] = [
-    { id: 'key-lin-1', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••7F2A', purpose: '商品文案', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z' },
-    { id: 'key-lin-2', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••3C91', purpose: '临时项目', status: 'expiring', expiresAt: '2026-10-15T15:59:59.000Z' },
-    { id: 'key-zhou-1', ownerUserId: 'person-zhou', maskedValue: 'sk-ops••••••8B14', purpose: '策略分析', status: 'active', expiresAt: '2027-01-31T15:59:59.000Z' },
-    { id: 'key-chen-1', ownerUserId: 'person-chen', maskedValue: 'sk-ops••••••6D20', purpose: '多语翻译', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z' },
-    { id: 'key-xu-1', ownerUserId: 'person-xu', maskedValue: 'sk-ops••••••A921', purpose: '回复建议', status: 'revoked', expiresAt: '2026-09-01T15:59:59.000Z' },
+    { id: 'key-lin-1', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••7F2A', purpose: '商品文案', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-copy', 'ecommerce-general'] },
+    { id: 'key-lin-2', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••3C91', purpose: '临时项目', status: 'expiring', expiresAt: '2026-10-15T15:59:59.000Z', models: ['ecommerce-copy'] },
+    { id: 'key-zhou-1', ownerUserId: 'person-zhou', maskedValue: 'sk-ops••••••8B14', purpose: '策略分析', status: 'active', expiresAt: '2027-01-31T15:59:59.000Z', models: ['ecommerce-analysis', 'ecommerce-general'] },
+    { id: 'key-chen-1', ownerUserId: 'person-chen', maskedValue: 'sk-ops••••••6D20', purpose: '多语翻译', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-translate', 'ecommerce-general'] },
+    { id: 'key-xu-1', ownerUserId: 'person-xu', maskedValue: 'sk-ops••••••A921', purpose: '回复建议', status: 'revoked', expiresAt: '2026-09-01T15:59:59.000Z', models: ['ecommerce-service'] },
   ]
   for (const key of keys) database.seedApiKey(key)
 

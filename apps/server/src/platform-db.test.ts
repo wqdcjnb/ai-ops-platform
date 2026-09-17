@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 1, checkedAt: '2026-09-17T10:00:00.000Z' })
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 2, checkedAt: '2026-09-17T10:00:00.000Z' })
     expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(1)
+    expect(database.status().migrationVersion).toBe(2)
     database.close()
   })
 
@@ -19,7 +19,7 @@ describe('platform database migrations', () => {
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
-    expect(database.status().migrationVersion).toBe(1)
+    expect(database.status().migrationVersion).toBe(2)
     database.close()
   })
 })

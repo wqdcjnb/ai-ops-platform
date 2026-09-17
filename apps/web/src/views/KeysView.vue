@@ -5,7 +5,7 @@ import {
   IconAlertTriangle, IconBan, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconDeviceDesktop,
   IconFilter, IconKey, IconKeyOff, IconRefresh, IconRotate, IconSearch, IconShieldCheck, IconSparkles, IconUser, IconX,
 } from '@tabler/icons-vue'
-import { fetchKeyDetail, fetchKeys, KeysApiError, type KeyDetailResponse, type KeyFilters, type KeyListItem, type KeysResponse } from '../keys-api'
+import { createKey, fetchKeyDetail, fetchKeys, KeysApiError, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyFilters, type KeyListItem, type KeysResponse } from '../keys-api'
 
 const route = useRoute()
 const keys = ref<KeysResponse | null>(null)
@@ -22,6 +22,12 @@ const model = ref('all')
 const status = ref<KeyFilters['status']>('all')
 const page = ref(1)
 const pageSize = 10
+const showCreate = ref(false)
+const createError = ref('')
+const isCreating = ref(false)
+const createdKey = ref<KeyCreateResponse | null>(null)
+const createForm = ref<KeyCreateBody>({ ownerId: '', purpose: '', models: ['ecommerce-general'], expiresInDays: 90, deviceNote: '本地演示设备' })
+const modelInput = ref('ecommerce-general')
 let listRequest: AbortController | null = null
 let detailRequest: AbortController | null = null
 
@@ -71,6 +77,36 @@ function applyFilters() { page.value = 1; void loadKeys() }
 function clearFilters() { search.value = ''; owner.value = 'all'; purpose.value = 'all'; model.value = 'all'; status.value = 'all'; applyFilters() }
 function goToPage(next: number) { if (next < 1 || next > totalPages.value || next === page.value) return; page.value = next; void loadKeys() }
 
+function openCreate() {
+  createError.value = ''
+  createdKey.value = null
+  createForm.value = { ownerId: keys.value?.options.owners[0]?.id ?? '', purpose: '', models: ['ecommerce-general'], expiresInDays: 90, deviceNote: '本地演示设备' }
+  modelInput.value = 'ecommerce-general'
+  showCreate.value = true
+}
+
+function closeCreate() {
+  if (isCreating.value) return
+  showCreate.value = false
+  createdKey.value = null
+  createError.value = ''
+}
+
+async function submitCreate() {
+  const models = modelInput.value.split(',').map((item) => item.trim()).filter(Boolean)
+  if (!models.length) { createError.value = '至少填写一个允许模型别名'; return }
+  isCreating.value = true
+  createError.value = ''
+  try {
+    createForm.value.models = models
+    createdKey.value = await createKey(createForm.value)
+    await loadKeys()
+  } catch (error) {
+    const requestId = error instanceof KeysApiError ? error.requestId : undefined
+    createError.value = `${error instanceof Error ? error.message : '创建 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isCreating.value = false }
+}
+
 async function openDetail(id: string) {
   detailRequest?.abort()
   const request = new AbortController()
@@ -95,10 +131,10 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
   <div class="dashboard keys-dashboard">
     <section class="page-heading">
       <div><div class="eyebrow">ACCESS CREDENTIALS</div><h1>Key 管理</h1><p>按人员、用途和模型检查访问凭据；完整 Key 永远不进入列表。</p></div>
-      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadKeys"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn create-key" disabled title="写接口、二次确认和审计完成后开放"><IconKey :size="17" />创建 Key</button></div>
+      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadKeys"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn create-key" type="button" @click="openCreate"><IconKey :size="17" />创建 Key</button></div>
     </section>
 
-    <div v-if="keys" class="source-banner"><span>DEMO</span>{{ keys.meta.notice }}</div>
+    <div v-if="keys" class="source-banner"><span>{{ keys.meta.source.toUpperCase() }}</span>{{ keys.meta.notice }}</div>
     <section class="key-summary-grid" aria-label="Key 状态摘要"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
     <section class="panel keys-main-panel">
@@ -121,7 +157,27 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
     </section>
 
     <section v-if="keys" class="panel connection-panel"><div class="connection-icon"><IconDeviceDesktop :size="22" /></div><div><h2>客户端连接规范</h2><p>{{ keys.connection.note }}</p><code>{{ keys.connection.baseUrl }}</code></div><button class="btn btn-white" @click="copyValue('Base URL', keys.connection.baseUrl)"><IconCheck v-if="copied === 'Base URL'" :size="16" /><IconCopy v-else :size="16" />{{ copied === 'Base URL' ? '已复制' : '复制 Base URL' }}</button></section>
-    <footer class="page-footer">数据来源：DEMO · Key 仅显示掩码 · 创建、停用与轮换功能尚未开放</footer>
+    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · 新建 Key 已开放（本地 SQLite）· 停用与轮换仍待接入</footer>
+
+    <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
+      <aside class="create-key-dialog" role="dialog" aria-modal="true" aria-label="创建 Key">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ createdKey ? 'Key 已创建' : '创建 Key' }}</h2></div><button class="icon-button" aria-label="关闭创建 Key" :disabled="isCreating" @click="closeCreate"><IconX :size="20" /></button></header>
+        <template v-if="createdKey">
+          <section class="created-key-success"><IconCheck :size="22" /><strong>完整 Key 仅展示这一次</strong><p>请立即复制并保存。关闭窗口后平台不会再次返回完整值。</p><div><code>{{ createdKey.secret }}</code><button class="btn btn-white" @click="copyValue('created-secret', createdKey.secret)"><IconCheck v-if="copied === 'created-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'created-secret' ? '已复制' : '复制' }}</button></div><small>{{ createdKey.key.owner.name }} · {{ createdKey.key.purpose }} · {{ dateText(createdKey.key.expiresAt) }} 到期</small></section>
+          <footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeCreate">完成</button></footer>
+        </template>
+        <form v-else class="create-key-form" @submit.prevent="submitCreate">
+          <p class="create-person-note">创建本地演示 Key。数据库仅保存掩码标识，完整值只在成功后展示一次。</p>
+          <label><span>所属人员</span><select v-model="createForm.ownerId" required><option v-for="item in keys?.options.owners ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+          <label><span>业务用途</span><input v-model="createForm.purpose" required minlength="2" maxlength="40" placeholder="例如：商品文案" /></label>
+          <label><span>允许模型（逗号分隔）</span><input v-model="modelInput" required placeholder="ecommerce-general,ecommerce-copy" /></label>
+          <label><span>有效期（天）</span><input v-model.number="createForm.expiresInDays" required min="1" max="365" type="number" /></label>
+          <label><span>设备备注</span><input v-model="createForm.deviceNote" maxlength="120" placeholder="本地演示设备" /></label>
+          <div v-if="createError" class="create-person-error"><IconAlertTriangle :size="16" />{{ createError }}</div>
+          <footer><button class="btn btn-white" type="button" :disabled="isCreating" @click="closeCreate">取消</button><button class="btn create-key" type="submit" :disabled="isCreating">{{ isCreating ? '生成中…' : '生成 Key' }}</button></footer>
+        </form>
+      </aside>
+    </div>
 
     <div v-if="selected || isDetailLoading || detailError" class="drawer-backdrop" @click.self="closeDetail">
       <aside class="key-drawer" role="dialog" aria-modal="true" aria-label="Key 详情">
