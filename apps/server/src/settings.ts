@@ -13,7 +13,7 @@ export const settingsResponseSchema = z.object({
   organization: z.object({ source: z.literal('database'), company: z.string(), departments: z.number().int().nonnegative(), people: z.number().int().nonnegative(), roles: z.array(z.object({ id: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), name: z.string(), memberCount: z.number().int().nonnegative(), dataScope: z.string(), permissionSummary: z.string(), highPrivilege: z.boolean() })) }),
   businessRules: z.object({ source: z.literal('database'), version: z.string(), verified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), value: z.string(), impact: z.string(), status: z.enum(['fixed', 'unverified']) })) }),
   connections: z.object({ source: z.literal('live'), items: z.array(z.object({ id: z.enum(['bff', 'new-api', 'cpa', 'docs']), name: z.string(), category: z.string(), url: z.string().url(), state: serviceStateSchema, credentialConfigured: z.boolean(), credentialValueAvailable: z.literal(false), checkedAt: z.string().datetime(), detail: z.string() })).length(4) }),
-  retention: z.object({ source: z.literal('database'), cleanupJobVerified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), days: z.number().int().nonnegative(), appliesTo: z.string(), cleanupState: z.enum(['not_configured', 'unverified']), minimumNecessary: z.boolean() })) }),
+  retention: z.object({ source: z.literal('database'), cleanupJobVerified: z.literal(false), syntheticMetadataExpiry: z.object({ mode: z.literal('synthetic_metadata_only'), automaticOnStartup: z.literal(true), proofRecords: z.number().int().nonnegative(), lastRun: z.object({ triggeredBy: z.literal('startup'), completedAt: z.string().datetime(), expiredRecords: z.number().int().nonnegative(), proofRecords: z.number().int().nonnegative() }).nullable(), realContentCleanup: z.literal(false), notice: z.string() }), items: z.array(z.object({ id: z.string(), label: z.string(), days: z.number().int().nonnegative(), appliesTo: z.string(), cleanupState: z.enum(['not_configured', 'unverified']), minimumNecessary: z.boolean() })) }),
   features: z.object({ source: z.literal('database'), items: z.array(z.object({ id: z.string(), label: z.string(), enabled: z.boolean(), editable: z.literal(false), reason: z.string(), risk: z.enum(['low', 'medium', 'high']) })) }),
   backup: z.object({ source: z.literal('database'), configured: z.literal(false), storageTargetConfigured: z.literal(false), lastBackupAt: z.null(), lastVerifiedAt: z.null(), lastRestoreDrillAt: z.null(), browserDownloadAllowed: z.literal(false), notice: z.string() }),
 })
@@ -38,6 +38,7 @@ export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, d
   const businessRuleItems = database.listBusinessRules()
   const featureItems = database.listFeatureFlags().map((item) => ({ ...item, enabled: item.enabled === 1, editable: false as const }))
   const retentionItems = database.listRetentionPolicies().map((item) => ({ ...item, minimumNecessary: item.minimumNecessary === 1 }))
+  const conversationCleanup = database.getConversationAuditCleanupStatus()
   const backupStatus = database.getBackupStatus()
   if (!backupStatus) throw new Error('系统备份状态尚未初始化')
   const businessRuleVersion = businessRuleItems[0]?.version ?? 'unavailable'
@@ -54,7 +55,21 @@ export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, d
     organization: { source: 'database' as const, ...organization },
     businessRules: { source: 'database' as const, version: businessRuleVersion, verified: false as const, items: businessRuleItems },
     connections: { source: 'live' as const, items: connections },
-    retention: { source: 'database' as const, cleanupJobVerified: false as const, items: retentionItems },
+    retention: {
+      source: 'database' as const,
+      cleanupJobVerified: false as const,
+      syntheticMetadataExpiry: {
+        mode: 'synthetic_metadata_only' as const,
+        automaticOnStartup: true as const,
+        proofRecords: conversationCleanup.proofRecords,
+        lastRun: conversationCleanup.lastRun,
+        realContentCleanup: false as const,
+        notice: conversationCleanup.lastRun
+          ? '启动时已检查合成对话元数据；证明仅表示 SQLite 从未存储正文，不是实际正文删除证明。'
+          : '启动时到期检查已启用；尚无需要记录的合成元数据到期证明。',
+      },
+      items: retentionItems,
+    },
     features: { source: 'database' as const, items: featureItems },
     backup: { source: 'database' as const, ...backupStatus },
   }

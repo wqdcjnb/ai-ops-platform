@@ -671,7 +671,7 @@ describe('BFF', () => {
     expect(body.summary).toMatchObject({ sections: 6, roles: 5, servicesTotal: 4, enabledFeatures: 0, backupsVerified: 0 })
     expect(body.organization).toMatchObject({ source: 'database', company: '新知科技', departments: 5, people: 12 })
     expect(body.businessRules).toMatchObject({ source: 'database', version: 'draft-v0.1' })
-    expect(body.retention).toMatchObject({ source: 'database', cleanupJobVerified: false })
+    expect(body.retention).toMatchObject({ source: 'database', cleanupJobVerified: false, syntheticMetadataExpiry: { mode: 'synthetic_metadata_only', automaticOnStartup: true, proofRecords: 1, lastRun: { triggeredBy: 'startup', expiredRecords: 0, proofRecords: 1 }, realContentCleanup: false } })
     expect(body.connections).toMatchObject({ source: 'live' })
     expect(body.connections.items.every((item: { credentialValueAvailable: boolean }) => item.credentialValueAvailable === false)).toBe(true)
     expect(body.features.source).toBe('database')
