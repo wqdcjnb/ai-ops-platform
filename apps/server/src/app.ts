@@ -13,7 +13,7 @@ import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonU
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
 import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
-import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
+import { channelCheckBodySchema, channelCheckResponseSchema, channelIdParamsSchema, channelsQuerySchema, channelsResponseSchema, createDatabaseDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
@@ -103,6 +103,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     if (path.startsWith('/api/people') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/keys') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/limits') && method !== 'GET') return ['super_admin', 'admin']
+    if (path.startsWith('/api/channels') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/people') || path.startsWith('/api/keys') || path.startsWith('/api/models') || path.startsWith('/api/channels')) return ['super_admin', 'admin', 'department_lead']
     return ['super_admin', 'admin', 'department_lead', 'finance']
   }
@@ -588,7 +589,43 @@ export function buildApp(options: BuildAppOptions = {}) {
       }
     }
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDemoChannels(request.query, newApi)
+    return createDatabaseDemoChannels(database, request.query, newApi)
+  })
+
+  app.post('/api/channels/:id/check', {
+    schema: { params: channelIdParamsSchema, body: channelCheckBodySchema, response: { 200: channelCheckResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const now = new Date()
+    const visible = createDatabaseDemoChannels(database, { source: 'demo', environment: 'all', status: 'all' }, newApi, now).items.find((item) => item.id === request.params.id)
+    if (!visible) return reply.status(404).send({ error: { code: 'CHANNEL_NOT_FOUND', message: '未找到可复检的模拟渠道', requestId: request.id } })
+    if (visible.status === 'unverified' || visible.status === 'offline' || visible.latencyMs === null || visible.successRate === null) return reply.status(400).send({ error: { code: 'CHANNEL_CHECK_UNAVAILABLE', message: '该模拟渠道缺少可复检的健康快照', requestId: request.id } })
+    const idempotencyFingerprint = createHash('sha256').update(visible.id).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.recordSyntheticChannelCheck({ channelId: visible.id, status: visible.status, latencyMs: visible.latencyMs, successRate: visible.successRate }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'channel', resourceId: visible.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          code: 'SYNTHETIC_CHECK_COMPLETED', message: '已完成本地 SQLite 模拟渠道复检；未发起真实网络探测，未调用 New API，也未记录复检原因原文。',
+          resourceName: visible.name, reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint,
+          changes: [
+            { field: 'status', label: '模拟健康状态', before: visible.status, after: visible.status, sensitive: false },
+            { field: 'checkedAt', label: '本地复检时间', before: visible.checkedAt ? '已有模拟快照' : '未检测', after: '已更新 SQLite 快照', sensitive: false },
+          ],
+        },
+      }, now)
+      const channel = createDatabaseDemoChannels(database, { source: 'demo', environment: 'all', status: 'all' }, newApi, new Date()).items.find((item) => item.id === visible.id)
+      if (!channel) return reply.status(404).send({ error: { code: 'CHANNEL_NOT_FOUND', message: '渠道状态已变化，请刷新后重试', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已更新本地 SQLite 模拟健康快照；未探测真实渠道，未调用 New API，也未变更任何配置。' },
+        channel,
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他渠道复检', requestId: request.id } })
+      throw error
+    }
   })
 
   app.get('/api/upstreams', {

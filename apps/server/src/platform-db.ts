@@ -292,6 +292,13 @@ const migrationSql = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS channel_health_snapshots (
+    channel_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK (status IN ('healthy', 'degraded', 'offline')),
+    latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+    success_rate REAL NOT NULL CHECK (success_rate >= 0 AND success_rate <= 100),
+    checked_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -409,6 +416,18 @@ export interface PlatformRoutePolicyOverride {
 }
 
 export interface PlatformRoutePolicyOverrideUpdateResult extends PlatformRoutePolicyOverride {
+  idempotent: boolean
+}
+
+export interface PlatformSyntheticChannelCheck {
+  channelId: string
+  status: 'healthy' | 'degraded' | 'offline'
+  latencyMs: number
+  successRate: number
+  checkedAt: string
+}
+
+export interface PlatformSyntheticChannelCheckResult extends PlatformSyntheticChannelCheck {
   idempotent: boolean
 }
 
@@ -1336,6 +1355,41 @@ export class PlatformDatabase {
     return { ...stored, idempotent: false }
   }
 
+  listSyntheticChannelChecks(): PlatformSyntheticChannelCheck[] {
+    return this.db.prepare(`SELECT channel_id AS channelId, status, latency_ms AS latencyMs,
+      success_rate AS successRate, checked_at AS checkedAt FROM channel_health_snapshots ORDER BY channel_id`).all() as unknown as PlatformSyntheticChannelCheck[]
+  }
+
+  recordSyntheticChannelCheck(check: Omit<PlatformSyntheticChannelCheck, 'checkedAt'>, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformSyntheticChannelCheckResult {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listSyntheticChannelChecks().find((item) => item.channelId === check.channelId) ?? null
+    if (previousOperation) {
+      const previousSummary = JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown }
+      if (previousOperation.resourceId !== auditEvent.resourceId || previousSummary.idempotencyFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = current()
+      if (!stored) throw new Error('CHANNEL_CHECK_NOT_FOUND')
+      return { ...stored, idempotent: true }
+    }
+    const checkedAt = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO channel_health_snapshots(channel_id, status, latency_ms, success_rate, checked_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(channel_id) DO UPDATE SET status = excluded.status, latency_ms = excluded.latency_ms,
+        success_rate = excluded.success_rate, checked_at = excluded.checked_at`).run(
+        check.channelId, check.status, check.latencyMs, check.successRate, checkedAt,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = current()
+    if (!stored) throw new Error('CHANNEL_CHECK_NOT_FOUND')
+    return { ...stored, idempotent: false }
+  }
+
   listAuditEvents() {
     const rows = this.db.prepare(`SELECT a.id, a.actor_user_id AS actorUserId, u.display_name AS actorName, u.role AS actorRole,
       a.action, a.resource_type AS resourceType, a.resource_id AS resourceId, a.result, a.request_id AS requestId,
@@ -1688,6 +1742,7 @@ export class PlatformDatabase {
       apiKeys: count('api_keys'),
       quotaPolicies: count('quota_policies'),
       routePolicyOverrides: count('route_policy_overrides'),
+      channelHealthSnapshots: count('channel_health_snapshots'),
       auditEvents: count('audit_events'),
       usageRequests: count('usage_requests'),
       alertRules: count('alert_rules'),

@@ -3,7 +3,7 @@ import type { AuditChainVerification, PlatformDatabase } from './platform-db.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
-const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert', 'conversation'])
+const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'channel', 'export', 'settings', 'alert', 'conversation'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
 const integritySchema = z.object({
@@ -116,7 +116,7 @@ export function createDemoAuditDetail(id: string, now = new Date()) {
 }
 
 const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', logout: '退出登录', access: '访问被拒绝', create: '创建', update: '更新', disable: '停用', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', view: '查看' }
-const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', authorization: '权限校验', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', export: '数据导出', settings: '系统设置', alert: '告警事件', conversation: '对话审计记录' }
+const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', authorization: '权限校验', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', channel: '模型渠道', export: '数据导出', settings: '系统设置', alert: '告警事件', conversation: '对话审计记录' }
 const auditSummarySchema = z.object({
   code: z.string().trim().min(1).max(64).optional(),
   message: z.string().trim().min(1).max(240).optional(),
@@ -140,6 +140,7 @@ function databaseResourceName(type: AuditEvent['resource']['type'], id: string, 
   if (type === 'key' && summary.resourceName && maskedKeyPattern.test(summary.resourceName)) return summary.resourceName
   if (type === 'conversation' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (type === 'route' && summary.resourceName) return redactAuditText(summary.resourceName)
+  if (type === 'channel' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (id === 'key-lin-1') return 'sk-ops••••••7F2A'
   if (id === 'quota-content-month') return '内容运营 · 月度软目标'
   if (id === 'export-usage-01') return '近 30 天调用日志'

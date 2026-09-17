@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const modelsQuerySchema = z.object({
   source: z.enum(['demo', 'new_api']).default('demo'),
@@ -63,12 +64,30 @@ export const channelsResponseSchema = z.object({
   total: z.number().int().nonnegative(),
 })
 
+export const channelIdParamsSchema = z.object({
+  id: z.string().regex(/^channel-[a-z0-9-]+$/),
+})
+
+export const channelCheckBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^channel-check-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeSynthetic: z.literal(true),
+})
+
+export const channelCheckResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  channel: channelItemSchema,
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export type ModelsQuery = z.infer<typeof modelsQuerySchema>
 export type ChannelsQuery = z.infer<typeof channelsQuerySchema>
 export type ModelsResponse = z.infer<typeof modelsResponseSchema>
 export type ChannelsResponse = z.infer<typeof channelsResponseSchema>
 export type ModelItem = z.infer<typeof modelItemSchema>
 export type ChannelItem = z.infer<typeof channelItemSchema>
+export type ChannelCheckBody = z.infer<typeof channelCheckBodySchema>
+export type ChannelCheckResponse = z.infer<typeof channelCheckResponseSchema>
 
 const pricedAt = '2026-09-15T00:00:00.000Z'
 const demoModels: ModelItem[] = [
@@ -106,7 +125,20 @@ export function createDemoModels(query: ModelsQuery, newApi: NewApiStatus, now =
 }
 
 export function createDemoChannels(query: ChannelsQuery, newApi: NewApiStatus, now = new Date()): ChannelsResponse {
-  const all = createChannels(now)
+  return createChannelsResponse(query, newApi, createChannels(now), now, 0)
+}
+
+export function createDatabaseDemoChannels(database: PlatformDatabase, query: ChannelsQuery, newApi: NewApiStatus, now = new Date()): ChannelsResponse {
+  const snapshots = new Map(database.listSyntheticChannelChecks().map((item) => [item.channelId, item]))
+  const all = createChannels(now).map((item) => {
+    const snapshot = snapshots.get(item.id)
+    return snapshot ? { ...item, status: snapshot.status, latencyMs: snapshot.latencyMs, successRate: snapshot.successRate, checkedAt: snapshot.checkedAt } : item
+  })
+  return createChannelsResponse(query, newApi, all, now, snapshots.size)
+}
+
+function createChannelsResponse(query: ChannelsQuery, newApi: NewApiStatus, all: ChannelItem[], now: Date, localSnapshotCount: number): ChannelsResponse {
   const items = all.filter((item) => (query.environment === 'all' || item.environment === query.environment) && (query.status === 'all' || item.status === query.status))
-  return { meta: { source: 'demo', generatedAt: now.toISOString(), notice: noticeFor(newApi, '渠道健康'), healthCacheSeconds: 30 }, summary: { total: all.length, healthy: all.filter((item) => item.status === 'healthy').length, degraded: all.filter((item) => item.status === 'degraded').length, offline: all.filter((item) => item.status === 'offline').length }, items, total: items.length }
+  const localNotice = localSnapshotCount > 0 ? `；其中 ${localSnapshotCount} 条为 SQLite 本地模拟复检快照。` : ''
+  return { meta: { source: 'demo', generatedAt: now.toISOString(), notice: `${noticeFor(newApi, '渠道健康')}${localNotice}`, healthCacheSeconds: 30 }, summary: { total: all.length, healthy: all.filter((item) => item.status === 'healthy').length, degraded: all.filter((item) => item.status === 'degraded').length, offline: all.filter((item) => item.status === 'offline').length }, items, total: items.length }
 }

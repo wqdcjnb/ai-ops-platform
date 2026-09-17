@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { IconAlertTriangle, IconBrain, IconChevronRight, IconCircleCheck, IconClock, IconCoin, IconFlask, IconGauge, IconRefresh, IconSearch, IconServer2, IconShieldCheck, IconX } from '@tabler/icons-vue'
-import { fetchChannels, fetchModels, ModelsApiError, type CatalogSource, type ChannelFilters, type ChannelItem, type ChannelsResponse, type ModelFilters, type ModelItem, type ModelsResponse } from '../models-api'
+import { checkSyntheticChannel, fetchChannels, fetchModels, ModelsApiError, type CatalogSource, type ChannelCheckBody, type ChannelFilters, type ChannelItem, type ChannelsResponse, type ModelFilters, type ModelItem, type ModelsResponse } from '../models-api'
 
 const source = ref<CatalogSource>('demo')
 const models = ref<ModelsResponse | null>(null)
@@ -16,6 +16,11 @@ const channelEnvironment = ref<ChannelFilters['environment']>('all')
 const channelStatus = ref<ChannelFilters['status']>('all')
 const isLoading = ref(false)
 const errorMessage = ref('')
+const showChannelCheck = ref(false)
+const isCheckingChannel = ref(false)
+const channelCheckError = ref('')
+const channelCheckResult = ref('')
+const channelCheckForm = ref<ChannelCheckBody>({ idempotencyKey: '', reason: '', acknowledgeSynthetic: true })
 const drawerClose = ref<HTMLButtonElement | null>(null)
 let previousFocus: HTMLElement | null = null
 let request: AbortController | null = null
@@ -48,10 +53,32 @@ function resetFilters() {
 function clearFilters() { resetFilters(); void loadData() }
 function changeSource(value: CatalogSource) { if (value !== source.value) { source.value = value; resetFilters(); void loadData() } }
 function closeDrawer() { selectedModel.value = null; selectedChannel.value = null; previousFocus?.focus(); previousFocus = null }
+function openChannelCheck() {
+  if (!selectedChannel.value || isLive.value) return
+  channelCheckForm.value = { idempotencyKey: `channel-check-${crypto.randomUUID()}`, reason: '', acknowledgeSynthetic: true }
+  channelCheckError.value = ''
+  showChannelCheck.value = true
+}
+async function saveChannelCheck() {
+  if (!selectedChannel.value || isLive.value) return
+  channelCheckError.value = ''
+  isCheckingChannel.value = true
+  try {
+    const result = await checkSyntheticChannel(selectedChannel.value.id, channelCheckForm.value)
+    selectedChannel.value = result.channel
+    if (channels.value) channels.value = { ...channels.value, items: channels.value.items.map((item) => item.id === result.channel.id ? result.channel : item) }
+    channelCheckResult.value = result.operation.idempotent ? '此模拟复检已完成，快照保持不变。' : '本地模拟复检已完成；未探测真实渠道或调用 New API。'
+    showChannelCheck.value = false
+  } catch (error) {
+    const requestId = error instanceof ModelsApiError ? error.requestId : undefined
+    channelCheckError.value = `${error instanceof Error ? error.message : '本地模拟复检失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isCheckingChannel.value = false }
+}
 async function openDetail(item: ModelItem | ChannelItem, kind: 'model' | 'channel') {
   previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   selectedModel.value = kind === 'model' ? item as ModelItem : null
   selectedChannel.value = kind === 'channel' ? item as ChannelItem : null
+  channelCheckResult.value = ''
   await nextTick(); drawerClose.value?.focus()
 }
 function trapFocus(event: KeyboardEvent) {
@@ -90,7 +117,7 @@ onBeforeUnmount(() => request?.abort())
   <div class="dashboard models-dashboard">
     <section class="page-heading">
       <div><h1>模型与渠道</h1><p>查看模型目录、用途关联与渠道状态。</p></div>
-      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="手动探测尚未开放"><IconGauge :size="16" />重新检测</button></div>
+      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : selectedChannel ? '更新本地模拟健康快照' : '请先打开一条模拟渠道详情'" @click="openChannelCheck"><IconGauge :size="16" />模拟复检</button></div>
     </section>
     <section class="catalog-source-control panel" aria-label="数据来源">
       <div><strong>数据来源</strong><p>{{ isLive ? '只读取 New API 已保存的配置，空列表表示尚未配置。仅管理员可查看。' : '供开发和功能演示使用，无需真实上游账号或调用流量。' }}</p></div>
@@ -132,7 +159,7 @@ onBeforeUnmount(() => request?.abort())
         <div v-if="channels.items.length" class="channel-card-grid"><button v-for="item in channels.items" :key="item.id" :aria-label="'查看 ' + item.name + ' 渠道详情'" @click="openDetail(item, 'channel')"><div class="channel-card-head"><span class="channel-health-dot" :class="'status-' + item.status" /><div><strong>{{ item.name }}</strong><small>{{ item.provider }} · {{ channelStatusText[item.status] }}</small></div><span class="environment-tag" :class="item.environment">{{ environmentText[item.environment] }}</span></div><div class="channel-metrics"><span><small>成功率</small><strong>{{ rateText(item.successRate) }}</strong></span><span><small>P95 延迟</small><strong>{{ latencyText(item.latencyMs) }}</strong></span><span><small>余额</small><strong :class="'balance-' + item.balanceState">{{ balanceText[item.balanceState] }}</strong></span></div><div class="channel-card-foot"><span v-if="item.recentError" class="channel-error"><IconAlertTriangle :size="13" />{{ errorText[item.recentError.category] }} · {{ item.recentError.summary }}</span><span v-else :class="isLive ? 'catalog-unknown' : 'channel-ok'">{{ isLive ? '尚未接入调用健康数据' : '模拟检查无异常' }}</span><IconChevronRight :size="15" /></div></button></div>
         <div v-else class="people-empty"><IconServer2 :size="24" /><strong>{{ channels.summary.total === 0 ? 'New API 暂无渠道配置' : '没有符合条件的渠道' }}</strong><span>{{ channels.summary.total === 0 ? '当前未配置上游渠道，可先使用模拟数据完成开发与验收。' : '调整渠道环境或状态后重试。' }}</span><button v-if="channels.summary.total > 0" class="text-button" @click="clearFilters">清除筛选</button></div>
       </section>
-      <footer class="page-footer">数据来源：{{ sourceLabel }} · 手动检测和配置修改尚未开放</footer>
+      <footer class="page-footer">数据来源：{{ sourceLabel }} · {{ isLive ? '真实探测和配置修改尚未开放' : '可更新本地模拟复检快照；不探测真实渠道' }}</footer>
     </template>
 
     <div v-if="selectedModel || selectedChannel" class="drawer-backdrop" @click.self="closeDrawer" @keydown.esc="closeDrawer"><aside class="model-drawer" role="dialog" aria-modal="true" :aria-label="selectedModel ? '模型详情' : '渠道详情'" @keydown="trapFocus">
@@ -148,9 +175,19 @@ onBeforeUnmount(() => request?.abort())
         <section class="channel-detail-metrics"><article><small>成功率</small><strong>{{ rateText(selectedChannel.successRate) }}</strong></article><article><small>P95 延迟</small><strong>{{ latencyText(selectedChannel.latencyMs) }}</strong></article><article><small>余额状态</small><strong>{{ balanceText[selectedChannel.balanceState] }}</strong></article></section>
         <section class="drawer-section"><h3>限流与检查</h3><dl class="model-facts"><div><dt>RPM</dt><dd>{{ numberText(selectedChannel.rateLimits.rpm) }}</dd></div><div><dt>TPM</dt><dd>{{ numberText(selectedChannel.rateLimits.tpm) }}</dd></div><div><dt>凭据状态</dt><dd>{{ selectedChannel.credentialConfigured === null ? '未提供' : selectedChannel.credentialConfigured ? '已配置' : '未配置' }}</dd></div><div><dt>最近检查</dt><dd>{{ timeText(selectedChannel.checkedAt) }}</dd></div><div><dt>关联模型</dt><dd>{{ selectedChannel.modelIds.length }} 个</dd></div></dl></section>
         <section class="drawer-section"><h3>最近错误</h3><div v-if="selectedChannel.recentError" class="channel-error-detail"><IconAlertTriangle :size="18" /><div><strong>{{ errorText[selectedChannel.recentError.category] }}</strong><p>{{ selectedChannel.recentError.summary }}</p><small>{{ timeText(selectedChannel.recentError.occurredAt) }}</small></div></div><p v-else class="price-note">{{ isLive ? '调用错误数据尚未接入，暂无检查结论。' : '模拟检查未发现异常。' }}</p></section>
-        <section class="safe-probe-note"><IconShieldCheck :size="18" /><span><strong>只读详情</strong>仅展示配置摘要和已验证字段，管理凭据不会出现在页面中。</span></section>
+        <section class="safe-probe-note"><IconShieldCheck :size="18" /><span><strong>{{ isLive ? '只读详情' : '本地模拟边界' }}</strong>{{ isLive ? '仅展示配置摘要和已验证字段，管理凭据不会出现在页面中。' : '复检只会更新本地 SQLite 模拟快照，不会访问渠道、使用凭据或变更配置。' }}</span></section>
+        <p v-if="channelCheckResult" class="channel-check-success">{{ channelCheckResult }}</p>
       </template>
-      <footer class="drawer-actions"><button class="btn btn-white" disabled><IconClock :size="16" />历史记录</button><button class="btn" disabled><IconRefresh :size="16" />重新检测</button></footer>
+      <footer class="drawer-actions"><button class="btn btn-white" disabled title="完整复检历史暂未开放；可在审计日志中按“模型渠道”筛选"><IconClock :size="16" />审计日志</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : '更新本地模拟健康快照'" @click="openChannelCheck"><IconRefresh :size="16" />模拟复检</button></footer>
+    </aside></div>
+
+    <div v-if="showChannelCheck && selectedChannel" class="drawer-backdrop" @click.self="showChannelCheck = false"><aside class="model-drawer channel-check-dialog" role="dialog" aria-modal="true" aria-label="本地模拟渠道复检"><header><div><span class="source-tag demo">本地模拟</span><h2>模拟渠道复检</h2></div><button class="icon-button" aria-label="关闭模拟复检" :disabled="isCheckingChannel" @click="showChannelCheck = false"><IconX :size="20" /></button></header>
+      <form class="channel-check-form" @submit.prevent="saveChannelCheck"><div class="channel-check-heading"><strong>{{ selectedChannel.name }}</strong><span>{{ selectedChannel.provider }} · {{ environmentText[selectedChannel.environment] }}</span><p>将刷新 SQLite 中的合成健康快照；不会对任何上游发起请求。</p></div>
+        <label><span>复检说明（只校验长度，不保存原文）</span><textarea v-model.trim="channelCheckForm.reason" required maxlength="200" placeholder="例如：确认本地演示渠道健康状态展示"></textarea></label>
+        <label class="channel-check-ack"><input v-model="channelCheckForm.acknowledgeSynthetic" type="checkbox" /><span>我确认：这是本地模拟复检，不调用 New API、不访问真实渠道，也不修改渠道配置。</span></label>
+        <p v-if="channelCheckError" class="channel-check-error">{{ channelCheckError }}</p>
+        <footer><button class="btn btn-white" type="button" :disabled="isCheckingChannel" @click="showChannelCheck = false">取消</button><button class="btn" type="submit" :disabled="isCheckingChannel || !channelCheckForm.acknowledgeSynthetic"><IconGauge :size="16" />{{ isCheckingChannel ? '复检中…' : '更新本地快照' }}</button></footer>
+      </form>
     </aside></div>
   </div>
 </template>
@@ -176,6 +213,7 @@ onBeforeUnmount(() => request?.abort())
 .catalog-unknown { color: var(--muted); }
 .catalog-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .model-drawer-hero strong, .model-drawer-hero code { overflow-wrap: anywhere; }
+.channel-check-success { margin: 0 18px 13px; padding: 9px 10px; border: 1px solid #b9dfc0; border-radius: 6px; color: #2f6240; background: #f1faf2; font-size: 12px; line-height: 1.5; }.channel-check-dialog { width: min(500px, 100vw); }.channel-check-form { display: grid; gap: 15px; padding: 18px; }.channel-check-heading { display: grid; gap: 4px; padding: 12px; border: 1px solid #cfe2e4; border-radius: 7px; color: #526a73; background: #f2f9f9; }.channel-check-heading strong { color: #36545e; font-size: 14px; }.channel-check-heading span { font-size: 12px; }.channel-check-heading p { margin: 2px 0 0; font-size: 12px; line-height: 1.55; }.channel-check-form label { display: grid; gap: 7px; }.channel-check-form label > span { color: #687b86; font-size: 12px; font-weight: 650; }.channel-check-form textarea { width: 100%; min-height: 78px; padding: 10px; resize: vertical; border: 1px solid #d8e1e5; border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 13px/1.5 inherit; }.channel-check-form textarea:focus { border-color: #19808a; box-shadow: 0 0 0 2px rgba(25,128,138,.08); }.channel-check-ack { display: flex !important; grid-template-columns: 16px minmax(0, 1fr); align-items: flex-start; gap: 8px !important; color: #536873; font-size: 12px; line-height: 1.5; }.channel-check-ack input { margin: 2px 0 0; accent-color: var(--brand); }.channel-check-error { margin: -3px 0 0; padding: 9px 10px; border-radius: 6px; color: #a33232; background: #fff1f1; font-size: 12px; line-height: 1.5; }.channel-check-form footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
 @media (max-width: 850px) { .catalog-source-control { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 480px) { .catalog-source-buttons { width: 100%; } .catalog-source-buttons button { flex: 1; } }
 </style>

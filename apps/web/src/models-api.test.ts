@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { channelFiltersSchema, channelsResponseSchema, modelFiltersSchema, modelsResponseSchema } from './models-api'
+import { channelCheckBodySchema, channelCheckResponseSchema, channelFiltersSchema, channelsResponseSchema, modelFiltersSchema, modelsResponseSchema } from './models-api'
 
 const model = { id: 'model-1', displayName: '模型', provider: 'Provider', actualModel: 'model-1', aliases: ['ecommerce-copy'], capabilities: ['text'], contextWindow: 128000, region: '中国区', environment: 'production', status: 'available', pricing: { inputPerMillion: 1, outputPerMillion: 2, currency: 'USD', basis: 'official', updatedAt: '2026-09-15T00:00:00.000Z' }, purposes: [{ name: '文案', alias: 'ecommerce-copy', role: 'primary' }], channelIds: ['channel-1'] }
 const channel = { id: 'channel-1', name: 'Official 01', provider: 'Provider', type: 'official_api', environment: 'production', status: 'healthy', modelIds: ['model-1'], latencyMs: 1000, successRate: 99, balanceState: 'sufficient', rateLimits: { rpm: 100, tpm: 100000 }, recentError: null, checkedAt: '2026-09-15T10:00:00.000Z', credentialConfigured: true }
@@ -19,5 +19,12 @@ describe('model and channel API contracts', () => {
     expect(channelsResponseSchema.safeParse(channels).success).toBe(true)
     expect(modelsResponseSchema.safeParse({ ...models, items: [{ ...model, pricing: { ...model.pricing, basis: 'guess' } }] }).success).toBe(false)
     expect(channelsResponseSchema.safeParse({ ...channels, items: [{ ...channel, credentialConfigured: 'yes' }] }).success).toBe(false)
+  })
+
+  it('validates acknowledged local synthetic channel checks', () => {
+    const body = { idempotencyKey: 'channel-check-1a2b3c4d', reason: '确认本地模拟渠道复检界面与健康快照', acknowledgeSynthetic: true }
+    expect(channelCheckBodySchema.safeParse(body).success).toBe(true)
+    expect(channelCheckBodySchema.safeParse({ ...body, acknowledgeSynthetic: false }).success).toBe(false)
+    expect(channelCheckResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地模拟' }, channel, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-channel-check-1a2b3c4d' } }).success).toBe(true)
   })
 })

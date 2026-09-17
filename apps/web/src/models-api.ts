@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 export const catalogSourceSchema = z.enum(['demo', 'new_api'])
 export const modelFiltersSchema = z.object({ source: catalogSourceSchema.default('demo'), search: z.string().max(60), capability: z.enum(['all', 'text', 'reasoning', 'translation', 'vision', 'batch']), environment: z.enum(['all', 'production', 'experiment', 'unassigned']), status: z.enum(['all', 'available', 'degraded', 'unavailable', 'unverified']) })
@@ -13,6 +14,8 @@ export const channelItemSchema = z.object({
 })
 export const modelsResponseSchema = z.object({ meta: z.object({ source: catalogSourceSchema, generatedAt: z.string().datetime(), notice: z.string() }), summary: z.object({ total: z.number().int().nonnegative(), available: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), production: z.number().int().nonnegative(), experiment: z.number().int().nonnegative() }), options: z.object({ capabilities: z.array(z.object({ id: z.enum(['text', 'reasoning', 'translation', 'vision', 'batch']), label: z.string() })) }), items: z.array(modelItemSchema), total: z.number().int().nonnegative() })
 export const channelsResponseSchema = z.object({ meta: z.object({ source: catalogSourceSchema, generatedAt: z.string().datetime(), notice: z.string(), healthCacheSeconds: z.number().int().nonnegative() }), summary: z.object({ total: z.number().int().nonnegative(), healthy: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }), items: z.array(channelItemSchema), total: z.number().int().nonnegative() })
+export const channelCheckBodySchema = z.object({ idempotencyKey: z.string().regex(/^channel-check-[a-z0-9-]{8,96}$/), reason: z.string().trim().min(8).max(200), acknowledgeSynthetic: z.literal(true) })
+export const channelCheckResponseSchema = z.object({ meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string() }), channel: channelItemSchema, operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }) })
 
 export type ModelFilters = z.input<typeof modelFiltersSchema>
 export type ChannelFilters = z.input<typeof channelFiltersSchema>
@@ -21,6 +24,8 @@ export type ModelsResponse = z.infer<typeof modelsResponseSchema>
 export type ChannelsResponse = z.infer<typeof channelsResponseSchema>
 export type ModelItem = z.infer<typeof modelItemSchema>
 export type ChannelItem = z.infer<typeof channelItemSchema>
+export type ChannelCheckBody = z.infer<typeof channelCheckBodySchema>
+export type ChannelCheckResponse = z.infer<typeof channelCheckResponseSchema>
 
 export class ModelsApiError extends Error {
   constructor(message: string, readonly requestId?: string) { super(message); this.name = 'ModelsApiError' }
@@ -52,4 +57,19 @@ export function fetchModels(filters: ModelFilters, signal?: AbortSignal) {
 export function fetchChannels(filters: ChannelFilters, signal?: AbortSignal) {
   const value = channelFiltersSchema.parse(filters)
   return getResource(`/api/channels?${new URLSearchParams(value)}`, channelsResponseSchema, signal)
+}
+
+export async function checkSyntheticChannel(id: string, payload: ChannelCheckBody): Promise<ChannelCheckResponse> {
+  const body = channelCheckBodySchema.parse(payload)
+  const response = await fetch(`/api/channels/${encodeURIComponent(id)}/check`, {
+    method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body),
+  })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new ModelsApiError(detail?.error?.message ?? '本地模拟复检失败', requestId)
+  }
+  const parsed = channelCheckResponseSchema.safeParse(await response.json().catch(() => null))
+  if (!parsed.success) throw new ModelsApiError('本地模拟复检响应格式不符合接口约定', requestId)
+  return parsed.data
 }
