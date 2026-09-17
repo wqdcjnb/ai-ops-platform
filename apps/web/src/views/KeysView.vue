@@ -5,7 +5,7 @@ import {
   IconAlertTriangle, IconBan, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconDeviceDesktop,
   IconFilter, IconKey, IconKeyOff, IconRefresh, IconRotate, IconSearch, IconShieldCheck, IconSparkles, IconUser, IconX,
 } from '@tabler/icons-vue'
-import { createKey, disableKey, fetchKeyDetail, fetchKeys, KeysApiError, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyDisableBody, type KeyFilters, type KeyListItem, type KeysResponse } from '../keys-api'
+import { createKey, disableKey, fetchKeyDetail, fetchKeys, KeysApiError, rotateKey, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyDisableBody, type KeyFilters, type KeyListItem, type KeyRotateBody, type KeyRotateResponse, type KeysResponse } from '../keys-api'
 
 const route = useRoute()
 const keys = ref<KeysResponse | null>(null)
@@ -31,6 +31,11 @@ const disableError = ref('')
 const disableSuccess = ref('')
 const isDisabling = ref(false)
 const disableForm = ref<KeyDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
+const showRotate = ref(false)
+const rotateError = ref('')
+const isRotating = ref(false)
+const rotatedKey = ref<KeyRotateResponse | null>(null)
+const rotateForm = ref<KeyRotateBody>({ idempotencyKey: '', reason: '', expiresInDays: 90, acknowledgeImpact: true })
 const createForm = ref<KeyCreateBody>({ ownerId: '', purpose: '', models: ['ecommerce-general'], expiresInDays: 90, deviceNote: '本地演示设备' })
 const modelInput = ref('ecommerce-general')
 let listRequest: AbortController | null = null
@@ -148,6 +153,26 @@ async function submitDisable() {
     disableError.value = `${error instanceof Error ? error.message : '停用 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
   } finally { isDisabling.value = false }
 }
+function newRotateIdempotencyKey() { return `key-rotate-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function openRotate() {
+  if (!selected.value || selected.value.key.status === 'disabled') return
+  rotateError.value = ''; rotatedKey.value = null
+  rotateForm.value = { idempotencyKey: newRotateIdempotencyKey(), reason: '', expiresInDays: 90, acknowledgeImpact: true }
+  showRotate.value = true
+}
+function closeRotate() { if (!isRotating.value) { showRotate.value = false; rotateError.value = ''; rotatedKey.value = null } }
+async function submitRotate() {
+  if (!selected.value) return
+  isRotating.value = true; rotateError.value = ''
+  try {
+    rotatedKey.value = await rotateKey(selected.value.key.id, rotateForm.value)
+    await loadKeys()
+    selected.value = await fetchKeyDetail(selected.value.key.id)
+  } catch (error) {
+    const requestId = error instanceof KeysApiError ? error.requestId : undefined
+    rotateError.value = `${error instanceof Error ? error.message : '轮换 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isRotating.value = false }
+}
 
 onMounted(() => void loadKeys())
 onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
@@ -183,7 +208,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
     </section>
 
     <section v-if="keys" class="panel connection-panel"><div class="connection-icon"><IconDeviceDesktop :size="22" /></div><div><h2>客户端连接规范</h2><p>{{ keys.connection.note }}</p><code>{{ keys.connection.baseUrl }}</code></div><button class="btn btn-white" @click="copyValue('Base URL', keys.connection.baseUrl)"><IconCheck v-if="copied === 'Base URL'" :size="16" /><IconCopy v-else :size="16" />{{ copied === 'Base URL' ? '已复制' : '复制 Base URL' }}</button></section>
-    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · 新建与停用 Key 仅作用于本地 SQLite 演示数据 · 轮换仍待接入</footer>
+    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · 新建、停用与轮换 Key 仅作用于本地 SQLite 演示数据</footer>
 
     <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
       <aside class="create-key-dialog" role="dialog" aria-modal="true" aria-label="创建 Key">
@@ -214,7 +239,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
           <dl class="drawer-facts"><div><dt>所属人员</dt><dd><RouterLink :to="`/people/${selected.key.owner.id}`">{{ selected.key.owner.name }}</RouterLink></dd></div><div><dt>所属部门</dt><dd>{{ selected.key.owner.department }}</dd></div><div><dt>用途</dt><dd>{{ selected.key.purpose }}</dd></div><div><dt>设备备注</dt><dd>{{ selected.key.deviceNote }}</dd></div><div><dt>创建时间</dt><dd>{{ dateText(selected.key.createdAt) }}</dd></div><div><dt>到期时间</dt><dd>{{ dateText(selected.key.expiresAt) }}</dd></div><div><dt>来源限制</dt><dd>{{ selected.key.allowedIps.join('、') }}</dd></div><div><dt>限流</dt><dd>{{ selected.key.limits.rpm }} RPM · {{ (selected.key.limits.tpm / 1000).toFixed(0) }}K TPM · {{ selected.key.limits.concurrent }} 并发</dd></div></dl>
           <section class="drawer-section"><h3>允许模型</h3><div class="drawer-models"><span v-for="entry in selected.key.models" :key="entry">{{ entry }}</span></div></section>
           <section class="drawer-section"><h3>连接说明</h3><div class="drawer-copy-row"><code>{{ selected.connection.baseUrl }}</code><button @click="copyValue('drawer-url', selected.connection.baseUrl)"><IconCheck v-if="copied === 'drawer-url'" :size="14" /><IconCopy v-else :size="14" /></button></div><ol><li v-for="instruction in selected.connection.instructions" :key="instruction">{{ instruction }}</li></ol></section>
-          <footer class="drawer-actions"><button class="btn btn-white" disabled><IconRotate :size="16" />轮换 Key</button><button class="btn danger-outline" :disabled="selected.key.status === 'disabled'" @click="openDisable"><IconBan :size="16" />{{ selected.key.status === 'disabled' ? '已停用' : '停用 Key' }}</button></footer>
+          <footer class="drawer-actions"><button class="btn btn-white" :disabled="selected.key.status === 'disabled'" @click="openRotate"><IconRotate :size="16" />{{ selected.key.status === 'disabled' ? '无法轮换' : '轮换 Key' }}</button><button class="btn danger-outline" :disabled="selected.key.status === 'disabled'" @click="openDisable"><IconBan :size="16" />{{ selected.key.status === 'disabled' ? '已停用' : '停用 Key' }}</button></footer>
         </template>
       </aside>
     </div>
@@ -224,6 +249,14 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
         <header><div><span class="source-tag demo">SQLITE</span><h2>停用本地演示 Key</h2></div><button class="icon-button" aria-label="关闭停用 Key" :disabled="isDisabling" @click="closeDisable"><IconX :size="20" /></button></header>
         <template v-if="disableSuccess"><section class="created-key-success"><IconCheck :size="22" /><strong>Key 已停用</strong><p>{{ disableSuccess }}</p></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
         <form v-else class="create-key-form" @submit.prevent="submitDisable"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 将只在本地 SQLite 中标为停用。不会调用 New API、不会撤销真实凭据，当前页面也不提供恢复操作。</p><label><span>停用原因 <em>至少 8 个字符</em></span><textarea v-model="disableForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：复核疑似泄露的本地演示设备" /></label><label class="access-ack"><input v-model="disableForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该操作会立即改变本地演示 Key 状态，并写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="disableError" class="create-person-error"><IconAlertTriangle :size="16" />{{ disableError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDisabling" @click="closeDisable">取消</button><button class="btn danger-outline" type="submit" :disabled="isDisabling || disableForm.reason.trim().length < 8 || !disableForm.acknowledgeImpact">{{ isDisabling ? '停用中…' : '确认停用' }}</button></footer></form>
+      </aside>
+    </div>
+
+    <div v-if="showRotate && selected" class="drawer-backdrop" @click.self="closeRotate">
+      <aside class="create-key-dialog rotate-key-dialog" role="dialog" aria-modal="true" aria-label="轮换 Key">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ rotatedKey ? 'Key 已轮换' : '轮换本地演示 Key' }}</h2></div><button class="icon-button" aria-label="关闭轮换 Key" :disabled="isRotating" @click="closeRotate"><IconX :size="20" /></button></header>
+        <template v-if="rotatedKey"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ rotatedKey.secret ? '完整新 Key 仅展示这一次' : '轮换操作已完成' }}</strong><p>{{ rotatedKey.meta.notice }}</p><div v-if="rotatedKey.secret"><code>{{ rotatedKey.secret }}</code><button class="btn btn-white" @click="copyValue('rotated-secret', rotatedKey.secret)"><IconCheck v-if="copied === 'rotated-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'rotated-secret' ? '已复制' : '复制' }}</button></div><small>旧 Key {{ rotatedKey.oldKey.masked }} 已停用 · 新 Key {{ rotatedKey.key.masked }} · {{ dateText(rotatedKey.key.expiresAt) }} 到期</small></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeRotate">完成</button></footer></template>
+        <form v-else class="create-key-form" @submit.prevent="submitRotate"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 会立即在本地 SQLite 中停用，并生成继承同一人员、用途和允许模型的新 Key。不会调用 New API 或修改真实凭据；完整新 Key 仅在首次成功响应中显示。</p><label><span>新有效期（天）</span><input v-model.number="rotateForm.expiresInDays" required min="1" max="365" type="number" /></label><label><span>轮换原因 <em>至少 8 个字符</em></span><textarea v-model="rotateForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示 Key 即将到期，按周期轮换" /></label><label class="access-ack"><input v-model="rotateForm.acknowledgeImpact" type="checkbox" /><span>我已确认：旧 Key 会立即停用；新 Key 的完整值只展示一次；操作会写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="rotateError" class="create-person-error"><IconAlertTriangle :size="16" />{{ rotateError }}</div><footer><button class="btn btn-white" type="button" :disabled="isRotating" @click="closeRotate">取消</button><button class="btn create-key" type="submit" :disabled="isRotating || rotateForm.reason.trim().length < 8 || !rotateForm.acknowledgeImpact">{{ isRotating ? '轮换中…' : '确认轮换' }}</button></footer></form>
       </aside>
     </div>
   </div>

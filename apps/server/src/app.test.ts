@@ -431,6 +431,45 @@ describe('BFF', () => {
     expect(withoutCsrf.statusCode).toBe(403)
   })
 
+  it('rotates a local demo Key atomically and only returns the replacement secret once', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { idempotencyKey: 'key-rotate-1a2b3c4d', reason: '本地演示 Key 即将到期，按周期轮换', expiresInDays: 90, acknowledgeImpact: true }
+    const rotated = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/rotate', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(rotated.statusCode).toBe(200)
+    const first = rotated.json()
+    expect(first).toMatchObject({ meta: { source: 'database', secretAvailable: true }, oldKey: { id: 'key-lin-1', masked: 'sk-ops••••••7F2A', status: 'disabled' }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-key-rotate-1a2b3c4d' } })
+    expect(first.key.id).toMatch(/^key-lin-rotate-[a-f0-9]{11}-[0-9]$/)
+    expect(first.secret).toMatch(/^sk-ops-/)
+    expect(first.key.masked).not.toContain(first.secret)
+
+    const oldDetail = await app.inject({ method: 'GET', url: '/api/keys/key-lin-1', headers: { cookie } })
+    const newDetail = await app.inject({ method: 'GET', url: `/api/keys/${first.key.id}`, headers: { cookie } })
+    expect(oldDetail.json().key.status).toBe('disabled')
+    expect(newDetail.json().key).toMatchObject({ status: 'active', owner: { id: 'person-lin' }, purpose: '商品文案' })
+    const replay = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/rotate', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({ meta: { secretAvailable: false }, key: { id: first.key.id }, secret: null, operation: { idempotent: true } })
+    const reused = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/rotate', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reused.statusCode).toBe(409)
+    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+    const changedExpiry = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/rotate', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, expiresInDays: 30 } })
+    expect(changedExpiry.statusCode).toBe(409)
+    expect(changedExpiry.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=rotate&resource=key', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'rotate', resource: expect.objectContaining({ id: 'key-lin-1', name: 'sk-ops••••••7F2A' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'status', before: '启用', after: '停用' }), expect.objectContaining({ field: 'secret', sensitive: true })]) })]))
+    expect(JSON.stringify({ rotated: first, audit: audit.json() })).not.toContain(body.reason)
+    expect(JSON.stringify(audit.json())).not.toContain(first.secret)
+
+    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/rotate', headers: { cookie }, payload: { ...body, idempotencyKey: 'key-rotate-5e6f7g8h' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+  })
+
   it('returns safe Key detail configuration and stable not-found errors', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/keys/key-lin-1' })
     const body = response.json()

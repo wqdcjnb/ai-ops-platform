@@ -85,6 +85,21 @@ export const keyDisableResponseSchema = z.object({
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
 
+export const keyRotateBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^key-rotate-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  expiresInDays: z.coerce.number().int().min(1).max(365),
+  acknowledgeImpact: z.literal(true),
+})
+
+export const keyRotateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string(), secretAvailable: z.boolean() }),
+  oldKey: z.object({ id: z.string(), masked: z.string(), status: z.literal('disabled') }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string().datetime() }),
+  secret: z.string().min(20).nullable(),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export type KeysQuery = z.infer<typeof keysQuerySchema>
 export type KeysResponse = z.infer<typeof keysResponseSchema>
 export type KeyDetailResponse = z.infer<typeof keyDetailResponseSchema>
@@ -92,6 +107,8 @@ export type KeyCreateBody = z.infer<typeof keyCreateBodySchema>
 export type KeyCreateResponse = z.infer<typeof keyCreateResponseSchema>
 export type KeyDisableBody = z.infer<typeof keyDisableBodySchema>
 export type KeyDisableResponse = z.infer<typeof keyDisableResponseSchema>
+export type KeyRotateBody = z.infer<typeof keyRotateBodySchema>
+export type KeyRotateResponse = z.infer<typeof keyRotateResponseSchema>
 
 interface KeySeed {
   id: string

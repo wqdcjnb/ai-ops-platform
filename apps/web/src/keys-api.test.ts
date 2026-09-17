@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyFiltersSchema, keysResponseSchema } from './keys-api'
+import { keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyFiltersSchema, keyRotateBodySchema, keyRotateResponseSchema, keysResponseSchema } from './keys-api'
 
 describe('Key API contracts', () => {
   it('rejects invalid list filters', () => {
@@ -23,5 +23,11 @@ describe('Key API contracts', () => {
     expect(keyDisableBodySchema.safeParse({ idempotencyKey: 'key-disable-1a2b3c4d', reason: '复核疑似泄露的本地演示设备', acknowledgeImpact: true }).success).toBe(true)
     expect(keyDisableBodySchema.safeParse({ idempotencyKey: 'short', reason: '太短', acknowledgeImpact: false }).success).toBe(false)
     expect(keyDisableResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地演示' }, key: { id: 'key-lin-1', masked: 'sk-ops••••••7F2A', status: 'disabled' }, operation: { idempotencyKey: 'key-disable-1a2b3c4d', idempotent: false, auditEventId: 'audit-key-disable-1a2b3c4d' } }).success).toBe(true)
+  })
+
+  it('accepts a one-time local Key rotation response and rejects an invalid acknowledgement', () => {
+    expect(keyRotateBodySchema.safeParse({ idempotencyKey: 'key-rotate-1a2b3c4d', reason: '本地演示 Key 即将到期，按周期轮换', expiresInDays: 90, acknowledgeImpact: true }).success).toBe(true)
+    expect(keyRotateBodySchema.safeParse({ idempotencyKey: 'key-rotate-short', reason: '太短', expiresInDays: 0, acknowledgeImpact: false }).success).toBe(false)
+    expect(keyRotateResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地演示', secretAvailable: true }, oldKey: { id: 'key-lin-1', masked: 'sk-ops••••••7F2A', status: 'disabled' }, key: { id: 'key-lin-rotate-abcdef12345-6', masked: 'sk-ops••••••ABCD', owner: { id: 'person-lin', name: '林筱雨', department: '内容运营' }, purpose: '商品文案', models: ['ecommerce-copy'], expiresAt: '2026-12-31T00:00:00.000Z' }, secret: 'sk-ops-demo-secret-value-123456', operation: { idempotencyKey: 'key-rotate-1a2b3c4d', idempotent: false, auditEventId: 'audit-key-rotate-1a2b3c4d' } }).success).toBe(true)
   })
 })

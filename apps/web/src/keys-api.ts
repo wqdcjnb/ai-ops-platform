@@ -57,10 +57,25 @@ export const keyDisableResponseSchema = z.object({
   key: z.object({ id: z.string(), masked: z.string(), status: z.literal('disabled') }),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
+export const keyRotateBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^key-rotate-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  expiresInDays: z.number().int().min(1).max(365),
+  acknowledgeImpact: z.literal(true),
+})
+export const keyRotateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string(), secretAvailable: z.boolean() }),
+  oldKey: z.object({ id: z.string(), masked: z.string(), status: z.literal('disabled') }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
+  secret: z.string().min(20).nullable(),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
 export type KeyCreateBody = z.infer<typeof keyCreateBodySchema>
 export type KeyCreateResponse = z.infer<typeof keyCreateResponseSchema>
 export type KeyDisableBody = z.infer<typeof keyDisableBodySchema>
 export type KeyDisableResponse = z.infer<typeof keyDisableResponseSchema>
+export type KeyRotateBody = z.infer<typeof keyRotateBodySchema>
+export type KeyRotateResponse = z.infer<typeof keyRotateResponseSchema>
 
 export class KeysApiError extends Error {
   constructor(message: string, readonly requestId?: string) { super(message); this.name = 'KeysApiError' }
@@ -109,5 +124,18 @@ export async function disableKey(id: string, payload: KeyDisableBody): Promise<K
   }
   const result = keyDisableResponseSchema.safeParse(await response.json())
   if (!result.success) throw new KeysApiError('停用 Key 响应格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function rotateKey(id: string, payload: KeyRotateBody): Promise<KeyRotateResponse> {
+  const body = keyRotateBodySchema.parse(payload)
+  const response = await fetch(`/api/keys/${encodeURIComponent(id)}/rotate`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new KeysApiError(detail?.error?.message ?? '轮换 Key 失败', requestId)
+  }
+  const result = keyRotateResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new KeysApiError('轮换 Key 响应格式不符合接口约定', requestId)
   return result.data
 }

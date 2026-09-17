@@ -2,7 +2,7 @@ import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { LogController } from 'fastify'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import { createDatabaseOverview, overviewResponseSchema, periodSchema } from './overview.js'
@@ -10,7 +10,7 @@ import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } fro
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
 import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
-import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
+import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
@@ -394,6 +394,50 @@ export function buildApp(options: BuildAppOptions = {}) {
       return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已停用本地 SQLite 演示 Key；未调用 New API 或修改真实凭据。' }, key: { id: result.key.id, masked: result.key.maskedValue, status: 'disabled' as const }, operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
     } catch (error) {
       if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一条 Key', requestId: request.id } })
+      throw error
+    }
+  })
+
+  app.post('/api/keys/:id/rotate', {
+    schema: { params: keyIdParamsSchema, body: keyRotateBodySchema, response: { 200: keyRotateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const visible = createDatabaseKeyDetail(database, request.params.id, new Date(), dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'KEY_NOT_FOUND', message: '未找到指定 Key', requestId: request.id } })
+    const digest = createHash('sha256').update(request.body.idempotencyKey).digest('hex')
+    const rotationId = `key-${visible.key.owner.id.replace(/^person-/, '')}-rotate-${digest.slice(0, 11)}-${Number.parseInt(digest.slice(11, 12), 16) % 10}`
+    const idempotencyFingerprint = createHash('sha256').update(`${request.params.id}:${request.body.expiresInDays}`).digest('hex')
+    const secret = `sk-ops-${randomBytes(24).toString('base64url')}`
+    const expiresAt = new Date(Date.now() + request.body.expiresInDays * 86_400_000).toISOString()
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.rotateApiKey(request.params.id, {
+        id: rotationId, ownerUserId: visible.key.owner.id, maskedValue: `sk-ops••••••${secret.slice(-4).toUpperCase()}`,
+        purpose: visible.key.purpose, expiresAt, models: visible.key.models,
+      }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'rotate', resourceType: 'key', resourceId: request.params.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          message: '已轮换本地 SQLite 演示 Key；旧 Key 已停用，未调用 New API，未记录完整 Key 或轮换原因原文。', resourceName: visible.key.masked,
+          reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint,
+          changes: [
+            { field: 'status', label: '旧 Key 状态', before: '启用', after: '停用', sensitive: false },
+            { field: 'replacement', label: '替换 Key', before: null, after: `已创建 ${`sk-ops••••••${secret.slice(-4).toUpperCase()}`}`, sensitive: false },
+            { field: 'secret', label: '密钥内容', before: '旧值不记录', after: '新值仅首次响应返回', sensitive: true },
+          ],
+        },
+      })
+      if (!result) return reply.status(404).send({ error: { code: 'KEY_NOT_FOUND', message: '未找到指定 Key', requestId: request.id } })
+      if (result.state === 'already_disabled' || !result.newKey || !result.newKey.departmentName || !result.newKey.expiresAt) return reply.status(409).send({ error: { code: 'KEY_ALREADY_DISABLED', message: '该 Key 已停用，无法执行轮换', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), secretAvailable: !result.idempotent, notice: result.idempotent ? '该轮换操作已完成；为保护凭据，完整新 Key 不会再次返回。' : '已轮换本地 SQLite 演示 Key；旧 Key 已停用，完整新 Key 仅在本次响应中返回一次。' },
+        oldKey: { id: result.oldKey.id, masked: result.oldKey.maskedValue, status: 'disabled' as const },
+        key: { id: result.newKey.id, masked: result.newKey.maskedValue, owner: { id: result.newKey.ownerUserId, name: result.newKey.ownerName, department: result.newKey.departmentName }, purpose: result.newKey.purpose, models: result.newKey.models, expiresAt: result.newKey.expiresAt },
+        secret: result.idempotent ? null : secret,
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一条 Key', requestId: request.id } })
+      if (error instanceof Error && /UNIQUE constraint failed: api_keys\.id/i.test(error.message)) return reply.status(409).send({ error: { code: 'KEY_ID_CONFLICT', message: 'Key 编号冲突，请使用新的操作编号重试', requestId: request.id } })
       throw error
     }
   })

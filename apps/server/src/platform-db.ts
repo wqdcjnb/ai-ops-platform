@@ -459,6 +459,13 @@ export interface PlatformApiKeyDisableResult {
   key: ReturnType<PlatformDatabase['listApiKeys']>[number]
 }
 
+export interface PlatformApiKeyRotateResult {
+  state: 'rotated' | 'already_disabled'
+  idempotent: boolean
+  oldKey: ReturnType<PlatformDatabase['listApiKeys']>[number]
+  newKey?: ReturnType<PlatformDatabase['listApiKeys']>[number]
+}
+
 export interface PlatformConversationAccessCreate {
   id: string
   actorUserId: string
@@ -1124,6 +1131,38 @@ export class PlatformDatabase {
     }
     const key = current()
     return key ? { state: 'disabled', idempotent: false, key } : null
+  }
+
+  rotateApiKey(keyId: string, replacement: PlatformApiKeyCreate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyRotateResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = (id: string) => this.listApiKeys().find((item) => item.id === id) ?? null
+    if (previousOperation) {
+      const previousFingerprint = (JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown }).idempotencyFingerprint
+      if (previousOperation.resourceId !== keyId || previousFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const oldKey = current(keyId)
+      const newKey = current(replacement.id)
+      return oldKey && newKey ? { state: 'rotated', idempotent: true, oldKey, newKey } : null
+    }
+    const oldKey = current(keyId)
+    if (!oldKey) return null
+    if (oldKey.status === 'revoked') return { state: 'already_disabled', idempotent: false, oldKey }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
+        replacement.id, replacement.ownerUserId, replacement.maskedValue, replacement.purpose, replacement.expiresAt, JSON.stringify(replacement.models), timestamp, timestamp,
+      )
+      this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ?").run(timestamp, keyId)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const rotatedOldKey = current(keyId)
+    const newKey = current(replacement.id)
+    return rotatedOldKey && newKey ? { state: 'rotated', idempotent: false, oldKey: rotatedOldKey, newKey } : null
   }
 
   listQuotaPolicies() {
