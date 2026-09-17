@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { peopleFilterSchema, peopleResponseSchema, personDetailResponseSchema } from './people-api'
+import { peopleFilterSchema, peopleResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema } from './people-api'
 
 describe('people API contracts', () => {
   it('rejects unsafe pagination values', () => {
@@ -29,5 +29,11 @@ describe('people API contracts', () => {
       profile: {}, metrics: {}, keys: [{ id: 'key-1', purpose: '测试', status: 'active', models: [], expiresAt: '2027-01-01T00:00:00.000Z', lastUsedAt: null }], models: [],
     })
     expect(result.success).toBe(false)
+  })
+
+  it('requires acknowledgement and an operation number to disable a local person', () => {
+    expect(personDisableBodySchema.safeParse({ idempotencyKey: 'person-disable-1a2b3c4d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true }).success).toBe(true)
+    expect(personDisableBodySchema.safeParse({ idempotencyKey: 'short', reason: '太短', acknowledgeImpact: false }).success).toBe(false)
+    expect(personDisableResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地演示' }, person: { id: 'person-lin', name: '林筱雨', status: 'disabled' }, keysDisabled: 2, operation: { idempotencyKey: 'person-disable-1a2b3c4d', idempotent: false, auditEventId: 'audit-person-disable-1a2b3c4d' } }).success).toBe(true)
   })
 })

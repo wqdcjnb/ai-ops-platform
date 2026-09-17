@@ -23,7 +23,7 @@ import {
   IconSparkles,
   IconUser,
 } from '@tabler/icons-vue'
-import { fetchPersonDetail, fetchPersonUsage, PeopleApiError, type PersonDetailResponse, type PersonUsagePeriod, type PersonUsageResponse } from '../people-api'
+import { disablePerson, fetchPersonDetail, fetchPersonUsage, PeopleApiError, type PersonDetailResponse, type PersonDisableBody, type PersonDisableResponse, type PersonUsagePeriod, type PersonUsageResponse } from '../people-api'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -35,6 +35,11 @@ const period = ref<PersonUsagePeriod>('7d')
 const isLoading = ref(false)
 const isUsageLoading = ref(false)
 const errorMessage = ref('')
+const showDisable = ref(false)
+const disableError = ref('')
+const isDisabling = ref(false)
+const disableResult = ref<PersonDisableResponse | null>(null)
+const disableForm = ref<PersonDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
 const chartElement = ref<HTMLElement | null>(null)
 let activeRequest: AbortController | null = null
 let usageRequest: AbortController | null = null
@@ -144,6 +149,26 @@ async function changePeriod(nextPeriod: PersonUsagePeriod) {
   }
 }
 
+function newDisableIdempotencyKey() { return `person-disable-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function openDisable() {
+  if (!detail.value || detail.value.profile.status === 'disabled') return
+  disableError.value = ''; disableResult.value = null
+  disableForm.value = { idempotencyKey: newDisableIdempotencyKey(), reason: '', acknowledgeImpact: true }
+  showDisable.value = true
+}
+function closeDisable() { if (!isDisabling.value) { showDisable.value = false; disableError.value = ''; disableResult.value = null } }
+async function submitDisable() {
+  if (!detail.value) return
+  isDisabling.value = true; disableError.value = ''
+  try {
+    disableResult.value = await disablePerson(detail.value.profile.id, disableForm.value)
+    await loadPerson()
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    disableError.value = `${error instanceof Error ? error.message : '停用人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isDisabling.value = false }
+}
+
 onMounted(() => void loadPerson())
 onBeforeUnmount(() => {
   activeRequest?.abort()
@@ -171,10 +196,10 @@ onBeforeUnmount(() => {
           <p>{{ detail.profile.department.name }} · {{ detail.profile.title }} · 负责人 {{ detail.profile.manager }}</p>
           <div><span><IconRoute :size="14" />{{ detail.profile.purpose }}</span><span><IconKey :size="14" />{{ detail.profile.keyCount }} 个访问 Key</span><span><IconClock :size="14" />{{ relativeTime(detail.profile.lastActiveAt) }}</span></div>
         </div>
-        <div class="person-hero-actions"><span>更新于 {{ updatedAt }}</span><button class="btn btn-white" :disabled="isLoading" @click="loadPerson"><IconRefresh :size="16" :class="{ spinning: isLoading }" />刷新</button><button class="btn danger-outline" disabled title="写接口和审计完成后开放"><IconBan :size="16" />停用人员</button></div>
+        <div class="person-hero-actions"><span>更新于 {{ updatedAt }}</span><button class="btn btn-white" :disabled="isLoading" @click="loadPerson"><IconRefresh :size="16" :class="{ spinning: isLoading }" />刷新</button><button class="btn danger-outline" :disabled="detail.profile.status === 'disabled'" @click="openDisable"><IconBan :size="16" />{{ detail.profile.status === 'disabled' ? '人员已停用' : '停用人员' }}</button></div>
       </section>
 
-      <div class="source-banner detail-source"><span>DEMO</span>{{ detail.meta.notice }}</div>
+      <div class="source-banner detail-source"><span>{{ detail.meta.source.toUpperCase() }}</span>{{ detail.meta.notice }}</div>
 
       <section class="person-metric-grid" aria-label="个人核心指标">
         <article v-for="metric in metrics" :key="metric.label" class="metric-card">
@@ -209,10 +234,18 @@ onBeforeUnmount(() => {
 
       <section class="person-bottom-grid">
         <article class="panel allowed-models-panel"><div class="panel-header"><div><h2>允许模型</h2><p>客户端使用业务别名，不接触实际渠道</p></div><IconSparkles :size="18" /></div><div class="allowed-model-list"><div v-for="model in detail.models" :key="model.alias" :class="{ blocked: !model.allowed }"><span><IconCheck v-if="model.allowed" :size="15" /><IconShieldLock v-else :size="15" /></span><div><strong>{{ model.alias }}<em :class="{ experiment: model.type === 'experiment' }">{{ model.type === 'experiment' ? '实验' : '正式' }}</em></strong><small>{{ model.name }} · {{ model.purpose }}</small></div><b>{{ model.allowed ? '允许' : '未授权' }}</b></div></div></article>
-        <article class="panel management-boundary"><div class="panel-header"><div><h2>管理操作</h2><p>当前阶段保持只读</p></div><IconShieldLock :size="18" /></div><div class="boundary-copy"><strong>写操作尚未开放</strong><p>停用人员、调整软目标和回收 Key 必须具备服务端授权、二次确认、幂等处理及操作审计。</p><button class="btn btn-white" disabled>调整软目标</button><button class="btn danger-outline" disabled>停用并回收 Key</button></div></article>
+        <article class="panel management-boundary"><div class="panel-header"><div><h2>管理操作</h2><p>仅开放本地模拟人员停用</p></div><IconShieldLock :size="18" /></div><div class="boundary-copy"><strong>停用会同时回收关联 Key</strong><p>操作要求管理员、CSRF、原因确认和幂等编号；只影响 SQLite 模拟人员与 Key，不调用 New API。</p><button class="btn btn-white" disabled>调整软目标</button><button class="btn danger-outline" :disabled="detail.profile.status === 'disabled'" @click="openDisable">{{ detail.profile.status === 'disabled' ? '人员已停用' : '停用并回收 Key' }}</button></div></article>
       </section>
 
-      <footer class="page-footer">数据来源：DEMO · 人员详情与趋势均为演示契约 · 完整 Key 从不返回浏览器</footer>
+      <footer class="page-footer">数据来源：{{ detail.meta.source.toUpperCase() }} · 人员状态与 Key 回收可写入本地 SQLite · 完整 Key 从不返回浏览器</footer>
     </template>
+
+    <div v-if="showDisable && detail" class="drawer-backdrop" @click.self="closeDisable">
+      <aside class="create-person-dialog disable-person-dialog" role="dialog" aria-modal="true" aria-label="停用人员">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>停用本地演示人员</h2></div><button class="icon-button" aria-label="关闭停用人员" :disabled="isDisabling" @click="closeDisable">×</button></header>
+        <template v-if="disableResult"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ disableResult.person.name }} 已停用</strong><p>{{ disableResult.meta.notice }}</p><small>已回收 {{ disableResult.keysDisabled }} 个仍有效 Key；审计不保存原因原文。</small></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
+        <form v-else class="create-person-form" @submit.prevent="submitDisable"><p class="create-person-note"><strong>{{ detail.profile.name }}</strong> 会在本地 SQLite 中标为停用，并立即回收其所有仍有效 Key。其后续本地登录和已有会话访问会被拒绝；不会调用 New API 或修改真实账户。</p><label><span>停用原因 <em>至少 8 个字符</em></span><textarea v-model="disableForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示账号已完成测试，需要停用" /></label><label class="access-ack"><input v-model="disableForm.acknowledgeImpact" type="checkbox" /><span>我已确认：人员状态和关联 Key 会立即改变，操作会写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="disableError" class="create-person-error"><IconAlertTriangle :size="16" />{{ disableError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDisabling" @click="closeDisable">取消</button><button class="btn danger-outline" type="submit" :disabled="isDisabling || disableForm.reason.trim().length < 8 || !disableForm.acknowledgeImpact">{{ isDisabling ? '停用中…' : '确认停用并回收 Key' }}</button></footer></form>
+      </aside>
+    </div>
   </div>
 </template>

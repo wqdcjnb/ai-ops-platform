@@ -444,6 +444,13 @@ export interface PlatformPersonCreate {
   password: string
 }
 
+export interface PlatformPersonDisableResult {
+  state: 'disabled' | 'already_disabled'
+  idempotent: boolean
+  person: ReturnType<PlatformDatabase['listPeople']>[number]
+  keysDisabled: number
+}
+
 export interface PlatformApiKeyCreate {
   id: string
   ownerUserId: string
@@ -1034,6 +1041,35 @@ export class PlatformDatabase {
       throw error
     }
     return this.listPeople().find((item) => item.id === person.id) ?? null
+  }
+
+  disablePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonDisableResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listPeople().find((item) => item.id === personId) ?? null
+    if (previousOperation) {
+      if (previousOperation.resourceId !== personId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const person = current()
+      const keysDisabled = (JSON.parse(previousOperation.summaryJson) as { keysDisabled?: unknown }).keysDisabled
+      const replayKeyCount = typeof keysDisabled === 'number' && Number.isInteger(keysDisabled) && keysDisabled >= 0 ? keysDisabled : 0
+      return person ? { state: 'disabled', idempotent: true, person, keysDisabled: replayKeyCount } : null
+    }
+    const person = current()
+    if (!person) return null
+    if (person.status === 'disabled') return { state: 'already_disabled', idempotent: false, person, keysDisabled: 0 }
+    const keysDisabled = (this.db.prepare("SELECT COUNT(*) AS count FROM api_keys WHERE owner_user_id = ? AND status <> 'revoked'").get(personId) as { count: number }).count
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare("UPDATE users SET status = 'disabled', updated_at = ? WHERE id = ? AND role = 'employee'").run(timestamp, personId)
+      this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE owner_user_id = ? AND status <> 'revoked'").run(timestamp, personId)
+      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, keysDisabled } }, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const disabledPerson = current()
+    return disabledPerson ? { state: 'disabled', idempotent: false, person: disabledPerson, keysDisabled } : null
   }
 
   listApiKeys() {

@@ -9,7 +9,7 @@ import { createDatabaseOverview, overviewResponseSchema, periodSchema } from './
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
-import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
+import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
@@ -283,6 +283,34 @@ export function buildApp(options: BuildAppOptions = {}) {
       if (error instanceof Error && /UNIQUE constraint failed: users\.username/i.test(error.message)) {
         return reply.status(409).send({ error: { code: 'USERNAME_CONFLICT', message: '用户名已存在，请更换后重试', requestId: request.id } })
       }
+      throw error
+    }
+  })
+
+  app.post('/api/people/:id/disable', {
+    schema: { params: personIdParamsSchema, body: personDisableBodySchema, response: { 200: personDisableResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const visible = createDatabasePersonDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.disablePerson(request.params.id, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'disable', resourceType: 'person', resourceId: request.params.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          message: '已停用本地 SQLite 演示人员并回收其仍有效 Key；未调用 New API，未记录停用原因原文。', resourceName: visible.profile.name,
+          reasonProvided: true, reasonLength: request.body.reason.length,
+          changes: [
+            { field: 'status', label: '人员状态', before: '在职', after: '停用', sensitive: false },
+            { field: 'keys', label: '关联 Key', before: '仍有效', after: '已回收（数量见操作结果）', sensitive: false },
+          ],
+        },
+      })
+      if (!result) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
+      if (result.state === 'already_disabled') return reply.status(409).send({ error: { code: 'PERSON_ALREADY_DISABLED', message: '该人员已停用，请勿重复提交新的操作', requestId: request.id } })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已停用本地 SQLite 演示人员并回收其仍有效 Key；该人员后续本地登录和会话访问会被拒绝。' }, person: { id: result.person.id, name: result.person.displayName, status: 'disabled' as const }, keysDisabled: result.keysDisabled, operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一名人员', requestId: request.id } })
       throw error
     }
   })

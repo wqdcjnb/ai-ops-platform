@@ -261,7 +261,7 @@ export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery,
     return {
       id: row.id,
       masked: row.maskedValue,
-      owner: { id: row.ownerUserId, name: row.ownerName, department: row.departmentName ?? '待分配部门', initials: existing?.owner.initials ?? row.ownerName.slice(0, 2) },
+      owner: { id: row.ownerUserId, name: row.ownerName, department: row.departmentName ?? '待分配部门', initials: existing?.owner.initials ?? row.ownerName.slice(-2) },
       purpose: row.purpose,
       models: row.models.length ? row.models : existing?.models ?? ['ecommerce-general'],
       status,

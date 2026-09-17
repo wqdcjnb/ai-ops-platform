@@ -355,6 +355,42 @@ describe('BFF', () => {
     expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
   })
 
+  it('disables a local person and atomically revokes their active Keys without retaining the reason', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { idempotencyKey: 'person-disable-1a2b3c4d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true }
+    const disabled = await app.inject({ method: 'POST', url: '/api/people/person-lin/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(disabled.statusCode).toBe(200)
+    expect(disabled.json()).toMatchObject({ meta: { source: 'database' }, person: { id: 'person-lin', name: '林筱雨', status: 'disabled' }, keysDisabled: 2, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-person-disable-1a2b3c4d' } })
+
+    const person = await app.inject({ method: 'GET', url: '/api/people/person-lin', headers: { cookie } })
+    const keys = await app.inject({ method: 'GET', url: '/api/keys?owner=person-lin&status=disabled', headers: { cookie } })
+    expect(person.json().profile.status).toBe('disabled')
+    expect(person.json().keys.every((key: { status: string }) => key.status === 'disabled')).toBe(true)
+    expect(keys.json().items).toHaveLength(2)
+    expect(keys.json().items.every((key: { status: string }) => key.status === 'disabled')).toBe(true)
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    expect(employeeLogin.statusCode).toBe(401)
+
+    const replay = await app.inject({ method: 'POST', url: '/api/people/person-lin/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({ keysDisabled: 2, operation: { idempotent: true } })
+    const reused = await app.inject({ method: 'POST', url: '/api/people/person-zhou/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reused.statusCode).toBe(409)
+    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=disable&resource=person', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'disable', resource: expect.objectContaining({ id: 'person-lin', name: '林筱雨' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'status', before: '在职', after: '停用' }), expect.objectContaining({ field: 'keys' })]) })]))
+    expect(JSON.stringify({ disabled: disabled.json(), audit: audit.json() })).not.toContain(body.reason)
+
+    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/people/person-zhou/disable', headers: { cookie }, payload: { ...body, idempotencyKey: 'person-disable-5e6f7g8h' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+  })
+
   it('returns a filterable masked Key list without secret material', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/keys?owner=person-lin&status=active&pageSize=10' })
     const body = response.json()
@@ -450,6 +486,7 @@ describe('BFF', () => {
     const newDetail = await app.inject({ method: 'GET', url: `/api/keys/${first.key.id}`, headers: { cookie } })
     expect(oldDetail.json().key.status).toBe('disabled')
     expect(newDetail.json().key).toMatchObject({ status: 'active', owner: { id: 'person-lin' }, purpose: '商品文案' })
+    expect(newDetail.json().key.owner.initials).toBe('筱雨')
     const replay = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/rotate', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
     expect(replay.statusCode).toBe(200)
     expect(replay.json()).toMatchObject({ meta: { secretAvailable: false }, key: { id: first.key.id }, secret: null, operation: { idempotent: true } })

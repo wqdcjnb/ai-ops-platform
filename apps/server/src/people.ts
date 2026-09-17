@@ -78,6 +78,19 @@ export const personCreateResponseSchema = z.object({
   person: z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) }),
 })
 
+export const personDisableBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^person-disable-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+
+export const personDisableResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  person: z.object({ id: z.string(), name: z.string(), status: z.literal('disabled') }),
+  keysDisabled: z.number().int().nonnegative(),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export const personUsageQuerySchema = z.object({
   period: z.enum(['7d', '30d']).default('7d'),
 })
@@ -130,6 +143,8 @@ export type PeopleQuery = z.infer<typeof peopleQuerySchema>
 export type PeopleResponse = z.infer<typeof peopleResponseSchema>
 export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
 export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
+export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
+export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>
 export type PersonUsageResponse = z.infer<typeof personUsageResponseSchema>
 export type PersonUsagePeriod = z.infer<typeof personUsageQuerySchema>['period']
