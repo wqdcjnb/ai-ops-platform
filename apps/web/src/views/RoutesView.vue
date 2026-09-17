@@ -5,7 +5,7 @@ import {
   IconCircleCheck, IconClock, IconFilter, IconFlask, IconLock, IconRefresh, IconRoute, IconSearch,
   IconServer, IconSettings, IconShieldCheck, IconSparkles, IconX,
 } from '@tabler/icons-vue'
-import { fetchRoutes, RoutesApiError, type RouteFilters, type RouteItem, type RoutesResponse } from '../routes-api'
+import { fetchRoutes, RoutesApiError, updateLocalRoutePolicy, type RouteFilters, type RouteItem, type RoutePolicyUpdateBody, type RoutesResponse } from '../routes-api'
 
 const routes = ref<RoutesResponse | null>(null)
 const selected = ref<RouteItem | null>(null)
@@ -15,6 +15,11 @@ const environment = ref<RouteFilters['environment']>('all')
 const status = ref<RouteFilters['status']>('all')
 const isLoading = ref(false)
 const errorMessage = ref('')
+const showPolicyEdit = ref(false)
+const isSavingPolicy = ref(false)
+const policyError = ref('')
+const policyResult = ref('')
+const policyForm = ref<RoutePolicyUpdateBody>({ onTimeout: 'fail', onRateLimit: 'retry', onServerError: 'retry', maxRetries: 0, idempotencyKey: '', reason: '', acknowledgeImpact: true })
 let request: AbortController | null = null
 
 const updatedAt = computed(() => routes.value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(routes.value.meta.generatedAt)) : '等待数据')
@@ -34,6 +39,33 @@ const eventText = { fallback: '切换备用', retry: '有限重试', fail: '直�
 function filters(): RouteFilters { return { search: search.value.trim(), category: category.value, environment: environment.value, status: status.value } }
 function clearFilters() { search.value = ''; category.value = 'all'; environment.value = 'all'; status.value = 'all'; void loadRoutes() }
 function latencyText(value: number) { return value >= 1_000 ? `${(value / 1_000).toFixed(1)}s` : `${value}ms` }
+
+function openPolicyEdit() {
+  if (!selected.value) return
+  const current = selected.value.policy
+  policyForm.value = {
+    onTimeout: current.onTimeout, onRateLimit: current.onRateLimit, onServerError: current.onServerError, maxRetries: current.maxRetries,
+    idempotencyKey: `route-update-${crypto.randomUUID()}`, reason: '', acknowledgeImpact: true,
+  }
+  policyError.value = ''
+  showPolicyEdit.value = true
+}
+
+async function savePolicy() {
+  if (!selected.value) return
+  policyError.value = ''
+  isSavingPolicy.value = true
+  try {
+    const result = await updateLocalRoutePolicy(selected.value.id, policyForm.value)
+    selected.value = result.route
+    if (routes.value) routes.value = { ...routes.value, items: routes.value.items.map((item) => item.id === result.route.id ? result.route : item) }
+    policyResult.value = result.operation.idempotent ? '此操作已完成，本地策略保持不变。' : '本地策略已保存；未调用 New API 或真实路由。'
+    showPolicyEdit.value = false
+  } catch (error) {
+    const requestId = error instanceof RoutesApiError ? error.requestId : undefined
+    policyError.value = `${error instanceof Error ? error.message : '保存失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isSavingPolicy.value = false }
+}
 
 async function loadRoutes() {
   request?.abort()
@@ -55,9 +87,9 @@ onBeforeUnmount(() => request?.abort())
 
 <template>
   <div class="dashboard routes-dashboard">
-    <section class="page-heading"><div><div class="eyebrow">PURPOSE ROUTING</div><h1>用途与路由</h1><p>用稳定的业务别名连接用途、模型与渠道，并检查主备切换边界。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadRoutes"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="路由校验、审计和回滚完成后开放"><IconSettings :size="16" />配置路由</button></div></section>
+    <section class="page-heading"><div><div class="eyebrow">PURPOSE ROUTING</div><h1>用途与路由</h1><p>用稳定的业务别名连接用途、模型与渠道，并检查主备切换边界。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadRoutes"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" :disabled="!selected" :title="selected ? '调整本地模拟策略' : '请先打开一条路由详情'" @click="openPolicyEdit"><IconSettings :size="16" />配置策略</button></div></section>
 
-    <div v-if="routes" class="source-banner"><span>DEMO</span>{{ routes.meta.notice }}</div>
+    <div v-if="routes" class="source-banner"><span>{{ routes.meta.source === 'database' ? 'SQLITE' : 'DEMO' }}</span>{{ routes.meta.notice }}</div>
     <section class="route-summary-grid" aria-label="用途路由摘要"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
     <section v-if="routes" class="route-isolation-banner"><span><IconLock :size="20" /></span><div><strong>正式与实验路由已隔离</strong><p>{{ routes.isolation.message }}</p></div><div class="isolation-groups"><em>OFFICIAL · 正式</em><IconBan :size="15" /><em class="experiment">CPA LAB · 实验</em></div></section>
@@ -73,7 +105,7 @@ onBeforeUnmount(() => request?.abort())
         <footer class="table-footer"><span>显示 {{ routes.total }} 条路由</span><div><span class="environment-tag production">正式组内回退</span><span class="environment-tag experiment">实验组内回退</span></div></footer>
       </template>
     </section>
-    <footer class="page-footer">数据来源：DEMO · 客户端只能使用业务别名 · 正式与实验渠道禁止跨组回退</footer>
+    <footer class="page-footer">数据来源：{{ routes?.meta.source === 'database' ? '本地 SQLite 模拟策略' : 'DEMO' }} · 客户端只能使用业务别名 · 正式与实验渠道禁止跨组回退</footer>
 
     <div v-if="selected" class="drawer-backdrop" @click.self="selected = null"><aside class="route-drawer" role="dialog" aria-modal="true" aria-label="路由详情"><header><div><span class="environment-tag" :class="selected.environment">{{ selected.environment === 'production' ? '正式' : '实验' }}</span><h2>{{ selected.name }}</h2></div><button class="icon-button" aria-label="关闭路由详情" @click="selected = null"><IconX :size="20" /></button></header>
       <section class="route-drawer-hero"><span><IconRoute :size="21" /></span><div><small>客户端稳定别名</small><code>{{ selected.alias }}</code><p>{{ selected.description }}</p></div></section>
@@ -81,7 +113,22 @@ onBeforeUnmount(() => request?.abort())
       <section class="drawer-section"><h3>降级与熔断策略</h3><div class="policy-grid"><article><span>超时</span><strong>{{ eventText[selected.policy.onTimeout] }}</strong><small>{{ selected.policy.timeoutSeconds }} 秒</small></article><article><span>上游 429</span><strong>{{ eventText[selected.policy.onRateLimit] }}</strong><small>最多 {{ selected.policy.maxRetries }} 次</small></article><article><span>上游 5xx</span><strong>{{ eventText[selected.policy.onServerError] }}</strong><small>有限重试</small></article><article><span>熔断窗口</span><strong>{{ selected.policy.circuitBreakSeconds }} 秒</strong><small>自动恢复探测</small></article></div></section>
       <section class="drawer-section"><h3>权限与数据边界</h3><dl class="route-facts"><div><dt>数据等级</dt><dd>{{ dataClassText[selected.dataClass] }}</dd></div><div><dt>路由分组</dt><dd>{{ selected.primary.group === 'production' ? '官方正式组' : 'CPA 实验组' }}</dd></div><div><dt>客户端选渠道</dt><dd>禁止</dd></div><div><dt>跨组回退</dt><dd>禁止</dd></div></dl><div class="allowed-role-list"><span v-for="role in selected.allowedRoles" :key="role">{{ role }}</span></div></section>
       <section class="route-safety-note"><IconCircleCheck :size="17" /><span><strong>服务端强制执行</strong>客户端只提交业务别名，不能指定供应商、渠道或绕过隔离规则。</span></section>
-      <footer class="drawer-actions"><button class="btn btn-white" disabled><IconClock :size="16" />查看变更记录</button><button class="btn" disabled><IconSettings :size="16" />编辑路由</button></footer>
+      <p v-if="policyResult" class="route-policy-success">{{ policyResult }}</p>
+      <footer class="drawer-actions"><button class="btn btn-white" disabled title="审计记录可在审计日志中按“路由”筛选"><IconClock :size="16" />审计日志</button><button class="btn" @click="openPolicyEdit"><IconSettings :size="16" />调整本地策略</button></footer>
+    </aside></div>
+
+    <div v-if="showPolicyEdit && selected" class="drawer-backdrop" @click.self="showPolicyEdit = false"><aside class="create-key-dialog route-policy-dialog" role="dialog" aria-modal="true" aria-label="调整本地路由策略"><header><div><IconSettings :size="18" /><h2>调整本地策略</h2></div><button class="icon-button" aria-label="关闭本地策略调整" :disabled="isSavingPolicy" @click="showPolicyEdit = false"><IconX :size="20" /></button></header>
+      <form class="create-key-form" @submit.prevent="savePolicy"><div class="route-policy-heading"><strong>{{ selected.name }}</strong><code>{{ selected.alias }}</code><p>仅保存 SQLite 演示策略，不调用 New API，不改变真实请求、渠道或模型。</p></div>
+        <label><span>请求超时</span><select v-model="policyForm.onTimeout"><option value="fail">直接失败</option><option value="fallback" :disabled="!selected.fallbacks.length">切换同组备用</option></select></label>
+        <label><span>上游 429</span><select v-model="policyForm.onRateLimit"><option value="retry">有限重试</option><option value="fallback" :disabled="!selected.fallbacks.length">切换同组备用</option></select></label>
+        <label><span>上游 5xx</span><select v-model="policyForm.onServerError"><option value="retry">有限重试</option><option value="fallback" :disabled="!selected.fallbacks.length">切换同组备用</option></select></label>
+        <label><span>最大重试次数</span><select v-model.number="policyForm.maxRetries"><option :value="0">不重试</option><option :value="1">1 次</option><option :value="2">2 次</option><option :value="3">3 次</option></select></label>
+        <p v-if="!selected.fallbacks.length" class="route-policy-warning"><IconAlertTriangle :size="15" />此用途未设置同组备用渠道，不能选择“切换同组备用”。</p>
+        <label><span>调整说明（只校验长度，不保存原文）</span><textarea v-model.trim="policyForm.reason" maxlength="200" required placeholder="例如：本地演示需验证 429 的有限重试策略"></textarea></label>
+        <label class="access-ack"><input v-model="policyForm.acknowledgeImpact" type="checkbox" /><span>我确认：这仅影响本地 SQLite 模拟策略，正式/实验隔离与禁止跨组回退保持不变。</span></label>
+        <p v-if="policyError" class="create-person-error">{{ policyError }}</p>
+        <footer><button class="btn btn-white" type="button" :disabled="isSavingPolicy" @click="showPolicyEdit = false">取消</button><button class="btn" type="submit" :disabled="isSavingPolicy || !policyForm.acknowledgeImpact"><IconSettings :size="16" />{{ isSavingPolicy ? '保存中…' : '保存本地策略' }}</button></footer>
+      </form>
     </aside></div>
   </div>
 </template>

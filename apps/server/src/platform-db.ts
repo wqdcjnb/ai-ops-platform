@@ -283,6 +283,15 @@ const migrationSql = [
     link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed'))
   );
   CREATE INDEX IF NOT EXISTS conversation_usage_links_usage_idx ON conversation_usage_links(usage_request_id);`,
+  `CREATE TABLE IF NOT EXISTS route_policy_overrides (
+    route_id TEXT PRIMARY KEY,
+    on_timeout TEXT NOT NULL CHECK (on_timeout IN ('fallback', 'fail')),
+    on_rate_limit TEXT NOT NULL CHECK (on_rate_limit IN ('fallback', 'retry')),
+    on_server_error TEXT NOT NULL CHECK (on_server_error IN ('fallback', 'retry')),
+    max_retries INTEGER NOT NULL CHECK (max_retries BETWEEN 0 AND 3),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -378,6 +387,28 @@ export interface PlatformMonthlySoftQuotaPolicyUpdateResult {
   targetPoints: number
   mode: 'soft'
   previousTargetPoints: number
+  idempotent: boolean
+}
+
+export interface PlatformRoutePolicyOverrideUpdate {
+  routeId: string
+  onTimeout: 'fallback' | 'fail'
+  onRateLimit: 'fallback' | 'retry'
+  onServerError: 'fallback' | 'retry'
+  maxRetries: number
+}
+
+export interface PlatformRoutePolicyOverride {
+  routeId: string
+  onTimeout: PlatformRoutePolicyOverrideUpdate['onTimeout']
+  onRateLimit: PlatformRoutePolicyOverrideUpdate['onRateLimit']
+  onServerError: PlatformRoutePolicyOverrideUpdate['onServerError']
+  maxRetries: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface PlatformRoutePolicyOverrideUpdateResult extends PlatformRoutePolicyOverride {
   idempotent: boolean
 }
 
@@ -1269,6 +1300,42 @@ export class PlatformDatabase {
       : null
   }
 
+  listRoutePolicyOverrides(): PlatformRoutePolicyOverride[] {
+    return this.db.prepare(`SELECT route_id AS routeId, on_timeout AS onTimeout, on_rate_limit AS onRateLimit,
+      on_server_error AS onServerError, max_retries AS maxRetries, created_at AS createdAt, updated_at AS updatedAt
+      FROM route_policy_overrides ORDER BY route_id`).all() as unknown as PlatformRoutePolicyOverride[]
+  }
+
+  updateRoutePolicyOverride(policy: PlatformRoutePolicyOverrideUpdate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformRoutePolicyOverrideUpdateResult {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listRoutePolicyOverrides().find((item) => item.routeId === policy.routeId) ?? null
+    if (previousOperation) {
+      const previousSummary = JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown }
+      if (previousOperation.resourceId !== auditEvent.resourceId || previousSummary.idempotencyFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = current()
+      if (!stored) throw new Error('ROUTE_POLICY_NOT_FOUND')
+      return { ...stored, idempotent: true }
+    }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO route_policy_overrides(route_id, on_timeout, on_rate_limit, on_server_error, max_retries, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(route_id) DO UPDATE SET on_timeout = excluded.on_timeout, on_rate_limit = excluded.on_rate_limit,
+        on_server_error = excluded.on_server_error, max_retries = excluded.max_retries, updated_at = excluded.updated_at`).run(
+        policy.routeId, policy.onTimeout, policy.onRateLimit, policy.onServerError, policy.maxRetries, timestamp, timestamp,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = current()
+    if (!stored) throw new Error('ROUTE_POLICY_NOT_FOUND')
+    return { ...stored, idempotent: false }
+  }
+
   listAuditEvents() {
     const rows = this.db.prepare(`SELECT a.id, a.actor_user_id AS actorUserId, u.display_name AS actorName, u.role AS actorRole,
       a.action, a.resource_type AS resourceType, a.resource_id AS resourceId, a.result, a.request_id AS requestId,
@@ -1620,6 +1687,7 @@ export class PlatformDatabase {
       users: count('users'),
       apiKeys: count('api_keys'),
       quotaPolicies: count('quota_policies'),
+      routePolicyOverrides: count('route_policy_overrides'),
       auditEvents: count('audit_events'),
       usageRequests: count('usage_requests'),
       alertRules: count('alert_rules'),

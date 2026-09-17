@@ -12,7 +12,7 @@ import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHtt
 import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
-import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
+import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
@@ -520,7 +520,49 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { querystring: routesQuerySchema, response: { 200: routesResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDemoRoutes(request.query, newApi)
+    return createDatabaseRoutes(database, request.query, newApi)
+  })
+
+  app.patch('/api/routes/:id', {
+    schema: { params: routeIdParamsSchema, body: routePolicyUpdateBodySchema, response: { 200: routePolicyUpdateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const allRoutes = createDatabaseRoutes(database, { search: '', category: 'all', environment: 'all', status: 'all' }, newApi, new Date())
+    const visible = allRoutes.items.find((item) => item.id === request.params.id)
+    if (!visible) return reply.status(404).send({ error: { code: 'ROUTE_NOT_FOUND', message: '未找到可调整的用途路由', requestId: request.id } })
+    const usesFallback = request.body.onTimeout === 'fallback' || request.body.onRateLimit === 'fallback' || request.body.onServerError === 'fallback'
+    if (usesFallback && visible.fallbacks.length === 0) return reply.status(400).send({ error: { code: 'ROUTE_FALLBACK_UNAVAILABLE', message: '该路由没有同组备用渠道，不能设置切换备用策略', requestId: request.id } })
+    const idempotencyFingerprint = createHash('sha256').update(`${visible.id}:${request.body.onTimeout}:${request.body.onRateLimit}:${request.body.onServerError}:${request.body.maxRetries}`).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.updateRoutePolicyOverride({
+        routeId: visible.id, onTimeout: request.body.onTimeout, onRateLimit: request.body.onRateLimit,
+        onServerError: request.body.onServerError, maxRetries: request.body.maxRetries,
+      }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'route', resourceId: visible.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          message: '已调整本地 SQLite 演示路由的降级与重试策略；未调用 New API，未修改真实路由，也未记录调整原因原文。',
+          resourceName: `${visible.name} · ${visible.alias}`, reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint,
+          changes: [
+            { field: 'onTimeout', label: '超时策略', before: visible.policy.onTimeout === 'fallback' ? '切换备用' : '直接失败', after: request.body.onTimeout === 'fallback' ? '切换备用' : '直接失败', sensitive: false },
+            { field: 'onRateLimit', label: '上游 429 策略', before: visible.policy.onRateLimit === 'fallback' ? '切换备用' : '有限重试', after: request.body.onRateLimit === 'fallback' ? '切换备用' : '有限重试', sensitive: false },
+            { field: 'onServerError', label: '上游 5xx 策略', before: visible.policy.onServerError === 'fallback' ? '切换备用' : '有限重试', after: request.body.onServerError === 'fallback' ? '切换备用' : '有限重试', sensitive: false },
+            { field: 'maxRetries', label: '最大重试次数', before: `${visible.policy.maxRetries} 次`, after: `${request.body.maxRetries} 次`, sensitive: false },
+          ],
+        },
+      })
+      const updated = createDatabaseRoutes(database, { search: '', category: 'all', environment: 'all', status: 'all' }, newApi, new Date()).items.find((item) => item.id === visible.id)
+      if (!updated) return reply.status(404).send({ error: { code: 'ROUTE_NOT_FOUND', message: '路由状态已变化，请刷新后重试', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已保存本地 SQLite 演示策略；正式与实验隔离、禁止跨组回退和禁止客户端选渠道仍由服务端固定执行。' },
+        route: updated,
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他路由或不同策略', requestId: request.id } })
+      throw error
+    }
   })
 
   app.get('/api/models', {

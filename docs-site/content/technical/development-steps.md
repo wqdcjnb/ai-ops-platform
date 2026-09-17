@@ -207,6 +207,7 @@ GET  /api/people
 GET  /api/people/:id
 GET  /api/keys
 GET  /api/routes
+PATCH /api/routes/:id  # 仅本地 SQLite 的降级与重试策略覆盖
 GET  /api/usage
 GET  /api/upstreams
 GET  /api/alerts

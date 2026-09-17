@@ -139,6 +139,7 @@ function databaseResourceName(type: AuditEvent['resource']['type'], id: string, 
   if (type === 'person' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (type === 'key' && summary.resourceName && maskedKeyPattern.test(summary.resourceName)) return summary.resourceName
   if (type === 'conversation' && summary.resourceName) return redactAuditText(summary.resourceName)
+  if (type === 'route' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (id === 'key-lin-1') return 'sk-ops••••••7F2A'
   if (id === 'quota-content-month') return '内容运营 · 月度软目标'
   if (id === 'export-usage-01') return '近 30 天调用日志'

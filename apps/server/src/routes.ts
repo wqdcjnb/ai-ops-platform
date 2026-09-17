@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const routesQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
@@ -43,7 +44,7 @@ export const routeItemSchema = z.object({
 })
 
 export const routesResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), production: z.number().int().nonnegative(), experiment: z.number().int().nonnegative(), degraded: z.number().int().nonnegative() }),
   options: z.object({ categories: z.array(z.object({ id: z.enum(['copy', 'service', 'translate', 'analysis', 'automation', 'experiment']), label: z.string() })) }),
   isolation: z.object({ enforced: z.literal(true), productionGroup: z.literal('official'), experimentGroup: z.literal('cpa-lab'), message: z.string() }),
@@ -53,7 +54,30 @@ export const routesResponseSchema = z.object({
 
 export type RoutesQuery = z.infer<typeof routesQuerySchema>
 export type RoutesResponse = z.infer<typeof routesResponseSchema>
-type RouteItem = z.infer<typeof routeItemSchema>
+export type RouteItem = z.infer<typeof routeItemSchema>
+
+export const routeIdParamsSchema = z.object({
+  id: z.string().regex(/^route-[a-z-]+$/),
+})
+
+export const routePolicyUpdateBodySchema = z.object({
+  onTimeout: z.enum(['fallback', 'fail']),
+  onRateLimit: z.enum(['fallback', 'retry']),
+  onServerError: z.enum(['fallback', 'retry']),
+  maxRetries: z.coerce.number().int().min(0).max(3),
+  idempotencyKey: z.string().regex(/^route-update-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+
+export const routePolicyUpdateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  route: routeItemSchema,
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
+export type RoutePolicyUpdateBody = z.infer<typeof routePolicyUpdateBodySchema>
+export type RoutePolicyUpdateResponse = z.infer<typeof routePolicyUpdateResponseSchema>
 
 const policy: RouteItem['policy'] = {
   timeoutSeconds: 45,
@@ -112,14 +136,35 @@ function noticeFor(newApi: NewApiStatus) {
 }
 
 export function createDemoRoutes(query: RoutesQuery, newApi: NewApiStatus, now = new Date()): RoutesResponse {
+  return createRoutes(query, newApi, demoRoutes, 'demo', now)
+}
+
+export function createDatabaseRoutes(database: PlatformDatabase, query: RoutesQuery, newApi: NewApiStatus, now = new Date()): RoutesResponse {
+  const overrides = new Map(database.listRoutePolicyOverrides().map((item) => [item.routeId, item]))
+  const items = demoRoutes.map((item) => {
+    const override = overrides.get(item.id)
+    return override
+      ? { ...item, policy: { ...item.policy, onTimeout: override.onTimeout, onRateLimit: override.onRateLimit, onServerError: override.onServerError, maxRetries: override.maxRetries } }
+      : { ...item, policy: { ...item.policy } }
+  })
+  return createRoutes(query, newApi, items, 'database', now)
+}
+
+function createRoutes(query: RoutesQuery, newApi: NewApiStatus, source: RouteItem[], sourceKind: 'demo' | 'database', now: Date): RoutesResponse {
   const search = query.search.toLocaleLowerCase('zh-CN')
-  const items = demoRoutes.filter((item) => {
+  const items = source.filter((item) => {
     const matchesSearch = !search || [item.name, item.description, item.alias, item.primary.channel, item.primary.model, ...item.allowedRoles].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
     return matchesSearch && (query.category === 'all' || item.category === query.category) && (query.environment === 'all' || item.environment === query.environment) && (query.status === 'all' || item.status === query.status)
   })
   return {
-    meta: { source: 'demo', generatedAt: now.toISOString(), notice: noticeFor(newApi) },
-    summary: { total: demoRoutes.length, production: demoRoutes.filter((item) => item.environment === 'production').length, experiment: demoRoutes.filter((item) => item.environment === 'experiment').length, degraded: demoRoutes.filter((item) => item.status === 'degraded').length },
+    meta: {
+      source: sourceKind,
+      generatedAt: now.toISOString(),
+      notice: sourceKind === 'database'
+        ? `${noticeFor(newApi)}；本地 SQLite 可保存降级与重试策略，未调用 New API 或实际路由。`
+        : noticeFor(newApi),
+    },
+    summary: { total: source.length, production: source.filter((item) => item.environment === 'production').length, experiment: source.filter((item) => item.environment === 'experiment').length, degraded: source.filter((item) => item.status === 'degraded').length },
     options: { categories: [{ id: 'copy', label: '文案' }, { id: 'service', label: '客服' }, { id: 'translate', label: '翻译' }, { id: 'analysis', label: '分析' }, { id: 'automation', label: '自动化' }, { id: 'experiment', label: '实验' }] },
     isolation: { enforced: true, productionGroup: 'official', experimentGroup: 'cpa-lab', message: '正式路由只能在官方渠道组内回退；CPA 实验渠道禁止承接正式业务流量。' },
     items, total: items.length,

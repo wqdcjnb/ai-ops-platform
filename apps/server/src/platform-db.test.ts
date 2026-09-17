@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 17, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
-    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 18, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
+    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'route_policy_overrides', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(17)
+    expect(database.status().migrationVersion).toBe(18)
     database.close()
   })
 
@@ -15,7 +15,7 @@ describe('platform database migrations', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
     const first = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
     const second = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
-    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, conversationAuditCleanupRuns: 0, conversationAuditExpiryProofs: 0, conversationUsageLinks: 7, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
+    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, routePolicyOverrides: 0, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, conversationAuditCleanupRuns: 0, conversationAuditExpiryProofs: 0, conversationUsageLinks: 7, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
@@ -77,7 +77,7 @@ describe('platform database migrations', () => {
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
     expect(database.listConversationAccessEvents('conv-audit-copy-01')).toHaveLength(1)
     expect(database.listConversationAccessEvents('conv-audit-support-02')).toEqual([])
-    expect(database.status().migrationVersion).toBe(17)
+    expect(database.status().migrationVersion).toBe(18)
     database.close()
   })
 
@@ -92,6 +92,21 @@ describe('platform database migrations', () => {
     expect(updated).toMatchObject({ targetPoints: 3000, previousTargetPoints: 2600, idempotent: false })
     seedDemoData(database, now)
     expect(database.listQuotaPolicies().find((item) => item.id === 'quota-content-month')).toMatchObject({ targetPoints: 3000, mode: 'soft' })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 5 })
+    database.close()
+  })
+
+  it('keeps a locally adjusted route policy when demo seeds run again', () => {
+    const now = new Date('2026-09-17T10:00:00.000Z')
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
+    seedDemoData(database, now)
+    const updated = database.updateRoutePolicyOverride({ routeId: 'route-copy', onTimeout: 'fallback', onRateLimit: 'retry', onServerError: 'fallback', maxRetries: 3 }, {
+      id: 'audit-route-update-persist-test', actorUserId: 'user-super-admin', action: 'update', resourceType: 'route', resourceId: 'route-copy',
+      result: 'success', requestId: 'req-route-persist-test', summary: { idempotencyFingerprint: 'route-test-fingerprint', message: '本地路由策略测试调整。' },
+    }, now)
+    expect(updated).toMatchObject({ routeId: 'route-copy', onRateLimit: 'retry', maxRetries: 3, idempotent: false })
+    seedDemoData(database, now)
+    expect(database.listRoutePolicyOverrides()).toEqual([expect.objectContaining({ routeId: 'route-copy', onServerError: 'fallback', maxRetries: 3 })])
     expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 5 })
     database.close()
   })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { routeFiltersSchema, routesResponseSchema } from './routes-api'
+import { routeFiltersSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesResponseSchema } from './routes-api'
 
 const target = { channel: 'Official 01', provider: 'OpenAI Compatible', model: 'model-1', group: 'production', status: 'healthy' }
 const item = {
@@ -20,5 +20,13 @@ describe('routes API contracts', () => {
     expect(routesResponseSchema.safeParse(value).success).toBe(true)
     expect(routesResponseSchema.safeParse({ ...value, items: [{ ...item, policy: { ...item.policy, crossGroupFallback: true } }] }).success).toBe(false)
     expect(routesResponseSchema.safeParse({ ...value, isolation: { ...value.isolation, enforced: false } }).success).toBe(false)
+  })
+
+  it('validates only local, acknowledged route policy adjustments', () => {
+    const body = { onTimeout: 'fallback', onRateLimit: 'retry', onServerError: 'fallback', maxRetries: 3, idempotencyKey: 'route-update-1a2b3c4d', reason: '本地演示需要验证有限重试策略', acknowledgeImpact: true }
+    expect(routePolicyUpdateBodySchema.safeParse(body).success).toBe(true)
+    expect(routePolicyUpdateBodySchema.safeParse({ ...body, maxRetries: 4 }).success).toBe(false)
+    expect(routePolicyUpdateBodySchema.safeParse({ ...body, acknowledgeImpact: false }).success).toBe(false)
+    expect(routePolicyUpdateResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地模拟' }, route: item, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-route-update-1a2b3c4d' } }).success).toBe(true)
   })
 })
