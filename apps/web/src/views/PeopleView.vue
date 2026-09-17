@@ -16,7 +16,7 @@ import {
   IconUserPlus,
   IconUsers,
 } from '@tabler/icons-vue'
-import { fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person } from '../people-api'
+import { createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonCreateBody } from '../people-api'
 
 const people = ref<PeopleResponse | null>(null)
 const isLoading = ref(false)
@@ -27,6 +27,10 @@ const status = ref<PeopleFilters['status']>('all')
 const goal = ref<PeopleFilters['goal']>('all')
 const page = ref(1)
 const pageSize = 10
+const showCreate = ref(false)
+const createError = ref('')
+const isCreating = ref(false)
+const createForm = ref<PersonCreateBody>({ username: '', displayName: '', departmentId: 'content', password: '' })
 let activeRequest: AbortController | null = null
 
 const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '离职待回收' }
@@ -107,6 +111,33 @@ function goToPage(nextPage: number) {
   void loadPeople()
 }
 
+function openCreate() {
+  createError.value = ''
+  createForm.value = { username: '', displayName: '', departmentId: people.value?.departments[0]?.id ?? 'content', password: '' }
+  showCreate.value = true
+}
+
+function closeCreate() {
+  if (isCreating.value) return
+  showCreate.value = false
+}
+
+async function submitCreate() {
+  isCreating.value = true
+  createError.value = ''
+  try {
+    await createPerson(createForm.value)
+    showCreate.value = false
+    page.value = 1
+    await loadPeople()
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    createError.value = `${error instanceof Error ? error.message : '添加人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally {
+    isCreating.value = false
+  }
+}
+
 onMounted(() => void loadPeople())
 onBeforeUnmount(() => activeRequest?.abort())
 </script>
@@ -123,7 +154,7 @@ onBeforeUnmount(() => activeRequest?.abort())
         <span class="updated-at">更新于 {{ updatedAt }}</span>
         <button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadPeople"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button>
         <button class="btn btn-white" disabled title="真实数据与权限接入后开放"><IconDownload :size="16" />导出</button>
-        <button class="btn create-key" disabled title="人员写接口与审计完成后开放"><IconUserPlus :size="17" />添加人员</button>
+        <button class="btn create-key" type="button" @click="openCreate"><IconUserPlus :size="17" />添加人员</button>
       </div>
     </section>
 
@@ -181,6 +212,21 @@ onBeforeUnmount(() => activeRequest?.abort())
       </template>
     </section>
 
-    <footer class="page-footer">数据来源：{{ people?.meta.source.toUpperCase() ?? '等待数据' }} · 当前阶段仅只读，人员详情与管理操作尚未开放</footer>
+    <footer class="page-footer">数据来源：{{ people?.meta.source.toUpperCase() ?? '等待数据' }} · 添加人员已开放（本地 SQLite），职位、用途和 Key 管理仍待接入</footer>
+
+    <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
+      <aside class="create-person-dialog" role="dialog" aria-modal="true" aria-label="添加人员">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>添加人员</h2></div><button class="icon-button" aria-label="关闭添加人员" :disabled="isCreating" @click="closeCreate">×</button></header>
+        <form class="create-person-form" @submit.prevent="submitCreate">
+          <p class="create-person-note">创建本地演示账号并绑定部门。密码只用于本地登录测试，不会在列表或日志中展示。</p>
+          <label><span>姓名</span><input v-model="createForm.displayName" required minlength="2" maxlength="40" placeholder="例如：王小明" /></label>
+          <label><span>登录用户名</span><input v-model="createForm.username" required pattern="[A-Za-z][A-Za-z0-9._-]{2,39}" maxlength="40" placeholder="例如：wang.xiaoming" /></label>
+          <label><span>所属部门</span><select v-model="createForm.departmentId" required><option v-for="item in people?.departments ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+          <label><span>初始密码</span><input v-model="createForm.password" required minlength="8" maxlength="200" type="password" placeholder="至少 8 位" /></label>
+          <div v-if="createError" class="create-person-error"><IconAlertTriangle :size="16" />{{ createError }}</div>
+          <footer><button class="btn btn-white" type="button" :disabled="isCreating" @click="closeCreate">取消</button><button class="btn create-key" type="submit" :disabled="isCreating">{{ isCreating ? '保存中…' : '保存人员' }}</button></footer>
+        </form>
+      </aside>
+    </div>
   </div>
 </template>

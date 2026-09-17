@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { createDemoOverview, overviewResponseSchema, periodSchema } from './overview.js'
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
-import { createDemoPeople, createDemoPersonDetail, createDemoPersonUsage, peopleQuerySchema, peopleResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
+import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDemoKeyDetail, createDemoKeys, keyDetailResponseSchema, keyIdParamsSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
@@ -65,10 +65,11 @@ export function buildApp(options: BuildAppOptions = {}) {
   const auth = options.authService ?? createAuthService({ database })
   if (!options.database) app.addHook('onClose', async () => database.close())
 
-  const requiredRoles = (path: string): readonly AppRole[] => {
+  const requiredRoles = (path: string, method: string): readonly AppRole[] => {
     if (path.startsWith('/api/me')) return ['employee']
     if (path.startsWith('/api/conversation-audits')) return ['super_admin']
     if (path.startsWith('/api/audit-events') || path.startsWith('/api/settings') || path.startsWith('/api/upstreams') || path.startsWith('/api/routes')) return ['super_admin', 'admin']
+    if (path.startsWith('/api/people') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/people') || path.startsWith('/api/keys') || path.startsWith('/api/models') || path.startsWith('/api/channels')) return ['super_admin', 'admin', 'department_lead']
     return ['super_admin', 'admin', 'department_lead', 'finance']
   }
@@ -82,7 +83,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '请先登录后再访问该资源', requestId: request.id } })
     }
     request.authUser = user
-    if (!isRoleAllowed(user, requiredRoles(path))) {
+    if (!isRoleAllowed(user, requiredRoles(path, request.method))) {
       return reply.status(403).send({ error: { code: 'AUTH_FORBIDDEN', message: '当前身份没有访问该资源的权限', requestId: request.id } })
     }
   })
@@ -182,7 +183,29 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDemoPeople(request.query, newApi)
+    return createDatabasePeople(database, request.query, newApi)
+  })
+
+  app.post('/api/people', {
+    schema: {
+      body: personCreateBodySchema,
+      response: { 201: personCreateResponseSchema, 400: errorResponseSchema, 409: errorResponseSchema },
+    },
+  }, async (request, reply) => {
+    if (!database.departmentExists(request.body.departmentId)) {
+      return reply.status(400).send({ error: { code: 'DEPARTMENT_NOT_FOUND', message: '请选择有效的在用部门', requestId: request.id } })
+    }
+    const id = `person-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    try {
+      const created = database.createPerson({ id, username: request.body.username, displayName: request.body.displayName, departmentId: request.body.departmentId, password: request.body.password })
+      if (!created || !created.departmentId || !created.departmentName) throw new Error('PERSON_CREATE_FAILED')
+      return reply.status(201).send({ meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: '人员已写入本地 SQLite；职位、用途和真实 New API 映射将在后续接入' }, person: { id: created.id, username: created.username, displayName: created.displayName, department: { id: created.departmentId, name: created.departmentName } } })
+    } catch (error) {
+      if (error instanceof Error && /UNIQUE constraint failed: users\.username/i.test(error.message)) {
+        return reply.status(409).send({ error: { code: 'USERNAME_CONFLICT', message: '用户名已存在，请更换后重试', requestId: request.id } })
+      }
+      throw error
+    }
   })
 
   app.get('/api/people/:id', {
@@ -192,7 +215,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDemoPersonDetail(request.params.id, newApi)
+    const result = createDatabasePersonDetail(database, request.params.id, newApi)
     if (result) return result
     return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
   })
@@ -205,7 +228,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDemoPersonUsage(request.params.id, request.query.period, newApi)
+    const result = createDatabasePersonUsage(database, request.params.id, request.query.period, newApi)
     if (result) return result
     return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
   })

@@ -30,7 +30,7 @@ describe('BFF', () => {
   })
 
   it('requires a session for protected resources', async () => {
-    const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const response = await app.inject({ method: 'GET', url: '/api/overview' })
     expect(response.statusCode).toBe(401)
@@ -130,7 +130,7 @@ describe('BFF', () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/people?department=content&status=active&pageSize=10' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta.source).toBe('demo')
+    expect(body.meta.source).toBe('database')
     expect(body.summary.total).toBe(12)
     expect(body.items).toHaveLength(2)
     expect(body.items.every((person: { department: { id: string }; status: string }) => person.department.id === 'content' && person.status === 'active')).toBe(true)
@@ -151,6 +151,28 @@ describe('BFF', () => {
     expect(body.keys).toHaveLength(body.profile.keyCount)
     expect(body.keys.every((key: { masked: string }) => key.masked.includes('••••••'))).toBe(true)
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey/i)
+  })
+
+  it('allows administrators to add a person to SQLite and blocks duplicate usernames', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = login.headers['set-cookie']
+    const created = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie }, payload: { username: 'demo-new-person', displayName: '王小明', departmentId: 'content', password: 'demo-password-1' } })
+    expect(created.statusCode).toBe(201)
+    expect(created.json().person.displayName).toBe('王小明')
+
+    const listed = await app.inject({ method: 'GET', url: '/api/people?search=王小明', headers: { cookie } })
+    expect(listed.statusCode).toBe(200)
+    expect(listed.json().items[0]).toMatchObject({ name: '王小明', department: { id: 'content', name: '内容运营' }, title: '新加入成员' })
+
+    const duplicate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie }, payload: { username: 'demo-new-person', displayName: '王小明二号', departmentId: 'content', password: 'demo-password-2' } })
+    expect(duplicate.statusCode).toBe(409)
+    expect(duplicate.json().error.code).toBe('USERNAME_CONFLICT')
+
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeCreate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie: employeeLogin.headers['set-cookie'] }, payload: { username: 'employee-attempt', displayName: '越权员工', departmentId: 'content', password: 'demo-password-3' } })
+    expect(employeeCreate.statusCode).toBe(403)
   })
 
   it('supports person usage periods and stable not-found errors', async () => {

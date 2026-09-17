@@ -122,6 +122,14 @@ export interface PlatformAuditEventSeed {
   summary: Record<string, unknown>
 }
 
+export interface PlatformPersonCreate {
+  id: string
+  username: string
+  displayName: string
+  departmentId: string
+  password: string
+}
+
 export function hashPlatformPassword(value: string) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -223,6 +231,40 @@ export class PlatformDatabase {
 
   setUserDepartment(userId: string, departmentId: string | null) {
     this.db.prepare('UPDATE users SET department_id = ?, updated_at = ? WHERE id = ?').run(departmentId, this.now().toISOString(), userId)
+  }
+
+  listPeople() {
+    return this.db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.status,
+      d.id AS departmentId, d.name AS departmentName
+      FROM users u LEFT JOIN departments d ON d.id = u.department_id
+      WHERE u.role = 'employee' ORDER BY u.created_at, u.display_name`).all() as Array<{
+        id: string
+        username: string
+        displayName: string
+        status: 'active' | 'disabled'
+        departmentId: string | null
+        departmentName: string | null
+      }>
+  }
+
+  departmentExists(departmentId: string) {
+    return Boolean(this.db.prepare('SELECT 1 FROM departments WHERE id = ? AND status = \'active\' LIMIT 1').get(departmentId))
+  }
+
+  createPerson(person: PlatformPersonCreate, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, created_at, updated_at)
+        VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?)`).run(
+        person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, timestamp, timestamp,
+      )
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.listPeople().find((item) => item.id === person.id) ?? null
   }
 
   tableCounts() {

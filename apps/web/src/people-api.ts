@@ -11,7 +11,7 @@ export const peopleFilterSchema = z.object({
 
 export const peopleResponseSchema = z.object({
   meta: z.object({
-    source: z.literal('demo'),
+    source: z.enum(['demo', 'database']),
     generatedAt: z.string(),
     timezone: z.literal('Asia/Shanghai'),
     notice: z.string(),
@@ -55,7 +55,7 @@ export const peopleResponseSchema = z.object({
 })
 
 export const personDetailResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   profile: z.object({
     id: z.string(), name: z.string(), initials: z.string(), department: z.object({ id: z.string(), name: z.string() }), title: z.string(), manager: z.string(),
     status: z.enum(['active', 'disabled', 'offboarding']), keyCount: z.number().int().nonnegative(), purpose: z.string(),
@@ -73,12 +73,24 @@ export const personDetailResponseSchema = z.object({
 })
 
 export const personUsageResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), period: z.enum(['7d', '30d']) }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), period: z.enum(['7d', '30d']) }),
   items: z.array(z.object({ date: z.string(), requests: z.number().int().nonnegative(), tokens: z.number().int().nonnegative(), points: z.number().int().nonnegative() })),
 })
 
 export type PeopleFilters = z.infer<typeof peopleFilterSchema>
+export const personCreateBodySchema = z.object({
+  username: z.string().trim().regex(/^[a-z][a-z0-9._-]{2,39}$/i),
+  displayName: z.string().trim().min(2).max(40),
+  departmentId: z.string().trim().min(1).max(40),
+  password: z.string().min(8).max(200),
+})
+export const personCreateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
+  person: z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) }),
+})
 export type PeopleResponse = z.infer<typeof peopleResponseSchema>
+export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
+export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
 export type Person = PeopleResponse['items'][number]
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>
 export type PersonUsageResponse = z.infer<typeof personUsageResponseSchema>
@@ -107,6 +119,19 @@ export async function fetchPeople(filters: PeopleFilters, signal?: AbortSignal):
 
   const result = peopleResponseSchema.safeParse(await response.json())
   if (!result.success) throw new PeopleApiError('人员数据格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function createPerson(payload: PersonCreateBody): Promise<PersonCreateResponse> {
+  const body = personCreateBodySchema.parse(payload)
+  const response = await fetch('/api/people', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '添加人员失败', requestId)
+  }
+  const result = personCreateResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('添加人员响应格式不符合接口约定', requestId)
   return result.data
 }
 

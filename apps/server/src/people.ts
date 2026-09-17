@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const peopleQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
@@ -35,7 +36,7 @@ const personSchema = z.object({
 
 export const peopleResponseSchema = z.object({
   meta: z.object({
-    source: z.literal('demo'),
+    source: z.enum(['demo', 'database']),
     generatedAt: z.string().datetime(),
     timezone: z.literal('Asia/Shanghai'),
     notice: z.string(),
@@ -61,7 +62,19 @@ export const peopleResponseSchema = z.object({
 })
 
 export const personIdParamsSchema = z.object({
-  id: z.string().regex(/^person-[a-z]+$/).max(64),
+  id: z.string().regex(/^person-[a-z0-9-]+$/).max(64),
+})
+
+export const personCreateBodySchema = z.object({
+  username: z.string().trim().regex(/^[a-z][a-z0-9._-]{2,39}$/i),
+  displayName: z.string().trim().min(2).max(40),
+  departmentId: z.string().trim().min(1).max(40),
+  password: z.string().min(8).max(200),
+})
+
+export const personCreateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), createdAt: z.string().datetime(), notice: z.string() }),
+  person: z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) }),
 })
 
 export const personUsageQuerySchema = z.object({
@@ -70,7 +83,7 @@ export const personUsageQuerySchema = z.object({
 
 export const personDetailResponseSchema = z.object({
   meta: z.object({
-    source: z.literal('demo'),
+    source: z.enum(['demo', 'database']),
     generatedAt: z.string().datetime(),
     timezone: z.literal('Asia/Shanghai'),
     notice: z.string(),
@@ -103,7 +116,7 @@ export const personDetailResponseSchema = z.object({
 })
 
 export const personUsageResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), period: z.enum(['7d', '30d']) }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), period: z.enum(['7d', '30d']) }),
   items: z.array(z.object({
     date: z.string(),
     requests: z.number().int().nonnegative(),
@@ -114,6 +127,8 @@ export const personUsageResponseSchema = z.object({
 
 export type PeopleQuery = z.infer<typeof peopleQuerySchema>
 export type PeopleResponse = z.infer<typeof peopleResponseSchema>
+export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
+export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>
 export type PersonUsageResponse = z.infer<typeof personUsageResponseSchema>
 export type PersonUsagePeriod = z.infer<typeof personUsageQuerySchema>['period']
@@ -223,8 +238,88 @@ export function createDemoPeople(query: PeopleQuery, newApi: NewApiStatus, now =
   }
 }
 
+function databaseNotice(newApi: NewApiStatus) {
+  if (newApi.state === 'ready') return '人员与部门已从平台 SQLite 读取；New API 管理字段仍待接入'
+  if (newApi.state === 'reachable') return '人员与部门来自平台 SQLite；New API 服务可达但尚未配置管理认证'
+  if (newApi.state === 'auth_required') return '人员与部门来自平台 SQLite；New API 管理认证未通过'
+  return '人员与部门来自平台 SQLite；New API 当前离线'
+}
+
+function filterPeopleResponse(query: PeopleQuery, people: PeopleResponse['items'], newApi: NewApiStatus, now: Date, source: 'demo' | 'database', notice: string): PeopleResponse {
+  const normalizedSearch = query.search.toLocaleLowerCase('zh-CN')
+  const filtered = people.filter((person) => {
+    const matchesSearch = !normalizedSearch || [person.name, person.title, person.manager, person.purpose].some((value) => value.toLocaleLowerCase('zh-CN').includes(normalizedSearch))
+    const matchesDepartment = query.department === 'all' || person.department.id === query.department
+    const matchesStatus = query.status === 'all' || person.status === query.status
+    const matchesGoal = query.goal === 'all' || person.goal.state === query.goal
+    return matchesSearch && matchesDepartment && matchesStatus && matchesGoal
+  })
+  const departmentMap = new Map<string, PeopleResponse['departments'][number]>()
+  for (const person of people) {
+    const current = departmentMap.get(person.department.id) ?? { id: person.department.id, name: person.department.name, people: 0, activeKeys: 0, usagePercent: 0 }
+    current.people += 1
+    current.activeKeys += person.keyCount
+    current.usagePercent += person.goal.percent
+    departmentMap.set(person.department.id, current)
+  }
+  const departments = [...departmentMap.values()].map((department) => ({ ...department, usagePercent: Math.round(department.usagePercent / department.people) }))
+  const start = (query.page - 1) * query.pageSize
+  return {
+    meta: { source, generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice },
+    summary: {
+      total: people.length,
+      active: people.filter((person) => person.status === 'active').length,
+      disabled: people.filter((person) => person.status === 'disabled').length,
+      offboarding: people.filter((person) => person.status === 'offboarding').length,
+      departments: departments.length,
+    },
+    departments,
+    items: filtered.slice(start, start + query.pageSize),
+    page: query.page,
+    pageSize: query.pageSize,
+    total: filtered.length,
+  }
+}
+
+export function createDatabasePeople(database: PlatformDatabase, query: PeopleQuery, newApi: NewApiStatus, now = new Date()): PeopleResponse {
+  const demo = createDemoPeople({ search: '', department: 'all', status: 'all', goal: 'all', page: 1, pageSize: 50 }, newApi, now)
+  const demoById = new Map(demo.items.map((person) => [person.id, person]))
+  const tones: PeopleResponse['items'][number]['tone'][] = ['blue', 'violet', 'green', 'amber', 'coral']
+  const people = database.listPeople().map((row, index) => {
+    const existing = demoById.get(row.id)
+    if (existing) {
+      return {
+        ...existing,
+        name: row.displayName,
+        department: row.departmentId && row.departmentName ? { id: row.departmentId, name: row.departmentName } : existing.department,
+        status: row.status === 'disabled' ? 'disabled' as const : existing.status,
+      }
+    }
+    const percent = 0
+    return {
+      id: row.id,
+      name: row.displayName,
+      initials: row.displayName.slice(0, 2),
+      department: { id: row.departmentId ?? 'unassigned', name: row.departmentName ?? '待分配部门' },
+      title: '新加入成员',
+      manager: '待分配',
+      status: row.status === 'disabled' ? 'disabled' as const : 'active' as const,
+      keyCount: 0,
+      purpose: '待配置',
+      goal: { used: 0, limit: 500, percent, state: 'normal' as const },
+      lastActiveAt: null,
+      tone: tones[index % tones.length]!,
+    }
+  })
+  return filterPeopleResponse(query, people, newApi, now, 'database', databaseNotice(newApi))
+}
+
 function findDemoPerson(id: string, newApi: NewApiStatus, now: Date) {
   return createDemoPeople({ search: '', department: 'all', status: 'all', goal: 'all', page: 1, pageSize: 50 }, newApi, now).items.find((person) => person.id === id)
+}
+
+function findDatabasePerson(database: PlatformDatabase, id: string, newApi: NewApiStatus, now: Date) {
+  return createDatabasePeople(database, { search: '', department: 'all', status: 'all', goal: 'all', page: 1, pageSize: 50 }, newApi, now).items.find((person) => person.id === id)
 }
 
 function detailNotice(newApi: NewApiStatus) {
@@ -275,6 +370,36 @@ export function createDemoPersonDetail(id: string, newApi: NewApiStatus, now = n
   }
 }
 
+export function createDatabasePersonDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date()): PersonDetailResponse | null {
+  const person = findDatabasePerson(database, id, newApi, now)
+  if (!person) return null
+  const models = modelsForPurpose(person.purpose)
+  const activeModels = models.filter((model) => model.allowed).map((model) => model.alias)
+  const keys = Array.from({ length: person.keyCount }, (_, index) => ({
+    id: `key-${person.id.replace('person-', '')}-${index + 1}`,
+    masked: `sk-ops••••••${['7F2A', '3C91', 'A8D4'][index] ?? 'A8D4'}`,
+    purpose: index === 0 ? person.purpose : '临时项目',
+    status: person.status === 'disabled' ? 'disabled' as const : 'active' as const,
+    models: activeModels,
+    expiresAt: new Date(now.getTime() + (120 - index * 35) * 86_400_000).toISOString(),
+    lastUsedAt: person.lastActiveAt,
+  }))
+  return {
+    meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: '人员档案来自平台 SQLite；用量与模型字段仍为演示计算' },
+    profile: person,
+    metrics: {
+      todayRequests: person.status === 'disabled' ? 0 : Math.round(person.goal.used * 1.72),
+      monthTokens: person.goal.used * 8_260,
+      monthPoints: person.goal.used,
+      monthPointLimit: person.goal.limit,
+      successRate: person.status === 'disabled' ? 0 : Number((98.4 + (person.goal.percent % 13) / 10).toFixed(1)),
+      p95LatencyMs: person.status === 'disabled' ? 0 : 1_450 + person.goal.percent * 17,
+    },
+    keys,
+    models,
+  }
+}
+
 export function createDemoPersonUsage(id: string, period: PersonUsagePeriod, newApi: NewApiStatus, now = new Date()): PersonUsageResponse | null {
   const person = findDemoPerson(id, newApi, now)
   if (!person) return null
@@ -292,4 +417,17 @@ export function createDemoPersonUsage(id: string, period: PersonUsagePeriod, new
     }
   })
   return { meta: { source: 'demo', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', period }, items }
+}
+
+export function createDatabasePersonUsage(database: PlatformDatabase, id: string, period: PersonUsagePeriod, newApi: NewApiStatus, now = new Date()): PersonUsageResponse | null {
+  const person = findDatabasePerson(database, id, newApi, now)
+  if (!person) return null
+  const count = period === '7d' ? 7 : 30
+  const base = Math.max(0, Math.round(person.goal.used / Math.max(count, 1)))
+  const items = Array.from({ length: count }, (_, index) => {
+    const date = new Date(now.getTime() - (count - index - 1) * 86_400_000)
+    const requests = person.status === 'disabled' ? 0 : base
+    return { date: `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`, requests, tokens: requests * 3_600, points: Math.round(requests * 0.16) }
+  })
+  return { meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', period }, items }
 }
