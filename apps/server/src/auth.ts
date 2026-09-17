@@ -198,6 +198,7 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
           ? null
           : accounts.find((item) => item.user.username === username && item.password === password)
       if (!account) return null
+      if (options.database) options.database.cleanupAuthSessions('login')
       const token = randomBytes(32).toString('base64url')
       const csrfToken = randomBytes(32).toString('base64url')
       const expiresAt = Date.now() + SESSION_TTL_MS

@@ -213,6 +213,15 @@ const migrationSql = [
     revoked_at TEXT
   );
   CREATE INDEX IF NOT EXISTS user_sessions_active_token_idx ON user_sessions(token_hash, expires_at) WHERE revoked_at IS NULL;`,
+  `CREATE TABLE IF NOT EXISTS session_cleanup_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    triggered_by TEXT NOT NULL CHECK (triggered_by IN ('startup', 'login')),
+    completed_at TEXT NOT NULL,
+    deleted_expired INTEGER NOT NULL CHECK (deleted_expired >= 0),
+    deleted_revoked INTEGER NOT NULL CHECK (deleted_revoked >= 0),
+    revoked_retention_hours INTEGER NOT NULL CHECK (revoked_retention_hours > 0)
+  );
+  CREATE INDEX IF NOT EXISTS session_cleanup_runs_completed_idx ON session_cleanup_runs(completed_at DESC);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -221,6 +230,15 @@ export const databaseStatusSchema = z.object({
   migrationVersion: z.number().int().nonnegative(),
   tables: z.array(z.string()),
   checkedAt: z.string().datetime(),
+  sessionCleanup: z.object({
+    revokedRetentionHours: z.literal(24),
+    lastRun: z.object({
+      triggeredBy: z.enum(['startup', 'login']),
+      completedAt: z.string().datetime(),
+      deletedExpired: z.number().int().nonnegative(),
+      deletedRevoked: z.number().int().nonnegative(),
+    }).nullable(),
+  }),
 })
 export type DatabaseStatus = z.infer<typeof databaseStatusSchema>
 
@@ -383,6 +401,16 @@ export interface PlatformAuthSessionCreate {
   expiresAt: string
 }
 
+export const REVOKED_SESSION_RETENTION_HOURS = 24
+export type SessionCleanupTrigger = 'startup' | 'login'
+export interface SessionCleanupResult {
+  triggeredBy: SessionCleanupTrigger
+  completedAt: string
+  deletedExpired: number
+  deletedRevoked: number
+  revokedRetentionHours: typeof REVOKED_SESSION_RETENTION_HOURS
+}
+
 export interface PlatformBusinessRuleSeed {
   id: string
   version: string
@@ -468,7 +496,13 @@ export class PlatformDatabase {
   status(): DatabaseStatus {
     const version = this.db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get() as { version: number }
     const rows = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>
-    return { state: 'ready', location: this.filename, migrationVersion: version.version, tables: rows.map((item) => item.name), checkedAt: this.now().toISOString() }
+    const lastRun = this.db.prepare(`SELECT triggered_by AS triggeredBy, completed_at AS completedAt,
+      deleted_expired AS deletedExpired, deleted_revoked AS deletedRevoked
+      FROM session_cleanup_runs ORDER BY id DESC LIMIT 1`).get() as Omit<SessionCleanupResult, 'revokedRetentionHours'> | undefined
+    return {
+      state: 'ready', location: this.filename, migrationVersion: version.version, tables: rows.map((item) => item.name), checkedAt: this.now().toISOString(),
+      sessionCleanup: { revokedRetentionHours: REVOKED_SESSION_RETENTION_HOURS, lastRun: lastRun ?? null },
+    }
   }
 
   seedUser(seed: PlatformUserSeed, now = this.now()) {
@@ -1043,6 +1077,23 @@ export class PlatformDatabase {
       WHERE token_hash = ?`).run(now.toISOString(), tokenHash)
   }
 
+  cleanupAuthSessions(triggeredBy: SessionCleanupTrigger, now = this.now()): SessionCleanupResult {
+    const completedAt = now.toISOString()
+    const revokedBefore = new Date(now.getTime() - REVOKED_SESSION_RETENTION_HOURS * 3_600_000).toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const deletedExpired = Number(this.db.prepare('DELETE FROM user_sessions WHERE expires_at <= ?').run(completedAt).changes)
+      const deletedRevoked = Number(this.db.prepare('DELETE FROM user_sessions WHERE revoked_at IS NOT NULL AND revoked_at <= ?').run(revokedBefore).changes)
+      this.db.prepare(`INSERT INTO session_cleanup_runs(triggered_by, completed_at, deleted_expired, deleted_revoked, revoked_retention_hours)
+        VALUES (?, ?, ?, ?, ?)`).run(triggeredBy, completedAt, deletedExpired, deletedRevoked, REVOKED_SESSION_RETENTION_HOURS)
+      this.db.exec('COMMIT')
+      return { triggeredBy, completedAt, deletedExpired, deletedRevoked, revokedRetentionHours: REVOKED_SESSION_RETENTION_HOURS }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   tableCounts() {
     const count = (table: string) => (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
     return {
@@ -1061,6 +1112,7 @@ export class PlatformDatabase {
       retentionPolicies: count('system_retention_policies'),
       backupStatus: count('system_backup_status'),
       userSessions: count('user_sessions'),
+      sessionCleanupRuns: count('session_cleanup_runs'),
     }
   }
 

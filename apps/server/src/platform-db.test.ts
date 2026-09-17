@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 11, checkedAt: '2026-09-17T10:00:00.000Z' })
-    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions']))
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 12, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null } })
+    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(11)
+    expect(database.status().migrationVersion).toBe(12)
     database.close()
   })
 
@@ -15,7 +15,7 @@ describe('platform database migrations', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
     const first = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
     const second = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
-    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0 })
+    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
@@ -65,7 +65,25 @@ describe('platform database migrations', () => {
       action: 'view_synthetic', reasonProvided: 1, reasonLength: 18, acknowledgedSensitiveScope: 1,
     })])
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
-    expect(database.status().migrationVersion).toBe(11)
+    expect(database.status().migrationVersion).toBe(12)
+    database.close()
+  })
+
+  it('removes expired and old revoked session hashes while retaining active sessions', () => {
+    const now = new Date('2026-09-18T12:00:00.000Z')
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
+    seedDemoData(database, now)
+    const hash = (character: string) => character.repeat(64)
+    database.createAuthSession({ id: 'session-expired', userId: 'user-super-admin', tokenHash: hash('a'), csrfTokenHash: hash('b'), expiresAt: '2026-09-18T11:59:59.000Z' }, now)
+    database.createAuthSession({ id: 'session-revoked', userId: 'user-super-admin', tokenHash: hash('c'), csrfTokenHash: hash('d'), expiresAt: '2026-09-19T12:00:00.000Z' }, now)
+    database.revokeAuthSession(hash('c'), new Date('2026-09-17T11:00:00.000Z'))
+    database.createAuthSession({ id: 'session-active', userId: 'user-super-admin', tokenHash: hash('e'), csrfTokenHash: hash('f'), expiresAt: '2026-09-19T12:00:00.000Z' }, now)
+
+    const cleanup = database.cleanupAuthSessions('startup', now)
+    expect(cleanup).toMatchObject({ triggeredBy: 'startup', deletedExpired: 1, deletedRevoked: 1, revokedRetentionHours: 24 })
+    expect(database.tableCounts()).toMatchObject({ userSessions: 1, sessionCleanupRuns: 1 })
+    expect(database.findAuthSession(hash('e'), now)?.user.id).toBe('user-super-admin')
+    expect(database.status().sessionCleanup).toMatchObject({ revokedRetentionHours: 24, lastRun: { triggeredBy: 'startup', deletedExpired: 1, deletedRevoked: 1 } })
     database.close()
   })
 })

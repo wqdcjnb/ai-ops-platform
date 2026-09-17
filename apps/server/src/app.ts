@@ -68,6 +68,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   const database = options.database ?? createPlatformDatabase({ filename: options.databasePath ?? process.env.PLATFORM_DB_PATH ?? (authMode === 'disabled' ? ':memory:' : undefined) })
   seedDemoUsers(database)
   seedDemoData(database)
+  database.cleanupAuthSessions('startup')
   const auth = options.authService ?? createAuthService({ database })
   const catalog = createModelCatalog(options.catalogReader)
   if (!options.database) app.addHook('onClose', async () => database.close())
