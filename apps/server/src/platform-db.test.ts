@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 8, checkedAt: '2026-09-17T10:00:00.000Z' })
-    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies']))
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 9, checkedAt: '2026-09-17T10:00:00.000Z' })
+    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(8)
+    expect(database.status().migrationVersion).toBe(9)
     database.close()
   })
 
@@ -15,7 +15,7 @@ describe('platform database migrations', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
     const first = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
     const second = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
-    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4 })
+    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1 })
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
@@ -51,6 +51,10 @@ describe('platform database migrations', () => {
       expect.objectContaining({ id: 'operation-audit', days: 365, cleanupState: 'unverified', minimumNecessary: 1 }),
       expect.objectContaining({ id: 'conversation-content', days: 7, cleanupState: 'not_configured', minimumNecessary: 1 }),
     ]))
+    expect(database.getBackupStatus()).toMatchObject({
+      configured: false, storageTargetConfigured: false, lastBackupAt: null, lastVerifiedAt: null,
+      lastRestoreDrillAt: null, browserDownloadAllowed: false,
+    })
     const access = database.recordConversationAccess({
       id: 'access-demo-test-01', actorUserId: 'user-super-admin', recordId: 'conv-audit-copy-01', requestId: 'req-conv-test-01',
       action: 'view_synthetic', reasonProvided: true, reasonLength: 18, acknowledgedSensitiveScope: true,
@@ -61,7 +65,7 @@ describe('platform database migrations', () => {
       action: 'view_synthetic', reasonProvided: 1, reasonLength: 18, acknowledgedSensitiveScope: 1,
     })])
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
-    expect(database.status().migrationVersion).toBe(8)
+    expect(database.status().migrationVersion).toBe(9)
     database.close()
   })
 })

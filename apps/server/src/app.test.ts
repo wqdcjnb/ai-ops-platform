@@ -25,8 +25,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(8)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies']))
+    expect(body.migrationVersion).toBe(9)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status']))
   })
 
   it('requires a session for protected resources', async () => {
@@ -509,7 +509,7 @@ describe('BFF', () => {
     expect(body.connections.items.every((item: { credentialValueAvailable: boolean }) => item.credentialValueAvailable === false)).toBe(true)
     expect(body.features.source).toBe('database')
     expect(body.features.items.every((item: { enabled: boolean; editable: boolean }) => item.enabled === false && item.editable === false)).toBe(true)
-    expect(body.backup).toMatchObject({ configured: false, browserDownloadAllowed: false })
+    expect(body.backup).toMatchObject({ source: 'database', configured: false, browserDownloadAllowed: false })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|password/i)
   })
 

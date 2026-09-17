@@ -24,7 +24,7 @@ describe('settings contract', () => {
     expect(value.retention.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'operation-audit', days: 365, minimumNecessary: true }),
     ]))
-    expect(value.backup).toMatchObject({ configured: false, browserDownloadAllowed: false })
+    expect(value.backup).toMatchObject({ source: 'database', configured: false, browserDownloadAllowed: false })
     database.close()
   })
 })

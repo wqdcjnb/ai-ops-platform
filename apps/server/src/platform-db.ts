@@ -188,6 +188,18 @@ const migrationSql = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS system_backup_status (
+    id TEXT PRIMARY KEY CHECK (id = 'platform-sqlite'),
+    configured INTEGER NOT NULL DEFAULT 0 CHECK (configured = 0),
+    storage_target_configured INTEGER NOT NULL DEFAULT 0 CHECK (storage_target_configured = 0),
+    last_backup_at TEXT CHECK (last_backup_at IS NULL),
+    last_verified_at TEXT CHECK (last_verified_at IS NULL),
+    last_restore_drill_at TEXT CHECK (last_restore_drill_at IS NULL),
+    browser_download_allowed INTEGER NOT NULL DEFAULT 0 CHECK (browser_download_allowed = 0),
+    notice TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -378,6 +390,11 @@ export interface PlatformRetentionPolicySeed {
   appliesTo: string
   cleanupState: 'not_configured' | 'unverified'
   minimumNecessary: boolean
+}
+
+export interface PlatformBackupStatusSeed {
+  id: 'platform-sqlite'
+  notice: string
 }
 
 export function hashPlatformPassword(value: string) {
@@ -603,6 +620,17 @@ export class PlatformDatabase {
     applies_to = excluded.applies_to, cleanup_state = excluded.cleanup_state,
     minimum_necessary = excluded.minimum_necessary, updated_at = excluded.updated_at`).run(
       seed.id, seed.label, seed.days, seed.appliesTo, seed.cleanupState, Number(seed.minimumNecessary), timestamp, timestamp,
+    )
+  }
+
+  seedBackupStatus(seed: PlatformBackupStatusSeed, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO system_backup_status(
+      id, configured, storage_target_configured, last_backup_at, last_verified_at, last_restore_drill_at,
+      browser_download_allowed, notice, created_at, updated_at
+    ) VALUES (?, 0, 0, NULL, NULL, NULL, 0, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET notice = excluded.notice, updated_at = excluded.updated_at`).run(
+      seed.id, seed.notice, timestamp, timestamp,
     )
   }
 
@@ -846,7 +874,31 @@ export class PlatformDatabase {
         appliesTo: string
         cleanupState: 'not_configured' | 'unverified'
         minimumNecessary: number
-      }>
+    }>
+  }
+
+  getBackupStatus() {
+    const row = this.db.prepare(`SELECT configured, storage_target_configured AS storageTargetConfigured,
+      last_backup_at AS lastBackupAt, last_verified_at AS lastVerifiedAt,
+      last_restore_drill_at AS lastRestoreDrillAt, browser_download_allowed AS browserDownloadAllowed, notice
+      FROM system_backup_status WHERE id = 'platform-sqlite'`).get() as {
+        configured: number
+        storageTargetConfigured: number
+        lastBackupAt: null
+        lastVerifiedAt: null
+        lastRestoreDrillAt: null
+        browserDownloadAllowed: number
+        notice: string
+    } | undefined
+    return row ? {
+      configured: false as const,
+      storageTargetConfigured: false as const,
+      lastBackupAt: row.lastBackupAt,
+      lastVerifiedAt: row.lastVerifiedAt,
+      lastRestoreDrillAt: row.lastRestoreDrillAt,
+      browserDownloadAllowed: false as const,
+      notice: row.notice,
+    } : null
   }
 
   recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now()) {
@@ -887,6 +939,7 @@ export class PlatformDatabase {
       featureFlags: count('system_feature_flags'),
       roleDefinitions: count('system_role_definitions'),
       retentionPolicies: count('system_retention_policies'),
+      backupStatus: count('system_backup_status'),
     }
   }
 
@@ -1016,6 +1069,11 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { id: 'export-files', label: '导出文件', days: 7, appliesTo: '异步生成的受控下载文件', cleanupState: 'not_configured', minimumNecessary: true },
   ]
   for (const policy of retentionPolicies) database.seedRetentionPolicy(policy)
+
+  database.seedBackupStatus({
+    id: 'platform-sqlite',
+    notice: '尚未配置平台数据库备份作业；页面不允许直接下载数据库、密钥或认证文件。',
+  })
 
   const auditEvents: PlatformAuditEventSeed[] = [
     { id: 'audit-login-success', actorUserId: 'user-super-admin', action: 'login', resourceType: 'session', resourceId: 'session-demo-01', result: 'success', requestId: 'req-audit-login-01', summary: { message: '超级管理员通过本机演示身份进入管理控制台。' } },
