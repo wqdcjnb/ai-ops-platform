@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { isAlertVisible, isDepartmentVisible, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const platformServiceStateSchema = z.enum(['healthy', 'reachable', 'auth_required', 'offline'])
@@ -128,11 +129,11 @@ export function createPlatformStatus(options: CreatePlatformStatusOptions): Plat
   }
 }
 
-export function createTaskSummary(database: PlatformDatabase, now = new Date()): TaskSummary {
+export function createTaskSummary(database: PlatformDatabase, now = new Date(), scope: DataScope = { mode: 'global' }): TaskSummary {
   const timestamp = now.getTime()
-  const openAlerts = database.listAlertEvents().filter((event) => event.status === 'open')
+  const openAlerts = database.listAlertEvents().filter((event) => event.status === 'open' && isAlertVisible(database, scope, { type: event.subjectType, id: event.subjectId }))
   const criticalAlerts = openAlerts.filter((event) => event.severity === 'critical')
-  const keys = database.listApiKeys()
+  const keys = database.listApiKeys().filter((key) => isDepartmentVisible(scope, key.departmentId))
   const activeKeys = keys.filter((key) => key.status !== 'revoked')
   const expiringKeys = activeKeys.filter((key) => {
     if (key.status === 'expiring') return true

@@ -95,7 +95,7 @@ describe('New API catalog mapping with simulated upstream responses', () => {
   it('keeps default demo mode independent of management access and enforces live admin access', async () => {
     const reader = readerFor()
     const app = buildApp({ databasePath: ':memory:', catalogReader: reader, probeNewApi: async () => ({ state: 'offline', authConfigured: false, checkedAt: now }), authService: {
-      authenticate: () => ({ id: 'lead', username: 'lead', displayName: 'Lead', role: 'department_lead', roleLabel: '负责人' }),
+      authenticate: () => ({ id: 'lead', username: 'lead', displayName: 'Lead', role: 'department_lead', roleLabel: '负责人', departmentId: 'content' }),
       getSession: () => null, verifyCsrf: () => true, login: () => null, revoke() {}, setSessionCookie() {}, clearSessionCookie() {},
     } })
     apps.push(app)

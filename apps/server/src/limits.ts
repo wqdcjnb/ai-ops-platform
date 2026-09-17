@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const limitsQuerySchema = z.object({
@@ -169,7 +170,30 @@ function quotaNotice(newApi: NewApiStatus) {
   return '软额度目标来自平台 SQLite；New API 当前离线'
 }
 
-export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQuery, newApi: NewApiStatus, now = new Date()): LimitsResponse {
+function nodesForScope(nodes: LimitNode[], scope: DataScope) {
+  if (scope.mode === 'global') return nodes
+  const root = nodes.find((node) => node.id === `department-${scope.departmentId}`)
+  if (!root) return []
+  const visibleIds = new Set<string>([root.id])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of nodes) {
+      if (node.parentId && visibleIds.has(node.parentId) && !visibleIds.has(node.id)) {
+        visibleIds.add(node.id)
+        changed = true
+      }
+    }
+  }
+  return nodes.filter((node) => visibleIds.has(node.id)).map((node) => ({
+    ...node,
+    parentId: node.id === root.id ? null : node.parentId,
+    depth: node.depth - root.depth,
+    inheritedFrom: node.id === root.id ? null : node.inheritedFrom,
+  }))
+}
+
+export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): LimitsResponse {
   const demo = createDemoLimits({ level: 'all', search: '' }, newApi, now)
   const policies = database.listQuotaPolicies()
   const all = demo.items.map((node) => {
@@ -182,9 +206,19 @@ export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQu
     const state = (month.used + month.reserved) / month.limit >= 1 ? 'reached' : (month.used + month.reserved) / month.limit >= 0.8 ? 'near' : 'normal'
     return { ...node, mode: 'soft' as const, state: state as LimitNode['state'], periods }
   })
+  const scoped = nodesForScope(all, scope)
+  if (!scoped.length) {
+    return {
+      ...demo,
+      meta: { ...demo.meta, source: 'database', notice: `${quotaNotice(newApi)}${scopeNotice(scope)}` },
+      summary: { monthlyLimit: 1, used: 0, reserved: 0, percent: 0, alertedScopes: 0, hitCount: 0 },
+      options: { levels: [] }, items: [], total: 0,
+    }
+  }
   const search = query.search.toLocaleLowerCase('zh-CN')
-  const items = all.filter((node) => (query.level === 'all' || node.level === query.level) && (!search || [node.name, node.descriptor, node.inheritedFrom ?? ''].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))))
-  const company = all[0]!
-  const month = company.periods.find((period) => period.id === 'month')!
-  return { ...demo, meta: { ...demo.meta, source: 'database', notice: quotaNotice(newApi) }, summary: { monthlyLimit: month.limit, used: month.used, reserved: month.reserved, percent: month.percent, alertedScopes: all.filter((node) => node.state !== 'normal').length, hitCount: company.rates.rpm.hits }, items, total: items.length }
+  const items = scoped.filter((node) => (query.level === 'all' || node.level === query.level) && (!search || [node.name, node.descriptor, node.inheritedFrom ?? ''].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))))
+  const root = scoped[0]!
+  const month = root.periods.find((period) => period.id === 'month')!
+  const levels = demo.options.levels.filter((option) => scoped.some((node) => node.level === option.id))
+  return { ...demo, meta: { ...demo.meta, source: 'database', notice: `${quotaNotice(newApi)}${scopeNotice(scope)}` }, summary: { monthlyLimit: month.limit, used: month.used, reserved: month.reserved, percent: month.percent, alertedScopes: scoped.filter((node) => node.state !== 'normal').length, hitCount: root.rates.rpm.hits }, options: { levels }, items, total: items.length }
 }

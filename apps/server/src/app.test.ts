@@ -78,6 +78,56 @@ describe('BFF', () => {
     expect(employeeResource.statusCode).toBe(200)
   })
 
+  it('limits department leaders to their own SQLite department data', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'lead-content', password: 'demo-lead-content' } })
+    expect(login.statusCode).toBe(200)
+    expect(login.json().user).toMatchObject({ role: 'department_lead', departmentId: 'content' })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+
+    const people = await app.inject({ method: 'GET', url: '/api/people?pageSize=50', headers: { cookie } })
+    expect(people.statusCode).toBe(200)
+    expect(people.json().summary).toMatchObject({ total: 3, departments: 1 })
+    expect(people.json().items.every((item: { department: { id: string } }) => item.department.id === 'content')).toBe(true)
+    const otherPerson = await app.inject({ method: 'GET', url: '/api/people/person-zhou', headers: { cookie } })
+    expect(otherPerson.statusCode).toBe(404)
+
+    const keys = await app.inject({ method: 'GET', url: '/api/keys?pageSize=50', headers: { cookie } })
+    expect(keys.statusCode).toBe(200)
+    expect(keys.json().items).not.toHaveLength(0)
+    expect(keys.json().items.every((item: { owner: { name: string } }) => ['林筱雨', '何沐晨', '严可欣'].includes(item.owner.name))).toBe(true)
+    const otherKey = await app.inject({ method: 'GET', url: '/api/keys/key-zhou-1', headers: { cookie } })
+    expect(otherKey.statusCode).toBe(404)
+
+    const usage = await app.inject({ method: 'GET', url: '/api/usage?period=30d&pageSize=50', headers: { cookie } })
+    expect(usage.statusCode).toBe(200)
+    expect(usage.json().items.every((item: { person: { department: { id: string } } }) => item.person.department.id === 'content')).toBe(true)
+    const otherUsage = await app.inject({ method: 'GET', url: '/api/usage/req-demo-003', headers: { cookie } })
+    expect(otherUsage.statusCode).toBe(404)
+
+    const limits = await app.inject({ method: 'GET', url: '/api/limits', headers: { cookie } })
+    expect(limits.statusCode).toBe(200)
+    expect(limits.json().items[0]).toMatchObject({ id: 'department-content', parentId: null, depth: 0 })
+    expect(limits.json().items.every((item: { id: string }) => !item.id.includes('zhou') && !item.id.includes('ads'))).toBe(true)
+
+    const alerts = await app.inject({ method: 'GET', url: '/api/alerts?pageSize=50', headers: { cookie } })
+    expect(alerts.statusCode).toBe(200)
+    expect(alerts.json().items.every((item: { subject: { type: string } }) => ['department', 'person', 'key'].includes(item.subject.type))).toBe(true)
+    const globalAlert = await app.inject({ method: 'GET', url: '/api/alerts/alert-error-global', headers: { cookie } })
+    expect(globalAlert.statusCode).toBe(404)
+    const rules = await app.inject({ method: 'GET', url: '/api/alert-rules', headers: { cookie } })
+    expect(rules.statusCode).toBe(200)
+    expect(rules.json().items).toEqual([])
+
+    const overview = await app.inject({ method: 'GET', url: '/api/overview?period=30d', headers: { cookie } })
+    expect(overview.statusCode).toBe(200)
+    expect(overview.json().people.every((item: { department: string }) => item.department === '内容运营')).toBe(true)
+    const tasks = await app.inject({ method: 'GET', url: '/api/tasks/summary', headers: { cookie } })
+    expect(tasks.statusCode).toBe(200)
+    expect(tasks.json().summary.activeKeys).toBe(keys.json().items.filter((item: { status: string }) => item.status === 'active').length)
+  })
+
   it('rejects invalid credentials without creating a session', async () => {
     const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)

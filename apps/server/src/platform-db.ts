@@ -232,6 +232,7 @@ export interface PlatformUser {
   role: PlatformUserRole
   roleLabel: string
   status: 'active' | 'disabled'
+  departmentId: string | null
 }
 
 export interface PlatformUserSeed {
@@ -758,6 +759,17 @@ export class PlatformDatabase {
     return rows.map((row) => ({ ...row, models: JSON.parse(row.modelsJson) as string[] }))
   }
 
+  findPersonDepartmentId(personId: string) {
+    const row = this.db.prepare("SELECT department_id AS departmentId FROM users WHERE id = ? AND role = 'employee' LIMIT 1").get(personId) as { departmentId: string | null } | undefined
+    return row?.departmentId ?? null
+  }
+
+  findKeyDepartmentId(keyId: string) {
+    const row = this.db.prepare(`SELECT u.department_id AS departmentId FROM api_keys k
+      JOIN users u ON u.id = k.owner_user_id WHERE k.id = ? LIMIT 1`).get(keyId) as { departmentId: string | null } | undefined
+    return row?.departmentId ?? null
+  }
+
   ownerExists(ownerUserId: string) {
     return Boolean(this.db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'employee' AND status = 'active' LIMIT 1").get(ownerUserId))
   }
@@ -997,7 +1009,7 @@ export class PlatformDatabase {
 
   findAuthSession(tokenHash: string, now = this.now()) {
     const row = this.db.prepare(`SELECT s.id AS sessionId, s.csrf_token_hash AS csrfTokenHash, s.expires_at AS expiresAt,
-      u.id AS userId, u.username, u.display_name AS displayName, u.role, u.status
+      u.id AS userId, u.username, u.display_name AS displayName, u.role, u.status, u.department_id AS departmentId
       FROM user_sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active'
       LIMIT 1`).get(tokenHash, now.toISOString()) as {
@@ -1009,13 +1021,14 @@ export class PlatformDatabase {
         displayName: string
         role: PlatformUserRole
         status: PlatformUser['status']
+        departmentId: string | null
       } | undefined
     if (!row) return null
     return {
       id: row.sessionId,
       csrfTokenHash: row.csrfTokenHash,
       expiresAt: row.expiresAt,
-      user: { id: row.userId, username: row.username, displayName: row.displayName, role: row.role, roleLabel: '', status: row.status },
+      user: { id: row.userId, username: row.username, displayName: row.displayName, role: row.role, roleLabel: '', status: row.status, departmentId: row.departmentId },
     }
   }
 
@@ -1052,7 +1065,7 @@ export class PlatformDatabase {
   }
 
   findUserByUsername(username: string) {
-    const row = this.db.prepare(`SELECT id, username, display_name AS displayName, role, status
+    const row = this.db.prepare(`SELECT id, username, display_name AS displayName, role, status, department_id AS departmentId
       FROM users WHERE username = ? LIMIT 1`).get(username) as (PlatformUser & { status: PlatformUser['status'] }) | undefined
     return row ?? null
   }

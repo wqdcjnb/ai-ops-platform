@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 const optionSchema = z.object({ id: z.string(), label: z.string() })
@@ -108,8 +109,8 @@ function optionsFor(all: UsageItem[]) {
   }
 }
 
-export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuery, newApi: NewApiStatus, now = new Date()): UsageResponse {
-  const all = database.listUsageRequests().map(toItem)
+export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): UsageResponse {
+  const all = database.listUsageRequests().map(toItem).filter((item) => isDepartmentVisible(scope, item.person.department.id))
   const cutoff = now.getTime() - periodMinutes(query.period) * 60_000
   const search = query.search.toLocaleLowerCase('zh-CN')
   const filtered = all.filter((item) => {
@@ -129,7 +130,7 @@ export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuer
   const start = (query.page - 1) * query.pageSize
   const costs = (type: UsageItem['cost']['type']) => round(filtered.filter((item) => item.cost.type === type).reduce((sum, item) => sum + item.cost.amountUsd, 0), 5)
   return usageResponseSchema.parse({
-    meta: { source: 'database', simulated: true, generatedAt: now.toISOString(), period: query.period, notice: noticeFor(newApi) },
+    meta: { source: 'database', simulated: true, generatedAt: now.toISOString(), period: query.period, notice: `${noticeFor(newApi)}${scopeNotice(scope)}` },
     summary: {
       requests: filtered.length,
       tokens: filtered.reduce((sum, item) => sum + item.tokens.total, 0),
@@ -144,11 +145,11 @@ export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuer
   })
 }
 
-export function createDatabaseUsageDetail(database: PlatformDatabase, requestId: string, newApi: NewApiStatus, now = new Date()): UsageDetailResponse | null {
+export function createDatabaseUsageDetail(database: PlatformDatabase, requestId: string, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): UsageDetailResponse | null {
   const record = database.listUsageRequests().find((item) => item.requestId === requestId)
-  if (!record) return null
+  if (!record || !isDepartmentVisible(scope, record.departmentId)) return null
   return usageDetailResponseSchema.parse({
-    meta: { source: 'database', simulated: true, generatedAt: now.toISOString(), notice: noticeFor(newApi) },
+    meta: { source: 'database', simulated: true, generatedAt: now.toISOString(), notice: `${noticeFor(newApi)}${scopeNotice(scope)}` },
     item: toItem(record),
     route: { alias: record.routeAlias, retryCount: record.retryCount, requestIdPropagated: Boolean(record.requestIdPropagated) },
     client: { name: record.clientName, mode: record.clientMode },

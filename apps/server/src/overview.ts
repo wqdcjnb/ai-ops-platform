@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { isAlertVisible, isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const periodSchema = z.enum(['7d', '30d'])
@@ -48,8 +49,8 @@ function percentile(values: number[], quantile: number) {
 }
 function rate(items: Array<{ status: string }>) { return items.length ? Math.round((items.filter((item) => item.status === 'succeeded').length / items.length) * 1_000) / 10 : 100 }
 
-export function createDatabaseOverview(period: Period, database: PlatformDatabase, now = new Date(), newApi: NewApiStatus = { state: 'offline', authConfigured: false, checkedAt: now.toISOString() }): OverviewResponse {
-  const records = database.listUsageRequests()
+export function createDatabaseOverview(period: Period, database: PlatformDatabase, now = new Date(), newApi: NewApiStatus = { state: 'offline', authConfigured: false, checkedAt: now.toISOString() }, scope: DataScope = { mode: 'global' }): OverviewResponse {
+  const records = database.listUsageRequests().filter((item) => isDepartmentVisible(scope, item.departmentId))
   const todayKey = shanghaiDate(now)
   const yesterdayKey = shanghaiDate(new Date(now.getTime() - 86_400_000))
   const monthStart = `${todayKey.slice(0, 7)}-01`
@@ -69,9 +70,9 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
     return { date: label, requests: items.length, points: rounded(sum(items, (item) => item.points)) }
   })
   const monthlyPoints = sum(month, (item) => item.points)
-  const companyTarget = database.listQuotaPolicies().find((item) => item.level === 'company' && item.period === 'month')?.targetPoints ?? 1
+  const companyTarget = database.listQuotaPolicies().find((item) => item.level === (scope.mode === 'department' ? 'department' : 'company') && item.subjectId === (scope.mode === 'department' ? scope.departmentId : 'company-xinzhi') && item.period === 'month')?.targetPoints ?? 1
 
-  const peopleById = new Map(database.listPeople().map((person) => [person.id, person]))
+  const peopleById = new Map(database.listPeople().filter((person) => isDepartmentVisible(scope, person.departmentId)).map((person) => [person.id, person]))
   const quotas = new Map(database.listQuotaPolicies().filter((item) => item.level === 'person' && item.period === 'month').map((item) => [item.subjectId, item.targetPoints]))
   const people = [...peopleById.values()].map((person) => {
     const items = month.filter((item) => item.personId === person.id)
@@ -106,7 +107,7 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
     }
   }).sort((left, right) => right.requests - left.requests)
 
-  const alerts = database.listAlertEvents().filter((item) => item.status !== 'closed').slice(0, 3).map((item) => ({
+  const alerts = database.listAlertEvents().filter((item) => item.status !== 'closed' && isAlertVisible(database, scope, { type: item.subjectType, id: item.subjectId })).slice(0, 3).map((item) => ({
     id: item.id,
     level: item.environment === 'experiment' ? 'experiment' as const : item.severity === 'critical' ? 'danger' as const : 'warning' as const,
     title: item.title,
@@ -120,7 +121,7 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
   return {
     meta: {
       source: 'database', simulated: true, generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', period,
-      notice: '核心指标、趋势、人员排行、渠道摘要和告警摘要来自 SQLite 可重复模拟记录；不等同于实时网关健康状态、真实调用日志或供应商账单。',
+      notice: `核心指标、趋势、人员排行、渠道摘要和告警摘要来自 SQLite 可重复模拟记录；不等同于实时网关健康状态、真实调用日志或供应商账单。${scopeNotice(scope)}`,
     },
     service: { bff: 'healthy', newApi },
     metrics: {

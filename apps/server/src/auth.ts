@@ -18,6 +18,7 @@ export const authUserSchema = z.object({
   displayName: z.string(),
   role: appRoleSchema,
   roleLabel: z.string(),
+  departmentId: z.string().nullable(),
 })
 export type AuthUser = z.infer<typeof authUserSchema>
 
@@ -94,6 +95,7 @@ function accountFromEnvironment(role: AppRole, fallback: { username: string; pas
       displayName: process.env[`AUTH_${prefix}_DISPLAY_NAME`] ?? fallback.displayName,
       role,
       roleLabel: fallback.roleLabel,
+      departmentId: role === 'employee' ? 'content' : null,
     },
     password: process.env[`AUTH_${prefix}_PASSWORD`] ?? fallback.password,
   }
@@ -114,6 +116,7 @@ function toAuthUser(user: PlatformUser): AuthUser {
     displayName: user.displayName,
     role: user.role,
     roleLabel: roleLabels[user.role],
+    departmentId: user.departmentId,
   }
 }
 

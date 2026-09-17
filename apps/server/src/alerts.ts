@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { isAlertVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 const severitySchema = z.enum(['critical', 'warning', 'info'])
@@ -93,10 +94,10 @@ function noticeFor(newApi: NewApiStatus) {
   return '当前读取 SQLite 可重复模拟告警；New API 当前离线'
 }
 
-function meta(newApi: NewApiStatus, now: Date) { return { source: 'database' as const, simulated: true as const, generatedAt: now.toISOString(), notice: noticeFor(newApi) } }
+function meta(newApi: NewApiStatus, now: Date, scope: DataScope) { return { source: 'database' as const, simulated: true as const, generatedAt: now.toISOString(), notice: `${noticeFor(newApi)}${scopeNotice(scope)}` } }
 
-function databaseEvents(database: PlatformDatabase): AlertEvent[] {
-  return database.listAlertEvents().map((item) => ({
+function databaseEvents(database: PlatformDatabase, scope: DataScope): AlertEvent[] {
+  return database.listAlertEvents().filter((item) => isAlertVisible(database, scope, { type: item.subjectType, id: item.subjectId })).map((item) => ({
     id: item.id, title: item.title, summary: item.summary, severity: item.severity, status: item.status,
     environment: item.environment, source: item.source,
     subject: { type: item.subjectType, id: item.subjectId, name: item.subjectName },
@@ -119,26 +120,26 @@ function databaseRules(database: PlatformDatabase): AlertRule[] {
   }))
 }
 
-export function createDatabaseAlertSummary(database: PlatformDatabase, newApi: NewApiStatus, now = new Date()) {
-  const events = databaseEvents(database)
-  return { meta: meta(newApi, now), summary: { open: events.filter((item) => item.status === 'open').length, critical: events.filter((item) => item.status === 'open' && item.severity === 'critical').length, warning: events.filter((item) => item.status === 'open' && item.severity === 'warning').length, experiment: events.filter((item) => item.status !== 'closed' && item.environment === 'experiment').length, acknowledged: events.filter((item) => item.status === 'acknowledged').length, closed: events.filter((item) => item.status === 'closed').length }, notificationConfig }
+export function createDatabaseAlertSummary(database: PlatformDatabase, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
+  const events = databaseEvents(database, scope)
+  return { meta: meta(newApi, now, scope), summary: { open: events.filter((item) => item.status === 'open').length, critical: events.filter((item) => item.status === 'open' && item.severity === 'critical').length, warning: events.filter((item) => item.status === 'open' && item.severity === 'warning').length, experiment: events.filter((item) => item.status !== 'closed' && item.environment === 'experiment').length, acknowledged: events.filter((item) => item.status === 'acknowledged').length, closed: events.filter((item) => item.status === 'closed').length }, notificationConfig }
 }
 
-export function createDatabaseAlerts(database: PlatformDatabase, query: AlertsQuery, newApi: NewApiStatus, now = new Date()) {
-  const events = databaseEvents(database)
+export function createDatabaseAlerts(database: PlatformDatabase, query: AlertsQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
+  const events = databaseEvents(database, scope)
   const search = query.search.toLocaleLowerCase('zh-CN')
   const filtered = events.filter((item) => {
     const matchesSearch = !search || [item.id, item.title, item.summary, item.subject.name, item.rule.name].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
     return matchesSearch && (query.severity === 'all' || item.severity === query.severity) && (query.status === 'all' || item.status === query.status) && (query.source === 'all' || item.source === query.source) && (query.environment === 'all' || item.environment === query.environment)
   })
   const start = (query.page - 1) * query.pageSize
-  return { meta: meta(newApi, now), options: { sources: [{ id: 'quota' as const, label: '额度' }, { id: 'traffic' as const, label: '流量' }, { id: 'error_rate' as const, label: '错误率' }, { id: 'balance' as const, label: '余额' }, { id: 'credential' as const, label: '凭证' }, { id: 'upstream' as const, label: '上游' }] }, items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) } }
+  return { meta: meta(newApi, now, scope), options: { sources: [{ id: 'quota' as const, label: '额度' }, { id: 'traffic' as const, label: '流量' }, { id: 'error_rate' as const, label: '错误率' }, { id: 'balance' as const, label: '余额' }, { id: 'credential' as const, label: '凭证' }, { id: 'upstream' as const, label: '上游' }] }, items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) } }
 }
 
-export function createDatabaseAlertRules(database: PlatformDatabase, newApi: NewApiStatus, now = new Date()) { return { meta: meta(newApi, now), items: databaseRules(database), notificationConfig } }
+export function createDatabaseAlertRules(database: PlatformDatabase, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) { return { meta: meta(newApi, now, scope), items: scope.mode === 'global' ? databaseRules(database) : [], notificationConfig } }
 
-export function createDatabaseAlertDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date()) {
-  const item = databaseEvents(database).find((event) => event.id === id)
+export function createDatabaseAlertDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
+  const item = databaseEvents(database, scope).find((event) => event.id === id)
   if (!item) return null
   const timeline: z.infer<typeof alertDetailResponseSchema>['timeline'] = [
     { id: `${id}-detected`, type: 'detected' as const, occurredAt: item.firstOccurredAt, title: '检测到事件', description: `${item.rule.name}触发：${item.trigger.valueLabel}（阈值 ${item.rule.thresholdLabel}）。` },
@@ -146,5 +147,5 @@ export function createDatabaseAlertDetail(database: PlatformDatabase, id: string
   ]
   if (item.acknowledgedAt) timeline.push({ id: `${id}-ack`, type: 'acknowledged', occurredAt: item.acknowledgedAt, title: '事件已确认', description: `${item.assignee?.name ?? '管理员'}已接手处理。` })
   if (item.closedAt) timeline.push({ id: `${id}-closed`, type: 'closed', occurredAt: item.closedAt, title: '事件已关闭', description: '指标已恢复或演示事件完成处置。' })
-  return { meta: meta(newApi, now), item, analysis: { cause: item.summary, impact: item.environment === 'experiment' ? '影响限定在 CPA 实验组，不会跨组回退至生产路径。' : '可能影响对应生产范围；当前软额度告警不会阻断请求。', recommendation: item.source === 'balance' ? '核对供应商账单并安排充值，完成真实通知配置后再启用自动提醒。' : item.source === 'credential' ? '在凭证管理系统中续期并重新验证，不要在页面或日志中粘贴凭证。' : '按关联请求 ID 与渠道健康状态定位问题；确认、关闭和静默将在写接口与审计完成后开放。', rawUpstreamBodyAvailable: false as const }, timeline }
+  return { meta: meta(newApi, now, scope), item, analysis: { cause: item.summary, impact: item.environment === 'experiment' ? '影响限定在 CPA 实验组，不会跨组回退至生产路径。' : '可能影响对应生产范围；当前软额度告警不会阻断请求。', recommendation: item.source === 'balance' ? '核对供应商账单并安排充值，完成真实通知配置后再启用自动提醒。' : item.source === 'credential' ? '在凭证管理系统中续期并重新验证，不要在页面或日志中粘贴凭证。' : '按关联请求 ID 与渠道健康状态定位问题；确认、关闭和静默将在写接口与审计完成后开放。', rawUpstreamBodyAvailable: false as const }, timeline }
 }

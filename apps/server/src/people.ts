@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const peopleQuerySchema = z.object({
@@ -281,7 +282,7 @@ function filterPeopleResponse(query: PeopleQuery, people: PeopleResponse['items'
   }
 }
 
-export function createDatabasePeople(database: PlatformDatabase, query: PeopleQuery, newApi: NewApiStatus, now = new Date()): PeopleResponse {
+export function createDatabasePeople(database: PlatformDatabase, query: PeopleQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): PeopleResponse {
   const demo = createDemoPeople({ search: '', department: 'all', status: 'all', goal: 'all', page: 1, pageSize: 50 }, newApi, now)
   const demoById = new Map(demo.items.map((person) => [person.id, person]))
   const tones: PeopleResponse['items'][number]['tone'][] = ['blue', 'violet', 'green', 'amber', 'coral']
@@ -311,7 +312,8 @@ export function createDatabasePeople(database: PlatformDatabase, query: PeopleQu
       tone: tones[index % tones.length]!,
     }
   })
-  return filterPeopleResponse(query, people, newApi, now, 'database', databaseNotice(newApi))
+  const visiblePeople = people.filter((person) => isDepartmentVisible(scope, person.department.id))
+  return filterPeopleResponse(query, visiblePeople, newApi, now, 'database', `${databaseNotice(newApi)}${scopeNotice(scope)}`)
 }
 
 function findDemoPerson(id: string, newApi: NewApiStatus, now: Date) {
@@ -370,9 +372,9 @@ export function createDemoPersonDetail(id: string, newApi: NewApiStatus, now = n
   }
 }
 
-export function createDatabasePersonDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date()): PersonDetailResponse | null {
+export function createDatabasePersonDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): PersonDetailResponse | null {
   const person = findDatabasePerson(database, id, newApi, now)
-  if (!person) return null
+  if (!person || !isDepartmentVisible(scope, person.department.id)) return null
   const models = modelsForPurpose(person.purpose)
   const activeModels = models.filter((model) => model.allowed).map((model) => model.alias)
   const keys = Array.from({ length: person.keyCount }, (_, index) => ({
@@ -419,9 +421,9 @@ export function createDemoPersonUsage(id: string, period: PersonUsagePeriod, new
   return { meta: { source: 'demo', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', period }, items }
 }
 
-export function createDatabasePersonUsage(database: PlatformDatabase, id: string, period: PersonUsagePeriod, newApi: NewApiStatus, now = new Date()): PersonUsageResponse | null {
+export function createDatabasePersonUsage(database: PlatformDatabase, id: string, period: PersonUsagePeriod, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): PersonUsageResponse | null {
   const person = findDatabasePerson(database, id, newApi, now)
-  if (!person) return null
+  if (!person || !isDepartmentVisible(scope, person.department.id)) return null
   const count = period === '7d' ? 7 : 30
   const base = Math.max(0, Math.round(person.goal.used / Math.max(count, 1)))
   const items = Array.from({ length: count }, (_, index) => {

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import { isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const keysQuerySchema = z.object({
@@ -217,10 +218,12 @@ function keyExpiryState(expiresAt: string, now: Date): 'normal' | 'expiring' | '
   return remaining <= 30 * 86_400_000 ? 'expiring' : 'normal'
 }
 
-export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery, newApi: NewApiStatus, now = new Date()): KeysResponse {
+export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): KeysResponse {
   const demo = createDemoKeys({ search: '', owner: 'all', purpose: 'all', model: 'all', status: 'all', page: 1, pageSize: 50 }, newApi, now)
   const demoById = new Map(demo.items.map((item) => [item.id, item]))
-  const keys = database.listApiKeys().map((row) => {
+  const databaseKeys = database.listApiKeys()
+  const departmentByKeyId = new Map(databaseKeys.map((row) => [row.id, row.departmentId]))
+  const keys = databaseKeys.map((row) => {
     const existing = demoById.get(row.id)
     const expiresAt = row.expiresAt ?? existing?.expiresAt ?? new Date(now.getTime() + 90 * 86_400_000).toISOString()
     const status = row.status === 'revoked' ? 'disabled' as const : existing?.status ?? 'active' as const
@@ -237,8 +240,11 @@ export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery,
       usage: existing?.usage ?? { requests: 0, points: 0 },
     }
   })
+  const visibleKeys = keys.filter((key) => {
+    return isDepartmentVisible(scope, departmentByKeyId.get(key.id))
+  })
   const search = query.search.toLocaleLowerCase('zh-CN')
-  const filtered = keys.filter((key) => {
+  const filtered = visibleKeys.filter((key) => {
     const matchesSearch = !search || [key.masked, key.owner.name, key.owner.department, key.purpose, ...key.models].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
     const matchesOwner = query.owner === 'all' || key.owner.id === query.owner
     const matchesPurpose = query.purpose === 'all' || key.purpose === query.purpose
@@ -246,19 +252,19 @@ export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery,
     const matchesStatus = query.status === 'all' || (query.status === 'expiring' ? key.expiryState === 'expiring' : key.status === query.status)
     return matchesSearch && matchesOwner && matchesPurpose && matchesModel && matchesStatus
   })
-  const owners = [...new Map(keys.map((key) => [key.owner.id, { id: key.owner.id, name: key.owner.name }])).values()]
+  const owners = [...new Map(visibleKeys.map((key) => [key.owner.id, { id: key.owner.id, name: key.owner.name }])).values()]
   const start = (query.page - 1) * query.pageSize
   return {
-    meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: databaseNotice(newApi) },
-    summary: { total: keys.length, active: keys.filter((key) => key.status === 'active').length, disabled: keys.filter((key) => key.status === 'disabled').length, expiring: keys.filter((key) => key.expiryState === 'expiring').length },
-    options: { owners, purposes: [...new Set(keys.map((key) => key.purpose))], models: [...new Set(keys.flatMap((key) => key.models))] },
+    meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: `${databaseNotice(newApi)}${scopeNotice(scope)}` },
+    summary: { total: visibleKeys.length, active: visibleKeys.filter((key) => key.status === 'active').length, disabled: visibleKeys.filter((key) => key.status === 'disabled').length, expiring: visibleKeys.filter((key) => key.expiryState === 'expiring').length },
+    options: { owners, purposes: [...new Set(visibleKeys.map((key) => key.purpose))], models: [...new Set(visibleKeys.flatMap((key) => key.models))] },
     connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '员工只使用平台地址和个人 Key；不得接触管理凭据或上游密钥。' },
     items: filtered.slice(start, start + query.pageSize), page: query.page, pageSize: query.pageSize, total: filtered.length,
   }
 }
 
-export function createDatabaseKeyDetail(database: PlatformDatabase, id: string, now = new Date()): KeyDetailResponse | null {
-  const key = createDatabaseKeys(database, { search: '', owner: 'all', purpose: 'all', model: 'all', status: 'all', page: 1, pageSize: 50 }, { state: 'offline', authConfigured: false, checkedAt: now.toISOString() }, now).items.find((item) => item.id === id)
+export function createDatabaseKeyDetail(database: PlatformDatabase, id: string, now = new Date(), scope: DataScope = { mode: 'global' }): KeyDetailResponse | null {
+  const key = createDatabaseKeys(database, { search: '', owner: 'all', purpose: 'all', model: 'all', status: 'all', page: 1, pageSize: 50 }, { state: 'offline', authConfigured: false, checkedAt: now.toISOString() }, now, scope).items.find((item) => item.id === id)
   if (!key) return null
   const row = database.listApiKeys().find((item) => item.id === id)
   return {

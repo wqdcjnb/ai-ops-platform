@@ -23,6 +23,7 @@ import { conversationAccessBodySchema, conversationAccessResponseSchema, convers
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
+import { dataScopeFor } from './data-scope.js'
 import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
 
 const errorResponseSchema = z.object({
@@ -157,7 +158,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDatabaseOverview(request.query.period, database, new Date(), newApi)
+    return createDatabaseOverview(request.query.period, database, new Date(), newApi, dataScopeFor(request.authUser))
   })
 
   app.get('/api/integrations/new-api/status', {
@@ -186,7 +187,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/tasks/summary', {
     schema: { response: { 200: taskSummarySchema } },
-  }, async () => createTaskSummary(database))
+  }, async (request) => createTaskSummary(database, new Date(), dataScopeFor(request.authUser)))
 
   app.get('/api/people', {
     schema: {
@@ -198,7 +199,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDatabasePeople(database, request.query, newApi)
+    return createDatabasePeople(database, request.query, newApi, new Date(), dataScopeFor(request.authUser))
   })
 
   app.post('/api/people', {
@@ -247,7 +248,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDatabasePersonDetail(database, request.params.id, newApi)
+    const result = createDatabasePersonDetail(database, request.params.id, newApi, new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
   })
@@ -260,7 +261,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDatabasePersonUsage(database, request.params.id, request.query.period, newApi)
+    const result = createDatabasePersonUsage(database, request.params.id, request.query.period, newApi, new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
   })
@@ -269,7 +270,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { querystring: keysQuerySchema, response: { 200: keysResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDatabaseKeys(database, request.query, newApi)
+    return createDatabaseKeys(database, request.query, newApi, new Date(), dataScopeFor(request.authUser))
   })
 
   app.post('/api/keys', {
@@ -321,7 +322,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/keys/:id', {
     schema: { params: keyIdParamsSchema, response: { 200: keyDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
-    const result = createDatabaseKeyDetail(database, request.params.id)
+    const result = createDatabaseKeyDetail(database, request.params.id, new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'KEY_NOT_FOUND', message: '未找到指定 Key', requestId: request.id } })
   })
@@ -330,7 +331,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { querystring: limitsQuerySchema, response: { 200: limitsResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDatabaseLimits(database, request.query, newApi)
+    return createDatabaseLimits(database, request.query, newApi, new Date(), dataScopeFor(request.authUser))
   })
 
   app.get('/api/routes', {
@@ -381,34 +382,34 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { querystring: usageQuerySchema, response: { 200: usageResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDatabaseUsage(database, request.query, newApi)
+    return createDatabaseUsage(database, request.query, newApi, new Date(), dataScopeFor(request.authUser))
   })
 
   app.get('/api/usage/:requestId', {
     schema: { params: usageRequestParamsSchema, response: { 200: usageDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDatabaseUsageDetail(database, request.params.requestId, newApi)
+    const result = createDatabaseUsageDetail(database, request.params.requestId, newApi, new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'USAGE_NOT_FOUND', message: '未找到指定调用记录', requestId: request.id } })
   })
 
   app.get('/api/alerts/summary', {
     schema: { response: { 200: alertSummaryResponseSchema } },
-  }, async () => createDatabaseAlertSummary(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
+  }, async (request) => createDatabaseAlertSummary(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser)))
 
   app.get('/api/alerts', {
     schema: { querystring: alertsQuerySchema, response: { 200: alertsResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => createDatabaseAlerts(database, request.query, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
+  }, async (request) => createDatabaseAlerts(database, request.query, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser)))
 
   app.get('/api/alert-rules', {
     schema: { response: { 200: alertRulesResponseSchema } },
-  }, async () => createDatabaseAlertRules(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
+  }, async (request) => createDatabaseAlertRules(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser)))
 
   app.get('/api/alerts/:id', {
     schema: { params: alertParamsSchema, response: { 200: alertDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
-    const result = createDatabaseAlertDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)())
+    const result = createDatabaseAlertDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '未找到指定告警事件', requestId: request.id } })
   })
