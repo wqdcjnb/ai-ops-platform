@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { IconAlertTriangle, IconArrowLeft, IconArrowRight, IconBan, IconClock, IconDatabase, IconDownload, IconEye, IconFileSearch, IconKey, IconLock, IconMessageCircle, IconRefresh, IconSearch, IconShieldCheck, IconTool, IconUser, IconX } from '@tabler/icons-vue'
-import { ConversationAuditApiError, fetchConversationAudits, requestConversationAccess, type ConversationAccessResponse, type ConversationAuditFilters, type ConversationAuditRecord, type ConversationAuditResponse } from '../conversation-audit-api'
+import { ConversationAuditApiError, fetchConversationAccessHistory, fetchConversationAudits, requestConversationAccess, type ConversationAccessHistoryResponse, type ConversationAccessResponse, type ConversationAuditFilters, type ConversationAuditRecord, type ConversationAuditResponse } from '../conversation-audit-api'
 
 const data = ref<ConversationAuditResponse | null>(null)
 const selected = ref<ConversationAuditRecord | null>(null)
 const access = ref<ConversationAccessResponse | null>(null)
+const accessHistory = ref<ConversationAccessHistoryResponse | null>(null)
 const period = ref<ConversationAuditFilters['period']>('7d')
 const search = ref('')
 const person = ref('all')
@@ -22,10 +23,13 @@ const reason = ref('')
 const acknowledged = ref(false)
 const isLoading = ref(false)
 const isOpening = ref(false)
+const isHistoryLoading = ref(false)
 const errorMessage = ref('')
 const accessError = ref('')
+const historyError = ref('')
 let request: AbortController | undefined
 let accessRequest: AbortController | undefined
+let historyRequest: AbortController | undefined
 
 const stateText = { captured: '已采集', metadata_only: '仅元数据', expired: '已到期' }
 const redactionText = { passed: '脱敏通过', review_required: '需要复核', not_applicable: '不适用' }
@@ -49,8 +53,8 @@ function filters(): ConversationAuditFilters { return { period: period.value, se
 function applyFilters() { page.value = 1; closeSelection(); void loadData() }
 function clearFilters() { period.value = '7d'; search.value = ''; person.value = 'all'; key.value = 'all'; purpose.value = 'all'; model.value = 'all'; policy.value = 'all'; state.value = 'all'; redaction.value = 'all'; grouping.value = 'all'; applyFilters() }
 function changePage(next: number) { if (!data.value || next < 1 || next > data.value.pagination.totalPages) return; page.value = next; closeSelection(); void loadData() }
-function selectRecord(item: ConversationAuditRecord) { selected.value = item; access.value = null; reason.value = ''; acknowledged.value = false; accessError.value = '' }
-function closeSelection() { selected.value = null; access.value = null; reason.value = ''; acknowledged.value = false; accessError.value = ''; accessRequest?.abort() }
+function selectRecord(item: ConversationAuditRecord) { selected.value = item; access.value = null; accessHistory.value = null; reason.value = ''; acknowledged.value = false; accessError.value = ''; historyError.value = ''; void loadAccessHistory(item.id) }
+function closeSelection() { selected.value = null; access.value = null; accessHistory.value = null; reason.value = ''; acknowledged.value = false; accessError.value = ''; historyError.value = ''; accessRequest?.abort(); historyRequest?.abort() }
 
 async function loadData() {
   request?.abort(); const next = new AbortController(); request = next; isLoading.value = true; errorMessage.value = ''
@@ -61,13 +65,20 @@ async function loadData() {
 async function openContent() {
   if (!selected.value || !canOpen.value) return
   accessRequest?.abort(); const next = new AbortController(); accessRequest = next; isOpening.value = true; accessError.value = ''
-  try { access.value = await requestConversationAccess(selected.value.id, reason.value.trim(), next.signal) }
+  try { access.value = await requestConversationAccess(selected.value.id, reason.value.trim(), next.signal); if (selected.value?.id) void loadAccessHistory(selected.value.id) }
   catch (error) { if (!next.signal.aborted) accessError.value = error instanceof Error ? error.message : '无法打开脱敏轮次' }
   finally { if (accessRequest === next) isOpening.value = false }
 }
 
+async function loadAccessHistory(id: string) {
+  historyRequest?.abort(); const next = new AbortController(); historyRequest = next; isHistoryLoading.value = true; historyError.value = ''
+  try { const result = await fetchConversationAccessHistory(id, next.signal); if (selected.value?.id === id) accessHistory.value = result }
+  catch (error) { if (!next.signal.aborted && selected.value?.id === id) historyError.value = error instanceof Error ? error.message : '查看访问记录暂时无法加载' }
+  finally { if (historyRequest === next) isHistoryLoading.value = false }
+}
+
 onMounted(() => void loadData())
-onBeforeUnmount(() => { request?.abort(); accessRequest?.abort() })
+onBeforeUnmount(() => { request?.abort(); accessRequest?.abort(); historyRequest?.abort() })
 </script>
 
 <template>
@@ -103,6 +114,7 @@ onBeforeUnmount(() => { request?.abort(); accessRequest?.abort() })
                 <div class="conversation-message-list"><article v-for="message in access.content.messages" :key="message.id" class="conversation-message" :class="message.role"><header><span><IconTool v-if="message.role === 'tool'" :size="14" /><IconUser v-else-if="message.role === 'user'" :size="14" /><IconMessageCircle v-else :size="14" />{{ message.label }}</span><small>{{ dateTime(message.occurredAt) }}</small></header><p>{{ message.text }}</p><div v-if="message.redactionLabels.length" class="redaction-tags"><span v-for="label in message.redactionLabels" :key="label"><IconShieldCheck :size="12" />已脱敏：{{ label }}</span></div><div v-if="message.tool" class="tool-summary"><strong>{{ message.tool.name }}</strong><p>{{ message.tool.summary }}</p><small>参数与原始输出不可用</small></div></article></div>
                 <section class="conversation-retention"><IconClock :size="17" /><div><strong>计划于 {{ dateTime(access.retention.expiresAt) }} 到期</strong><p>{{ access.retention.notice }}</p></div></section><footer class="conversation-content-actions"><span>访问记录 {{ access.access.accessRecordId }} · {{ access.access.persisted ? 'SQLite 元数据已记录，原因原文不保存' : '未持久化' }}</span><button class="btn btn-white" disabled>复制</button><button class="btn btn-white" disabled>导出</button><button class="btn danger" disabled><IconBan :size="15" />删除</button></footer>
               </div>
+              <section class="conversation-access-history" aria-label="查看访问记录"><header><div><span><IconEye :size="16" /></span><div><strong>查看访问记录</strong><small>仅显示最近 20 条操作者、时间与原因长度；不显示原因原文。</small></div></div><em>{{ accessHistory?.items.length ?? 0 }} 条</em></header><div v-if="isHistoryLoading" class="access-history-state">正在读取访问记录…</div><div v-else-if="historyError" class="access-history-state failed">{{ historyError }}</div><div v-else-if="accessHistory?.items.length" class="access-history-list"><article v-for="item in accessHistory.items" :key="item.id"><span><IconUser :size="15" /></span><div><strong>{{ item.actorName }} · 查看合成内容</strong><small>{{ dateTime(item.occurredAt) }} · 请求 {{ item.requestId }}</small></div><em>{{ item.reasonProvided ? `已填原因 · ${item.reasonLength} 字` : '未填原因' }}</em></article></div><div v-else class="access-history-state">尚无已记录的查看操作。</div></section>
             </template>
           </section>
         </div>

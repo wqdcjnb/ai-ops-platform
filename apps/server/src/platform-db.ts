@@ -1286,12 +1286,14 @@ export class PlatformDatabase {
     return { id: event.id, occurredAt }
   }
 
-  listConversationAccessEvents() {
+  listConversationAccessEvents(recordId?: string) {
     return this.db.prepare(`SELECT e.id, e.actor_user_id AS actorUserId, u.display_name AS actorName, e.record_id AS recordId,
       e.request_id AS requestId, e.action, e.reason_provided AS reasonProvided, e.reason_length AS reasonLength,
       e.acknowledged_sensitive_scope AS acknowledgedSensitiveScope, e.occurred_at AS occurredAt
       FROM conversation_access_events e JOIN users u ON u.id = e.actor_user_id
-      ORDER BY e.occurred_at DESC, e.id DESC`).all() as Array<{
+      WHERE (? IS NULL OR e.record_id = ?)
+      ORDER BY e.occurred_at DESC, e.id DESC
+      LIMIT 20`).all(recordId ?? null, recordId ?? null) as Array<{
         id: string; actorUserId: string; actorName: string; recordId: string; requestId: string; action: 'view_synthetic'
         reasonProvided: number; reasonLength: number; acknowledgedSensitiveScope: number; occurredAt: string
       }>

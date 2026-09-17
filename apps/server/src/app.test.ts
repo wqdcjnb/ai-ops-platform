@@ -640,6 +640,19 @@ describe('BFF', () => {
     expect(body.content.messages.some((item: { redacted: boolean }) => item.redacted)).toBe(true)
     expect(JSON.stringify(body)).not.toContain('复核客户投诉关联请求与脱敏结果')
 
+    const accessHistory = await app.inject({ method: 'GET', url: '/api/conversation-audits/conv-audit-copy-01/access-events' })
+    expect(accessHistory.statusCode).toBe(200)
+    expect(accessHistory.json()).toMatchObject({
+      meta: { source: 'database' },
+      record: { id: 'conv-audit-copy-01', requestId: 'req-260915-8f31' },
+      items: [expect.objectContaining({ action: 'view_synthetic', reasonProvided: true, reasonLength: 15, acknowledgedSensitiveScope: true })],
+    })
+    expect(JSON.stringify(accessHistory.json())).not.toMatch(/actorUserId|reasonText|复核客户投诉关联请求与脱敏结果/i)
+
+    const missingHistory = await app.inject({ method: 'GET', url: '/api/conversation-audits/conv-audit-missing/access-events' })
+    expect(missingHistory.statusCode).toBe(404)
+    expect(missingHistory.json().error.code).toBe('CONVERSATION_AUDIT_NOT_FOUND')
+
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=view&resource=conversation&result=success' })
     expect(audit.statusCode).toBe(200)
     expect(audit.json().items).toEqual(expect.arrayContaining([

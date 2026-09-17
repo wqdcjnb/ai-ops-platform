@@ -19,7 +19,7 @@ import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } fr
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
-import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDatabaseConversationAccess, createDatabaseConversationAudits, getDatabaseConversationAuditRecord } from './conversation-audit.js'
+import { conversationAccessBodySchema, conversationAccessHistoryResponseSchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDatabaseConversationAccess, createDatabaseConversationAccessHistory, createDatabaseConversationAudits, getDatabaseConversationAuditRecord } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
@@ -475,6 +475,14 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/conversation-audits', {
     schema: { querystring: conversationAuditQuerySchema, response: { 200: conversationAuditResponseSchema, 400: errorResponseSchema } },
   }, async (request) => createDatabaseConversationAudits(database, request.query, new Date(), request.authUser?.role ?? 'super_admin'))
+
+  app.get('/api/conversation-audits/:id/access-events', {
+    schema: { params: conversationAuditParamsSchema, response: { 200: conversationAccessHistoryResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
+  }, async (request, reply) => {
+    const result = createDatabaseConversationAccessHistory(database, request.params.id)
+    if (result) return result
+    return reply.status(404).send({ error: { code: 'CONVERSATION_AUDIT_NOT_FOUND', message: '未找到指定对话审计记录', requestId: request.id } })
+  })
 
   app.post('/api/conversation-audits/:id/access', {
     schema: { params: conversationAuditParamsSchema, body: conversationAccessBodySchema, response: { 200: conversationAccessResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },

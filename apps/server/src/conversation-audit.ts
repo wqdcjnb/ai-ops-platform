@@ -68,6 +68,18 @@ export const conversationAccessResponseSchema = z.object({
   linkedUsage: z.object({ requestId: z.string(), metadataEndpoint: z.string(), requestIdVerified: z.literal(false) }),
 })
 
+const conversationAccessHistoryItemSchema = z.object({
+  id: z.string().regex(/^access-demo-[a-z0-9-]+$/), actorName: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/),
+  action: z.literal('view_synthetic'), reasonProvided: z.boolean(), reasonLength: z.number().int().min(8).max(200),
+  acknowledgedSensitiveScope: z.boolean(), occurredAt: z.string().datetime(),
+})
+
+export const conversationAccessHistoryResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), notice: z.string() }),
+  record: z.object({ id: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/) }),
+  items: z.array(conversationAccessHistoryItemSchema).max(20),
+})
+
 export type ConversationAuditQuery = z.infer<typeof conversationAuditQuerySchema>
 export type ConversationAuditRecord = z.infer<typeof recordSchema>
 export type ConversationAccessBody = z.infer<typeof conversationAccessBodySchema>
@@ -159,6 +171,25 @@ export function createDatabaseConversationAudits(database: PlatformDatabase, que
 
 export function getDatabaseConversationAuditRecord(database: PlatformDatabase, id: string) {
   return database.listConversationAuditRecords().map(recordFromDatabase).find((item) => item.id === id) ?? null
+}
+
+export function createDatabaseConversationAccessHistory(database: PlatformDatabase, id: string, now = new Date()) {
+  const record = getDatabaseConversationAuditRecord(database, id)
+  if (!record) return null
+  return {
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '仅显示最近 20 条合成内容查看元数据；原因原文、对话正文和凭据均不返回。' },
+    record: { id: record.id, requestId: record.requestId },
+    items: database.listConversationAccessEvents(record.id).map((item) => ({
+      id: item.id,
+      actorName: item.actorName,
+      requestId: item.requestId,
+      action: 'view_synthetic' as const,
+      reasonProvided: item.reasonProvided === 1,
+      reasonLength: item.reasonLength,
+      acknowledgedSensitiveScope: item.acknowledgedSensitiveScope === 1,
+      occurredAt: item.occurredAt,
+    })),
+  }
 }
 
 export function createDemoConversationAudits(query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin', accessAuditPersisted = false) {

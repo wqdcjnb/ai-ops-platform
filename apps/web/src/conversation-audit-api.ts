@@ -19,13 +19,20 @@ const messageSchema = z.object({ id: z.string(), role: z.enum(['user', 'assistan
 export const conversationAccessResponseSchema = z.object({
   meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }), record: conversationRecordSchema, access: z.object({ accessRecordId: z.string(), reasonAccepted: z.literal(true), persisted: z.boolean(), authorizedByServerRbac: z.literal(true), copyAllowed: z.literal(false), exportAllowed: z.literal(false), deleteAllowed: z.literal(false) }), content: z.object({ synthetic: z.literal(true), decrypted: z.literal(false), redactionPassed: z.boolean(), conversationTitle: z.string(), messages: z.array(messageSchema) }), retention: z.object({ expiresAt: z.string().datetime(), cleanupState: z.enum(['scheduled', 'expired', 'not_applicable']), deletionProofAvailable: z.literal(false), notice: z.string() }), linkedUsage: z.object({ requestId: z.string(), metadataEndpoint: z.string(), requestIdVerified: z.literal(false) }),
 })
+export const conversationAccessHistoryResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), notice: z.string() }),
+  record: z.object({ id: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/) }),
+  items: z.array(z.object({ id: z.string().regex(/^access-demo-[a-z0-9-]+$/), actorName: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/), action: z.literal('view_synthetic'), reasonProvided: z.boolean(), reasonLength: z.number().int().min(8).max(200), acknowledgedSensitiveScope: z.boolean(), occurredAt: z.string().datetime() })).max(20),
+})
 
 export type ConversationAuditFilters = z.infer<typeof conversationAuditFiltersSchema>
 export type ConversationAuditRecord = z.infer<typeof conversationRecordSchema>
 export type ConversationAuditResponse = z.infer<typeof conversationAuditResponseSchema>
 export type ConversationAccessResponse = z.infer<typeof conversationAccessResponseSchema>
+export type ConversationAccessHistoryResponse = z.infer<typeof conversationAccessHistoryResponseSchema>
 
 export class ConversationAuditApiError extends Error { constructor(message: string, readonly requestId?: string) { super(message) } }
-async function parseResponse<T>(response: Response, schema: z.ZodType<T>, fallback: string) { const requestId = response.headers.get('x-request-id') ?? undefined; if (!response.ok) throw new ConversationAuditApiError(response.status === 404 ? '该记录没有可访问的对话内容' : fallback, requestId); const parsed = schema.safeParse(await response.json()); if (!parsed.success) throw new ConversationAuditApiError('对话审计数据格式不符合接口约定', requestId); return parsed.data }
+async function parseResponse<T>(response: Response, schema: z.ZodType<T>, fallback: string, missing = '该记录没有可访问的对话内容') { const requestId = response.headers.get('x-request-id') ?? undefined; if (!response.ok) throw new ConversationAuditApiError(response.status === 404 ? missing : fallback, requestId); const parsed = schema.safeParse(await response.json()); if (!parsed.success) throw new ConversationAuditApiError('对话审计数据格式不符合接口约定', requestId); return parsed.data }
 export async function fetchConversationAudits(filters: ConversationAuditFilters, signal?: AbortSignal) { const value = conversationAuditFiltersSchema.parse(filters); const params = new URLSearchParams(Object.entries(value).map(([key, item]) => [key, String(item)])); return parseResponse(await fetch(`/api/conversation-audits?${params}`, { headers: { accept: 'application/json' }, signal }), conversationAuditResponseSchema, '对话审计暂时无法加载') }
 export async function requestConversationAccess(id: string, reason: string, signal?: AbortSignal) { return parseResponse(await fetch(`/api/conversation-audits/${encodeURIComponent(id)}/access`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify({ reason, acknowledgeSensitiveScope: true }), signal }), conversationAccessResponseSchema, '无法打开脱敏轮次') }
+export async function fetchConversationAccessHistory(id: string, signal?: AbortSignal) { return parseResponse(await fetch(`/api/conversation-audits/${encodeURIComponent(id)}/access-events`, { headers: { accept: 'application/json' }, signal }), conversationAccessHistoryResponseSchema, '查看访问记录暂时无法加载', '未找到对话审计记录') }

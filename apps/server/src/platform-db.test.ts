@@ -71,6 +71,8 @@ describe('platform database migrations', () => {
       action: 'view_synthetic', reasonProvided: 1, reasonLength: 18, acknowledgedSensitiveScope: 1,
     })])
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
+    expect(database.listConversationAccessEvents('conv-audit-copy-01')).toHaveLength(1)
+    expect(database.listConversationAccessEvents('conv-audit-support-02')).toEqual([])
     expect(database.status().migrationVersion).toBe(16)
     database.close()
   })

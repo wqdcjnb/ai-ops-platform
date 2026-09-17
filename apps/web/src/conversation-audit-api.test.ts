@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { conversationAccessResponseSchema, conversationAuditFiltersSchema, conversationAuditResponseSchema, conversationRecordSchema } from './conversation-audit-api'
+import { conversationAccessHistoryResponseSchema, conversationAccessResponseSchema, conversationAuditFiltersSchema, conversationAuditResponseSchema, conversationRecordSchema } from './conversation-audit-api'
 
 const record = { id: 'conv-audit-test-01', requestId: 'req-conv-test-01', capturedAt: '2026-09-15T10:00:00.000Z', person: { id: 'person-1', name: '测试人员', department: '测试部门' }, key: { id: 'key-1', masked: 'sk-ops••••••1234' }, purpose: { id: 'purpose-1', label: '测试用途' }, model: { id: 'model-1', label: '测试模型' }, policy: { id: 'policy-1', label: '测试策略', scope: '指定 Key', expiresAt: '2026-09-16T10:00:00.000Z' }, state: 'captured', redaction: { status: 'passed', findings: 2, rawContentAvailable: false }, grouping: { type: 'conversation', reliable: true, label: '会话 test' }, metrics: { turns: 2, toolCalls: 0, totalTokens: 100 }, contentAccess: { available: true, requiresReason: true, requiredRole: 'super_admin' } }
 
@@ -20,5 +20,9 @@ describe('conversation audit API contracts', () => {
     expect(conversationAccessResponseSchema.safeParse(access).success).toBe(true)
     expect(conversationAccessResponseSchema.safeParse({ ...access, content: { ...access.content, decrypted: true } }).success).toBe(false)
     expect(conversationAccessResponseSchema.safeParse({ ...access, access: { ...access.access, copyAllowed: true } }).success).toBe(false)
+
+    const history = { meta: { source: 'database', generatedAt: '2026-09-15T10:00:00.000Z', notice: '仅元数据' }, record: { id: record.id, requestId: record.requestId }, items: [{ id: 'access-demo-test-01', actorName: '超级管理员', requestId: record.requestId, action: 'view_synthetic', reasonProvided: true, reasonLength: 18, acknowledgedSensitiveScope: true, occurredAt: '2026-09-15T10:02:00.000Z' }] }
+    expect(conversationAccessHistoryResponseSchema.safeParse(history).success).toBe(true)
+    expect(conversationAccessHistoryResponseSchema.safeParse({ ...history, items: [{ ...history.items[0], reasonLength: 2 }] }).success).toBe(false)
   })
 })
