@@ -87,7 +87,7 @@ describe('BFF', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ status: 'ok', service: 'ai-ops-bff' })
     expect(response.headers['cache-control']).toBe('no-store')
-    expect(response.headers['x-request-id']).toBeTruthy()
+    expect(response.headers['x-request-id']).toMatch(/^req-[a-z0-9-]+$/)
   })
 
   it('returns a validated seven-day demo overview by default', async () => {
@@ -175,6 +175,20 @@ describe('BFF', () => {
     expect(listed.statusCode).toBe(200)
     expect(listed.json().items[0]).toMatchObject({ name: '王小明', department: { id: 'content', name: '内容运营' }, title: '新加入成员' })
 
+    const audit = await app.inject({ method: 'GET', url: `/api/audit-events?period=7d&action=create&resource=person&search=${encodeURIComponent('王小明')}`, headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'create',
+        resource: expect.objectContaining({ type: 'person', name: '王小明' }),
+        changes: expect.arrayContaining([
+          expect.objectContaining({ field: 'username', after: 'demo-new-person', sensitive: false }),
+          expect.objectContaining({ field: 'password', after: '已变化', sensitive: true }),
+        ]),
+      }),
+    ]))
+    expect(JSON.stringify(audit.json())).not.toContain('demo-password-1')
+
     const duplicate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie }, payload: { username: 'demo-new-person', displayName: '王小明二号', departmentId: 'content', password: 'demo-password-2' } })
     expect(duplicate.statusCode).toBe(409)
     expect(duplicate.json().error.code).toBe('USERNAME_CONFLICT')
@@ -220,6 +234,20 @@ describe('BFF', () => {
     expect(listed.statusCode).toBe(200)
     expect(listed.json().items[0]).toMatchObject({ purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'] })
     expect(JSON.stringify(listed.json())).not.toContain(created.json().secret)
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=create&resource=key', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'create',
+        resource: expect.objectContaining({ type: 'key', name: created.json().key.masked }),
+        changes: expect.arrayContaining([
+          expect.objectContaining({ field: 'secret', after: '已变化', sensitive: true }),
+          expect.objectContaining({ field: 'purpose', after: '大促文案', sensitive: false }),
+        ]),
+      }),
+    ]))
+    expect(JSON.stringify(audit.json())).not.toContain(created.json().secret)
 
     const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
     const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: employeeLogin.headers['set-cookie'] }, payload: { ownerId: 'person-lin', purpose: '越权 Key', models: ['ecommerce-general'], expiresInDays: 30, deviceNote: '测试' } })

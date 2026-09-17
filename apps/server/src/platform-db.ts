@@ -383,6 +383,14 @@ export class PlatformDatabase {
     )
   }
 
+  private appendAuditEvent(seed: PlatformAuditEventSeed, now: Date) {
+    this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      seed.id, seed.actorUserId ?? null, seed.action, seed.resourceType, seed.resourceId ?? null, seed.result,
+      seed.requestId ?? null, JSON.stringify(seed.summary), now.toISOString(),
+    )
+  }
+
   seedUsageRequest(seed: PlatformUsageRequestSeed) {
     this.db.prepare(`INSERT INTO usage_requests(
       request_id, occurred_at, owner_user_id, api_key_id, purpose_id, purpose_name, purpose_alias,
@@ -480,7 +488,7 @@ export class PlatformDatabase {
     return Boolean(this.db.prepare('SELECT 1 FROM departments WHERE id = ? AND status = \'active\' LIMIT 1').get(departmentId))
   }
 
-  createPerson(person: PlatformPersonCreate, now = this.now()) {
+  createPerson(person: PlatformPersonCreate, auditEvent?: PlatformAuditEventSeed, now = this.now()) {
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -488,6 +496,7 @@ export class PlatformDatabase {
         VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?)`).run(
         person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, timestamp, timestamp,
       )
+      if (auditEvent) this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
     } catch (error) {
       this.db.exec('ROLLBACK')
@@ -521,12 +530,20 @@ export class PlatformDatabase {
     return Boolean(this.db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'employee' AND status = 'active' LIMIT 1").get(ownerUserId))
   }
 
-  createApiKey(key: PlatformApiKeyCreate, now = this.now()) {
+  createApiKey(key: PlatformApiKeyCreate, auditEvent?: PlatformAuditEventSeed, now = this.now()) {
     const timestamp = now.toISOString()
-    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
-      key.id, key.ownerUserId, key.maskedValue, key.purpose, key.expiresAt, JSON.stringify(key.models), timestamp, timestamp,
-    )
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
+        key.id, key.ownerUserId, key.maskedValue, key.purpose, key.expiresAt, JSON.stringify(key.models), timestamp, timestamp,
+      )
+      if (auditEvent) this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
     return this.listApiKeys().find((item) => item.id === key.id) ?? null
   }
 

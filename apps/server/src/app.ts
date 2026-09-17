@@ -49,7 +49,7 @@ export interface BuildAppOptions {
 export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: options.logger ?? false,
-    genReqId: () => crypto.randomUUID(),
+    genReqId: () => `req-${crypto.randomUUID()}`,
     logController: new LogController({ disableRequestLogging: true }),
   }).withTypeProvider<ZodTypeProvider>()
 
@@ -210,18 +210,25 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
     const id = `person-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
     try {
-      const created = database.createPerson({ id, username: request.body.username, displayName: request.body.displayName, departmentId: request.body.departmentId, password: request.body.password })
-      if (!created || !created.departmentId || !created.departmentName) throw new Error('PERSON_CREATE_FAILED')
-      database.seedAuditEvent({
+      const created = database.createPerson({ id, username: request.body.username, displayName: request.body.displayName, departmentId: request.body.departmentId, password: request.body.password }, {
         id: `audit-${id}-create`,
         actorUserId: request.authUser?.id ?? null,
         action: 'create',
         resourceType: 'person',
-        resourceId: created.id,
+        resourceId: id,
         result: 'success',
         requestId: request.id,
-        summary: { username: created.username, departmentId: created.departmentId, passwordStoredAsHash: true },
+        summary: {
+          message: `已添加本地演示人员 ${request.body.displayName}；初始密码仅保存摘要。`,
+          resourceName: request.body.displayName,
+          changes: [
+            { field: 'username', label: '登录名', before: null, after: request.body.username, sensitive: false },
+            { field: 'departmentId', label: '所属部门', before: null, after: request.body.departmentId, sensitive: false },
+            { field: 'password', label: '初始密码', before: null, after: '已设置（不记录值）', sensitive: true },
+          ],
+        },
       })
+      if (!created || !created.departmentId || !created.departmentName) throw new Error('PERSON_CREATE_FAILED')
       return reply.status(201).send({ meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: '人员已写入本地 SQLite；职位、用途和真实 New API 映射将在后续接入' }, person: { id: created.id, username: created.username, displayName: created.displayName, department: { id: created.departmentId, name: created.departmentName } } })
     } catch (error) {
       if (error instanceof Error && /UNIQUE constraint failed: users\.username/i.test(error.message)) {
@@ -277,18 +284,25 @@ export function buildApp(options: BuildAppOptions = {}) {
     const expiresAt = new Date(Date.now() + request.body.expiresInDays * 86_400_000).toISOString()
     const masked = `sk-ops••••••${secret.slice(-4).toUpperCase()}`
     try {
-      const created = database.createApiKey({ id, ownerUserId: request.body.ownerId, maskedValue: masked, purpose: request.body.purpose, expiresAt, models: request.body.models })
-      if (!created || !created.departmentName || !created.expiresAt) throw new Error('KEY_CREATE_FAILED')
-      database.seedAuditEvent({
+      const created = database.createApiKey({ id, ownerUserId: request.body.ownerId, maskedValue: masked, purpose: request.body.purpose, expiresAt, models: request.body.models }, {
         id: `audit-${id}-create`,
         actorUserId: request.authUser?.id ?? null,
         action: 'create',
         resourceType: 'key',
-        resourceId: created.id,
+        resourceId: id,
         result: 'success',
         requestId: request.id,
-        summary: { ownerUserId: created.ownerUserId, purpose: created.purpose, models: created.models, expiresAt: created.expiresAt, secretStored: false },
+        summary: {
+          message: '已创建本地演示 Key；审计只记录掩码标识，不记录完整密钥。',
+          resourceName: masked,
+          changes: [
+            { field: 'secret', label: '密钥内容', before: null, after: '已创建（不记录值）', sensitive: true },
+            { field: 'purpose', label: '业务用途', before: null, after: request.body.purpose, sensitive: false },
+            { field: 'models', label: '允许模型', before: null, after: request.body.models.join('、'), sensitive: false },
+          ],
+        },
       })
+      if (!created || !created.departmentName || !created.expiresAt) throw new Error('KEY_CREATE_FAILED')
       return reply.status(201).send({
         meta: { source: 'database' as const, createdAt: created.createdAt, notice: '完整 Key 仅在本次响应中展示一次；数据库只保存掩码标识。' },
         key: { id: created.id, masked: created.maskedValue, owner: { id: created.ownerUserId, name: created.ownerName, department: created.departmentName }, purpose: created.purpose, models: created.models, expiresAt: created.expiresAt },
