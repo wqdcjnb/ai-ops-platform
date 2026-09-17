@@ -55,6 +55,7 @@ const selectedTrend = computed(() => overview.value?.trend ?? [])
 const alerts = computed(() => overview.value?.alerts ?? [])
 const people = computed(() => overview.value?.people ?? [])
 const channels = computed(() => overview.value?.channels ?? [])
+const sourceLabel = computed(() => overview.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '等待数据')
 const lastUpdated = computed(() => {
   if (!overview.value) return '等待数据'
   const time = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(overview.value.meta.generatedAt))
@@ -173,7 +174,7 @@ onBeforeUnmount(() => {
     </section>
 
     <template v-else>
-      <div class="source-banner"><span>{{ overview.meta.source.toUpperCase() }}</span>{{ overview.meta.notice }}</div>
+      <div class="source-banner"><span>{{ sourceLabel }}</span>{{ overview.meta.notice }}</div>
 
       <section class="metric-grid" aria-label="核心指标">
         <article v-for="kpi in kpis" :key="kpi.label" class="metric-card">
@@ -212,16 +213,16 @@ onBeforeUnmount(() => {
 
       <section class="content-grid detail-grid">
         <article class="panel people-panel">
-          <div class="panel-header"><div><h2>人员消耗排行</h2><p>按本月成本点数排序</p></div><button class="text-button" disabled>人员与部门 <IconChevronRight :size="16" /></button></div>
+          <div class="panel-header"><div><h2>人员消耗排行</h2><p>按本月成本点数排序；未配置个人目标时不估算比例</p></div><button class="text-button" disabled>人员与部门 <IconChevronRight :size="16" /></button></div>
           <div class="table-responsive">
             <table class="data-table">
-              <thead><tr><th>人员</th><th>主要用途</th><th class="number-cell">请求数</th><th>月度目标</th><th class="number-cell">成本点数</th></tr></thead>
+              <thead><tr><th>人员</th><th>主要用途</th><th class="number-cell">请求数</th><th>个人目标</th><th class="number-cell">成本点数</th></tr></thead>
               <tbody>
                 <tr v-for="person in people" :key="person.id">
                   <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ person.initials }}</span><span><strong>{{ person.name }}</strong><small>{{ person.department }}</small></span></div></td>
                   <td><span class="purpose-tag">{{ person.purpose }}</span></td>
                   <td class="number-cell">{{ person.requests.toLocaleString() }}</td>
-                  <td><div class="usage-cell"><div><i :class="{ warning: person.usagePercent >= 80 }" :style="{ width: `${Math.min(person.usagePercent, 100)}%` }" /></div><span :class="{ warning: person.usagePercent >= 80 }">{{ person.usagePercent }}%</span></div></td>
+                  <td><div v-if="person.targetConfigured" class="usage-cell"><div><i :class="{ warning: person.usagePercent >= 80 }" :style="{ width: `${Math.min(person.usagePercent, 100)}%` }" /></div><span :class="{ warning: person.usagePercent >= 80 }">{{ person.usagePercent }}%</span></div><span v-else class="muted-cell">未配置</span></td>
                   <td class="number-cell"><strong>{{ person.points.toLocaleString() }}</strong></td>
                 </tr>
               </tbody>
@@ -230,7 +231,7 @@ onBeforeUnmount(() => {
         </article>
 
         <article class="panel channel-panel">
-          <div class="panel-header"><div><h2>渠道健康</h2><p>正式业务与实验资源严格隔离</p></div><button class="text-button" disabled>模型与渠道 <IconChevronRight :size="16" /></button></div>
+          <div class="panel-header"><div><h2>渠道摘要</h2><p>基于模拟调用元数据聚合，不等同于实时健康检查</p></div><button class="text-button" disabled>模型与渠道 <IconChevronRight :size="16" /></button></div>
           <div class="channel-list">
             <div v-for="channel in channels" :key="channel.id" class="channel-row">
               <div class="channel-status" :class="{ unhealthy: channel.status !== 'healthy' }"><span /></div>
@@ -243,7 +244,7 @@ onBeforeUnmount(() => {
         </article>
       </section>
 
-      <footer class="page-footer">数据来源：{{ overview.meta.source.toUpperCase() }} · 时区：{{ overview.meta.timezone }}</footer>
+      <footer class="page-footer">数据来源：{{ sourceLabel }} · 时区：{{ overview.meta.timezone }} · 实时网关健康、真实账单与行级数据范围仍待单独验收</footer>
     </template>
   </div>
 </template>

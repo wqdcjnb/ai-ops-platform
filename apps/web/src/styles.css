@@ -158,6 +158,7 @@ button { cursor: pointer; }
 .usage-cell > div { width: 65px; height: 4px; border-radius: 10px; background: #edf0f2; overflow: hidden; }
 .usage-cell i { display: block; height: 100%; border-radius: inherit; background: var(--brand); }.usage-cell i.warning { background: var(--warning); }
 .usage-cell span { width: 25px; color: #667581; font-size: 9px; font-variant-numeric: tabular-nums; }.usage-cell span.warning { color: #a96f00; font-weight: 700; }
+.muted-cell { color: #8d98a2; font-size: 9px; }
 
 .channel-list { padding: 0 18px; }
 .channel-row { min-height: 69px; display: grid; grid-template-columns: 11px minmax(160px, 1fr) repeat(3, 58px); align-items: center; gap: 9px; border-bottom: 1px solid #edf0f3; }

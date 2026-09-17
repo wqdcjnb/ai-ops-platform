@@ -90,15 +90,18 @@ describe('BFF', () => {
     expect(response.headers['x-request-id']).toMatch(/^req-[a-z0-9-]+$/)
   })
 
-  it('returns a validated seven-day demo overview by default', async () => {
+  it('returns a validated seven-day SQLite overview by default', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/overview' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta.source).toBe('demo')
+    expect(body.meta).toMatchObject({ source: 'database', simulated: true, period: '7d' })
     expect(body.meta.period).toBe('7d')
     expect(body.service).toEqual({ bff: 'healthy', newApi: await reachableNewApi() })
     expect(body.trend).toHaveLength(7)
+    expect(body.metrics).toMatchObject({ todayRequests: expect.any(Number), monthPoints: expect.any(Number) })
+    expect(body.people.every((person: { targetConfigured: boolean }) => typeof person.targetConfigured === 'boolean')).toBe(true)
     expect(body.limits).toEqual({ mode: 'soft', blocking: false })
+    expect(JSON.stringify(body)).not.toMatch(/actualModel|accessToken|managementKey|apiKey|password/i)
   })
 
   it('reports the upstream integration state without exposing credentials', async () => {

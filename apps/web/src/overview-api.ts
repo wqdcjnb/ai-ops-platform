@@ -12,7 +12,8 @@ export type NewApiStatus = z.infer<typeof newApiStatusSchema>
 
 export const overviewResponseSchema = z.object({
   meta: z.object({
-    source: z.literal('demo'),
+    source: z.literal('database'),
+    simulated: z.literal(true),
     generatedAt: z.string(),
     timezone: z.literal('Asia/Shanghai'),
     period: periodSchema,
@@ -41,7 +42,7 @@ export const overviewResponseSchema = z.object({
     id: z.string(), level: z.enum(['warning', 'danger', 'experiment']), title: z.string(), detail: z.string(), occurredAt: z.string(), action: z.string(),
   })),
   people: z.array(z.object({
-    id: z.string(), name: z.string(), initials: z.string(), department: z.string(), purpose: z.string(), requests: z.number(), usagePercent: z.number(), points: z.number(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
+    id: z.string(), name: z.string(), initials: z.string(), department: z.string(), purpose: z.string(), requests: z.number(), usagePercent: z.number(), points: z.number(), targetConfigured: z.boolean(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
   })),
   channels: z.array(z.object({
     id: z.string(), name: z.string(), model: z.string(), type: z.enum(['production', 'experiment']), status: z.enum(['healthy', 'auth_required']), latencyMs: z.number().nullable(), successRate: z.number(), requests: z.number(),

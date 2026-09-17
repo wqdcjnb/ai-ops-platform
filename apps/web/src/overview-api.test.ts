@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { overviewResponseSchema } from './overview-api'
 
 const validOverview = {
-  meta: { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', timezone: 'Asia/Shanghai', period: '7d', notice: '演示数据' },
+  meta: { source: 'database', simulated: true, generatedAt: '2026-09-15T10:00:00.000Z', timezone: 'Asia/Shanghai', period: '7d', notice: 'SQLite 模拟数据' },
   service: {
     bff: 'healthy',
     newApi: { state: 'reachable', authConfigured: false, checkedAt: '2026-09-15T10:00:00.000Z' },

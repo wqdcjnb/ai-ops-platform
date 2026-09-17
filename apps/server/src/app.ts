@@ -5,7 +5,7 @@ import Fastify, { LogController } from 'fastify'
 import { randomBytes } from 'node:crypto'
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
-import { createDemoOverview, overviewResponseSchema, periodSchema } from './overview.js'
+import { createDatabaseOverview, overviewResponseSchema, periodSchema } from './overview.js'
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
@@ -155,7 +155,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDemoOverview(request.query.period, new Date(), newApi)
+    return createDatabaseOverview(request.query.period, database, new Date(), newApi)
   })
 
   app.get('/api/integrations/new-api/status', {

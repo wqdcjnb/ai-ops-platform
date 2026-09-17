@@ -64,9 +64,9 @@ const entryCards = computed<EntryCard[]>(() => [
     description: '查看今日请求、Token、成本点数和链路健康',
     icon: IconGauge,
     tone: 'teal',
-    source: 'DEMO',
+    source: overview.value ? 'SQLITE' : '等待数据',
     value: overview.value ? overview.value.metrics.todayRequests.toLocaleString('zh-CN') : '—',
-    detail: overview.value ? `今日请求 · 成功率 ${overview.value.metrics.successRate}%` : '演示数据暂未加载',
+    detail: overview.value ? `今日请求 · 成功率 ${overview.value.metrics.successRate}% · 模拟元数据` : 'SQLite 模拟数据暂未加载',
     to: '/overview',
   },
   {
@@ -230,6 +230,6 @@ onBeforeUnmount(() => activeRequest?.abort())
       </article>
     </section>
 
-    <footer class="page-footer">服务状态：LIVE · 运营摘要：DEMO · 待办来源：CONFIGURATION</footer>
+    <footer class="page-footer">服务状态：LIVE · 运营摘要：SQLite 模拟数据 · 待办来源：CONFIGURATION</footer>
   </div>
 </template>
