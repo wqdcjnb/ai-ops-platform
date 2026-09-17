@@ -5,6 +5,7 @@ import {
   IconCircleCheck, IconClock, IconCoins, IconFileAnalytics, IconRefresh, IconSearch, IconShieldCheck, IconX,
 } from '@tabler/icons-vue'
 import { fetchUsage, fetchUsageDetail, UsageApiError, type UsageDetail, type UsageFilters, type UsageItem, type UsageResponse } from '../usage-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const usage = ref<UsageResponse | null>(null)
 const detail = ref<UsageDetail | null>(null)
@@ -63,7 +64,7 @@ function compactNumber(value: number | undefined) { if (value === undefined) ret
 function latencyText(value: number | null) { if (value === null) return '—'; return value >= 1_000 ? `${(value / 1_000).toFixed(1)}s` : `${value}ms` }
 function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
 function usd(value: number) { return `$${value.toFixed(value >= 1 ? 2 : 4)}` }
-function applyFilters() { page.value = 1; void loadData() }
+function applyFilters() { cancelSearch(); page.value = 1; void loadData() }
 function clearFilters() { period.value = '7d'; search.value = ''; person.value = 'all'; department.value = 'all'; purpose.value = 'all'; key.value = 'all'; model.value = 'all'; channel.value = 'all'; status.value = 'all'; costType.value = 'all'; applyFilters() }
 function clearLinkedUsageFilter() {
   linkedUsageRequestId.value = ''
@@ -97,6 +98,8 @@ async function openDetail(item: UsageItem) {
   catch (error) { if (!next.signal.aborted) errorMessage.value = error instanceof Error ? error.message : '调用详情暂时无法加载' }
   finally { if (detailRequest === next) detailLoadingId.value = '' }
 }
+
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => { page.value = 1; void loadData() })
 
 onMounted(() => void loadData())
 onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })

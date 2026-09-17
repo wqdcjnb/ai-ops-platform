@@ -5,6 +5,7 @@ import {
   IconChevronRight, IconCircleCheck, IconClock, IconFilter, IconRefresh, IconSearch, IconSettings, IconShieldCheck, IconX,
 } from '@tabler/icons-vue'
 import { acknowledgeLocalAlert, AlertsApiError, closeLocalAlert, fetchAlertDetail, fetchAlertRules, fetchAlerts, fetchAlertSummary, type AlertAcknowledgeBody, type AlertCloseBody, type AlertDetail, type AlertEvent, type AlertFilters, type AlertRules, type AlertsResponse, type AlertSummary } from '../alerts-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const summary = ref<AlertSummary | null>(null)
 const alerts = ref<AlertsResponse | null>(null)
@@ -30,7 +31,9 @@ const isActing = ref(false)
 const actionForm = ref<AlertAcknowledgeBody | AlertCloseBody>({ idempotencyKey: '', reason: '', acknowledgeSimulation: true })
 const actionReceipt = ref<{ action: 'acknowledge' | 'close'; auditEventId: string } | null>(null)
 let request: AbortController | undefined
+let eventsRequest: AbortController | undefined
 let detailRequest: AbortController | undefined
+let eventsRevision = 0
 
 const severityText = { critical: '严重', warning: '警告', info: '提示' }
 const statusText = { open: '待处理', acknowledged: '已确认', closed: '已关闭' }
@@ -52,7 +55,7 @@ const summaryCards = computed(() => {
 
 function filters(): AlertFilters { return { search: search.value.trim(), subjectId: subjectId.value, alertId: alertId.value, severity: severity.value, status: status.value, source: source.value, environment: environment.value, page: page.value, pageSize } }
 function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
-function applyFilters() { page.value = 1; void loadEvents() }
+function applyFilters() { cancelSearch(); page.value = 1; void loadEvents() }
 function removeRelatedAlertQuery() {
   if (typeof window === 'undefined') return
   const params = new URLSearchParams(window.location.search)
@@ -60,21 +63,38 @@ function removeRelatedAlertQuery() {
   window.history.replaceState({}, '', `${window.location.pathname}${params.size ? `?${params}` : ''}${window.location.hash}`)
 }
 function clearFilters() { search.value = ''; subjectId.value = ''; alertId.value = ''; severity.value = 'all'; status.value = 'all'; source.value = 'all'; environment.value = 'all'; removeRelatedAlertQuery(); applyFilters() }
-function clearRelatedFilter() { subjectId.value = ''; alertId.value = ''; removeRelatedAlertQuery(); page.value = 1; void loadEvents() }
+function clearRelatedFilter() { cancelSearch(); subjectId.value = ''; alertId.value = ''; removeRelatedAlertQuery(); page.value = 1; void loadEvents() }
 function changePage(next: number) { if (!alerts.value || next < 1 || next > alerts.value.pagination.totalPages) return; page.value = next; void loadEvents() }
 
-async function loadEvents(signal?: AbortSignal) { alerts.value = await fetchAlerts(filters(), signal) }
+async function loadEvents() {
+  eventsRequest?.abort()
+  const next = new AbortController()
+  eventsRequest = next
+  const revision = ++eventsRevision
+  try {
+    const nextAlerts = await fetchAlerts(filters(), next.signal)
+    if (next.signal.aborted || eventsRequest !== next || revision !== eventsRevision) return
+    alerts.value = nextAlerts
+  } catch (error) {
+    if (next.signal.aborted || eventsRequest !== next || revision !== eventsRevision) return
+    const requestId = error instanceof AlertsApiError ? error.requestId : undefined
+    errorMessage.value = `${error instanceof Error ? error.message : '告警事件暂时无法加载'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  }
+}
 async function loadData() {
   request?.abort()
   const next = new AbortController()
   request = next
+  const revision = ++eventsRevision
   isLoading.value = true
   errorMessage.value = ''
   try {
     const [summaryValue, alertsValue, rulesValue] = await Promise.all([fetchAlertSummary(next.signal), fetchAlerts(filters(), next.signal), fetchAlertRules(next.signal)])
-    summary.value = summaryValue; alerts.value = alertsValue; rules.value = rulesValue
+    if (next.signal.aborted || request !== next) return
+    summary.value = summaryValue; rules.value = rulesValue
+    if (revision === eventsRevision) alerts.value = alertsValue
   } catch (error) {
-    if (next.signal.aborted) return
+    if (next.signal.aborted || request !== next || revision !== eventsRevision) return
     const requestId = error instanceof AlertsApiError ? error.requestId : undefined
     errorMessage.value = `${error instanceof Error ? error.message : '告警中心暂时无法加载'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
   } finally { if (request === next) isLoading.value = false }
@@ -117,8 +137,10 @@ async function submitAction() {
   } finally { isActing.value = false }
 }
 
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => { page.value = 1; void loadEvents() })
+
 onMounted(() => void loadData())
-onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
+onBeforeUnmount(() => { request?.abort(); eventsRequest?.abort(); detailRequest?.abort() })
 </script>
 
 <template>

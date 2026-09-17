@@ -6,6 +6,7 @@ import {
   IconFilter, IconKey, IconKeyOff, IconRefresh, IconRotate, IconSearch, IconShieldCheck, IconSparkles, IconUser, IconX,
 } from '@tabler/icons-vue'
 import { createKey, disableKey, fetchKeyDetail, fetchKeys, KeysApiError, rotateKey, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyDisableBody, type KeyFilters, type KeyListItem, type KeyRotateBody, type KeyRotateResponse, type KeysResponse } from '../keys-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const route = useRoute()
 const keys = ref<KeysResponse | null>(null)
@@ -83,7 +84,7 @@ async function loadKeys() {
   } finally { if (listRequest === request) isLoading.value = false }
 }
 
-function applyFilters() { page.value = 1; void loadKeys() }
+function applyFilters() { cancelSearch(); page.value = 1; void loadKeys() }
 function clearFilters() { search.value = ''; owner.value = 'all'; purpose.value = 'all'; model.value = 'all'; status.value = 'all'; applyFilters() }
 function goToPage(next: number) { if (next < 1 || next > totalPages.value || next === page.value) return; page.value = next; void loadKeys() }
 
@@ -174,6 +175,8 @@ async function submitRotate() {
   } finally { isRotating.value = false }
 }
 
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => { page.value = 1; void loadKeys() })
+
 onMounted(() => void loadKeys())
 onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
 </script>
@@ -190,7 +193,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
 
     <section class="panel keys-main-panel">
       <form class="key-filters" @submit.prevent="applyFilters">
-        <label class="key-search"><IconSearch :size="17" /><input v-model="search" type="search" maxlength="60" placeholder="搜索 Key 掩码、人员、部门、用途或模型" /></label>
+        <label class="key-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索 Key" type="search" maxlength="60" placeholder="搜索 Key 掩码、人员、部门、用途或模型" /></label>
         <label><IconUser :size="15" /><select v-model="owner" @change="applyFilters"><option value="all">全部人员</option><option v-for="item in keys?.options.owners ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label><IconFilter :size="15" /><select v-model="purpose" @change="applyFilters"><option value="all">全部用途</option><option v-for="item in keys?.options.purposes ?? []" :key="item" :value="item">{{ item }}</option></select></label>
         <label><IconSparkles :size="15" /><select v-model="model" @change="applyFilters"><option value="all">全部模型</option><option v-for="item in keys?.options.models ?? []" :key="item" :value="item">{{ item }}</option></select></label>

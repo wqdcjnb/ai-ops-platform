@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { IconAlertTriangle, IconBrain, IconChevronRight, IconCircleCheck, IconClock, IconCoin, IconFlask, IconGauge, IconRefresh, IconSearch, IconServer2, IconShieldCheck, IconX } from '@tabler/icons-vue'
 import { checkSyntheticChannel, fetchChannels, fetchModels, ModelsApiError, type CatalogSource, type ChannelCheckBody, type ChannelFilters, type ChannelItem, type ChannelsResponse, type ModelFilters, type ModelItem, type ModelsResponse } from '../models-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const source = ref<CatalogSource>('demo')
 const models = ref<ModelsResponse | null>(null)
@@ -50,8 +51,9 @@ function resetFilters() {
   search.value = ''; capability.value = 'all'; environment.value = 'all'; status.value = 'all'
   channelEnvironment.value = 'all'; channelStatus.value = 'all'
 }
-function clearFilters() { resetFilters(); void loadData() }
-function changeSource(value: CatalogSource) { if (value !== source.value) { source.value = value; resetFilters(); void loadData() } }
+function applyFilters() { cancelSearch(); void loadData() }
+function clearFilters() { resetFilters(); applyFilters() }
+function changeSource(value: CatalogSource) { if (value !== source.value) { source.value = value; resetFilters(); applyFilters() } }
 function closeDrawer() { selectedModel.value = null; selectedChannel.value = null; previousFocus?.focus(); previousFocus = null }
 function openChannelCheck() {
   if (!selectedChannel.value || isLive.value) return
@@ -109,6 +111,7 @@ async function loadData() {
     errorMessage.value = (error instanceof ModelsApiError ? error.message : '连接失败，请确认后台服务已启动后重试。') + (requestId ? ' · 请求 ID ' + requestId : '')
   } finally { if (request === next) isLoading.value = false }
 }
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadData())
 onMounted(() => void loadData())
 onBeforeUnmount(() => request?.abort())
 </script>
@@ -117,7 +120,7 @@ onBeforeUnmount(() => request?.abort())
   <div class="dashboard models-dashboard">
     <section class="page-heading">
       <div><h1>模型与渠道</h1><p>查看模型目录、用途关联与渠道状态。</p></div>
-      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : selectedChannel ? '更新本地模拟健康快照' : '请先打开一条模拟渠道详情'" @click="openChannelCheck"><IconGauge :size="16" />模拟复检</button></div>
+      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="applyFilters"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : selectedChannel ? '更新本地模拟健康快照' : '请先打开一条模拟渠道详情'" @click="openChannelCheck"><IconGauge :size="16" />模拟复检</button></div>
     </section>
     <section class="catalog-source-control panel" aria-label="数据来源">
       <div><strong>数据来源</strong><p>{{ isLive ? '只读取 New API 已保存的配置，空列表表示尚未配置。仅管理员可查看。' : '供开发和功能演示使用，无需真实上游账号或调用流量。' }}</p></div>
@@ -132,11 +135,11 @@ onBeforeUnmount(() => request?.abort())
     <template v-else-if="models && channels">
       <section class="panel models-main-panel">
         <header class="panel-header"><div><span class="panel-title">模型目录</span><span class="panel-subtitle">{{ isLive ? '配置与调用可用性分别展示；缺少的字段不会填入估计值' : '价格、能力与用途均为示例，不用于实际结算' }}</span></div><span class="source-tag" :class="isLive ? 'live' : 'demo'">{{ sourceLabel }}</span></header>
-        <form class="model-filters" @submit.prevent="loadData">
+        <form class="model-filters" @submit.prevent="applyFilters">
           <label class="model-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索模型" maxlength="60" type="search" placeholder="搜索模型、别名或用途" /></label>
-          <label><select v-model="capability" aria-label="模型能力" @change="loadData"><option value="all">全部能力</option><option v-for="item in models.options.capabilities" :key="item.id" :value="item.id">{{ item.label }}</option></select></label>
-          <label><select v-model="environment" aria-label="模型环境" @change="loadData"><option value="all">全部环境</option><option v-for="(label, value) in environmentText" :key="value" :value="value">{{ label }}</option></select></label>
-          <label><select v-model="status" aria-label="模型状态" @change="loadData"><option value="all">全部状态</option><option v-for="(label, value) in modelStatusText" :key="value" :value="value">{{ label }}</option></select></label>
+          <label><select v-model="capability" aria-label="模型能力" @change="applyFilters"><option value="all">全部能力</option><option v-for="item in models.options.capabilities" :key="item.id" :value="item.id">{{ item.label }}</option></select></label>
+          <label><select v-model="environment" aria-label="模型环境" @change="applyFilters"><option value="all">全部环境</option><option v-for="(label, value) in environmentText" :key="value" :value="value">{{ label }}</option></select></label>
+          <label><select v-model="status" aria-label="模型状态" @change="applyFilters"><option value="all">全部状态</option><option v-for="(label, value) in modelStatusText" :key="value" :value="value">{{ label }}</option></select></label>
           <button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button>
         </form>
         <div v-if="models.items.length" class="table-responsive"><table class="data-table models-table"><thead><tr><th>模型</th><th>环境</th><th>能力</th><th>上下文</th><th>输入 / 输出价格</th><th>业务别名与用途</th><th>区域</th><th>状态</th><th><span class="catalog-sr-only">详情</span></th></tr></thead><tbody>
@@ -155,7 +158,7 @@ onBeforeUnmount(() => request?.abort())
 
       <section class="panel channel-panel">
         <header class="panel-header"><div><span class="panel-title">{{ isLive ? '渠道配置' : '渠道健康矩阵' }}</span><span class="panel-subtitle">{{ isLive ? channels.meta.healthCacheSeconds + ' 秒配置缓存 · 调用健康尚未验证' : '模拟健康指标与错误摘要' }}</span></div><span class="channel-count">{{ channels.total }} 个结果 / {{ channels.summary.total }} 个渠道</span></header>
-        <div class="model-filters"><label><select v-model="channelEnvironment" aria-label="渠道环境" @change="loadData"><option value="all">全部环境</option><option v-for="(label, value) in environmentText" :key="value" :value="value">{{ label }}</option></select></label><label><select v-model="channelStatus" aria-label="渠道状态" @change="loadData"><option value="all">全部状态</option><option v-for="(label, value) in channelStatusText" :key="value" :value="value">{{ label }}</option></select></label></div>
+        <div class="model-filters"><label><select v-model="channelEnvironment" aria-label="渠道环境" @change="applyFilters"><option value="all">全部环境</option><option v-for="(label, value) in environmentText" :key="value" :value="value">{{ label }}</option></select></label><label><select v-model="channelStatus" aria-label="渠道状态" @change="applyFilters"><option value="all">全部状态</option><option v-for="(label, value) in channelStatusText" :key="value" :value="value">{{ label }}</option></select></label></div>
         <div v-if="channels.items.length" class="channel-card-grid"><button v-for="item in channels.items" :key="item.id" :aria-label="'查看 ' + item.name + ' 渠道详情'" @click="openDetail(item, 'channel')"><div class="channel-card-head"><span class="channel-health-dot" :class="'status-' + item.status" /><div><strong>{{ item.name }}</strong><small>{{ item.provider }} · {{ channelStatusText[item.status] }}</small></div><span class="environment-tag" :class="item.environment">{{ environmentText[item.environment] }}</span></div><div class="channel-metrics"><span><small>成功率</small><strong>{{ rateText(item.successRate) }}</strong></span><span><small>P95 延迟</small><strong>{{ latencyText(item.latencyMs) }}</strong></span><span><small>余额</small><strong :class="'balance-' + item.balanceState">{{ balanceText[item.balanceState] }}</strong></span></div><div class="channel-card-foot"><span v-if="item.recentError" class="channel-error"><IconAlertTriangle :size="13" />{{ errorText[item.recentError.category] }} · {{ item.recentError.summary }}</span><span v-else :class="isLive ? 'catalog-unknown' : 'channel-ok'">{{ isLive ? '尚未接入调用健康数据' : '模拟检查无异常' }}</span><IconChevronRight :size="15" /></div></button></div>
         <div v-else class="people-empty"><IconServer2 :size="24" /><strong>{{ channels.summary.total === 0 ? 'New API 暂无渠道配置' : '没有符合条件的渠道' }}</strong><span>{{ channels.summary.total === 0 ? '当前未配置上游渠道，可先使用模拟数据完成开发与验收。' : '调整渠道环境或状态后重试。' }}</span><button v-if="channels.summary.total > 0" class="text-button" @click="clearFilters">清除筛选</button></div>
       </section>

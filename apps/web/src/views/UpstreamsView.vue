@@ -6,6 +6,7 @@ import {
 } from '@tabler/icons-vue'
 import { useRouter } from 'vue-router'
 import { fetchUpstreams, UpstreamsApiError, type UpstreamFilters, type UpstreamItem, type UpstreamsResponse } from '../upstreams-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const router = useRouter()
 const upstreams = ref<UpstreamsResponse | null>(null)
@@ -34,7 +35,8 @@ const summaryCards = computed(() => {
 })
 
 function filters(): UpstreamFilters { return { search: search.value.trim(), type: type.value, status: status.value } }
-function clearFilters() { search.value = ''; type.value = 'all'; status.value = 'all'; void loadData() }
+function applyFilters() { cancelSearch(); void loadData() }
+function clearFilters() { search.value = ''; type.value = 'all'; status.value = 'all'; applyFilters() }
 function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
 function dateText(value: string | null | undefined) { return value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '上游未提供' }
 function latencyText(value: number | null) { return value === null ? '—' : value >= 1_000 ? `${(value / 1_000).toFixed(1)}s` : `${value}ms` }
@@ -60,6 +62,8 @@ async function loadData() {
   } finally { if (request === next) isLoading.value = false }
 }
 
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadData())
+
 onMounted(() => void loadData())
 onBeforeUnmount(() => request?.abort())
 </script>
@@ -83,7 +87,7 @@ onBeforeUnmount(() => request?.abort())
       <section class="route-isolation-banner upstream-isolation"><span><IconLock :size="20" /></span><div><strong>正式账号与实验账号已隔离</strong><p>{{ upstreams.isolation.statement }}</p></div><div class="isolation-groups"><em>OFFICIAL · 正式</em><IconBan :size="15" /><em class="experiment">CPA PRO · 实验</em></div></section>
 
       <section class="panel upstream-list-panel"><header class="panel-header"><div><span class="panel-title">账号状态清单</span><span class="panel-subtitle">凭据仅显示配置和验证结果，不显示掩码或片段</span></div><span class="source-tag demo">DEMO</span></header>
-        <form class="upstream-filters" @submit.prevent="loadData"><label class="upstream-search"><IconSearch :size="16" /><input v-model="search" maxlength="60" type="search" placeholder="搜索账号、供应商或模型" /></label><label><IconServer2 :size="15" /><select v-model="type" @change="loadData"><option value="all">全部类型</option><option value="official_api">官方 API</option><option value="cpa_oauth">CPA OAuth</option></select></label><label><IconFilter :size="15" /><select v-model="status" @change="loadData"><option value="all">全部状态</option><option value="healthy">健康</option><option value="degraded">需关注</option><option value="auth_required">认证异常</option><option value="offline">离线</option><option value="unconfigured">未配置</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
+      <form class="upstream-filters" @submit.prevent="applyFilters"><label class="upstream-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索上游账号" maxlength="60" type="search" placeholder="搜索账号、供应商或模型" /></label><label><IconServer2 :size="15" /><select v-model="type" @change="applyFilters"><option value="all">全部类型</option><option value="official_api">官方 API</option><option value="cpa_oauth">CPA OAuth</option></select></label><label><IconFilter :size="15" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="healthy">健康</option><option value="degraded">需关注</option><option value="auth_required">认证异常</option><option value="offline">离线</option><option value="unconfigured">未配置</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
 
         <div v-if="upstreams.items.length" class="upstream-account-grid">
           <button v-for="item in upstreams.items" :key="item.id" class="upstream-account-card" :class="{ experiment: item.environment === 'experiment' }" :aria-label="`查看 ${item.name} 账号详情`" @click="openDetail(item)">

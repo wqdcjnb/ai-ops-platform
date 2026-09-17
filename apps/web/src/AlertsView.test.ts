@@ -41,7 +41,7 @@ describe('alerts view database simulation', () => {
     await vi.waitFor(() => expect(host.textContent).toContain('SQLite · 模拟数据'))
     const severity = host.querySelector<HTMLSelectElement>('[aria-label="严重度"]')!
     severity.value = 'critical'; severity.dispatchEvent(new Event('change'))
-    await vi.waitFor(() => expect(fetchAlerts).toHaveBeenLastCalledWith(expect.objectContaining({ severity: 'critical', page: 1 }), undefined))
+    await vi.waitFor(() => expect(fetchAlerts).toHaveBeenLastCalledWith(expect.objectContaining({ severity: 'critical', page: 1 }), expect.any(AbortSignal)))
     host.querySelector<HTMLButtonElement>('[aria-label="查看 官方全球组错误率持续升高 详情"]')!.click()
     await vi.waitFor(() => expect(fetchAlertDetail).toHaveBeenCalledWith('alert-error-global', expect.any(AbortSignal)))
     await vi.waitFor(() => expect(host.querySelector('[role="dialog"]')).not.toBeNull())
@@ -73,7 +73,7 @@ describe('alerts view database simulation', () => {
     await vi.waitFor(() => expect(fetchAlerts).toHaveBeenCalledWith(expect.objectContaining({ alertId: 'alert-error-global', page: 1 }), expect.any(AbortSignal)))
     await vi.waitFor(() => expect(host.textContent).toContain('正在显示关联审计记录对应的模拟告警'))
     host.querySelector<HTMLButtonElement>('[aria-label="清除关联告警筛选"]')!.click()
-    await vi.waitFor(() => expect(fetchAlerts).toHaveBeenLastCalledWith(expect.objectContaining({ alertId: '', subjectId: '', page: 1 }), undefined))
+    await vi.waitFor(() => expect(fetchAlerts).toHaveBeenLastCalledWith(expect.objectContaining({ alertId: '', subjectId: '', page: 1 }), expect.any(AbortSignal)))
     expect(window.location.search).toBe('')
   })
 })

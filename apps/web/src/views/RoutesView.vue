@@ -6,6 +6,7 @@ import {
   IconServer, IconSettings, IconShieldCheck, IconSparkles, IconX,
 } from '@tabler/icons-vue'
 import { fetchRoutes, RoutesApiError, updateLocalRoutePolicy, type RouteFilters, type RouteItem, type RoutePolicyUpdateBody, type RoutesResponse } from '../routes-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const routes = ref<RoutesResponse | null>(null)
 const selected = ref<RouteItem | null>(null)
@@ -37,7 +38,8 @@ const dataClassText = { internal: '内部', confidential: '机密', restricted: 
 const eventText = { fallback: '切换备用', retry: '有限重试', fail: '直接失败' }
 
 function filters(): RouteFilters { return { search: search.value.trim(), category: category.value, environment: environment.value, status: status.value } }
-function clearFilters() { search.value = ''; category.value = 'all'; environment.value = 'all'; status.value = 'all'; void loadRoutes() }
+function applyFilters() { cancelSearch(); void loadRoutes() }
+function clearFilters() { search.value = ''; category.value = 'all'; environment.value = 'all'; status.value = 'all'; applyFilters() }
 function latencyText(value: number) { return value >= 1_000 ? `${(value / 1_000).toFixed(1)}s` : `${value}ms` }
 
 function openPolicyEdit() {
@@ -81,6 +83,8 @@ async function loadRoutes() {
   } finally { if (request === next) isLoading.value = false }
 }
 
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadRoutes())
+
 onMounted(() => void loadRoutes())
 onBeforeUnmount(() => request?.abort())
 </script>
@@ -95,7 +99,7 @@ onBeforeUnmount(() => request?.abort())
     <section v-if="routes" class="route-isolation-banner"><span><IconLock :size="20" /></span><div><strong>正式与实验路由已隔离</strong><p>{{ routes.isolation.message }}</p></div><div class="isolation-groups"><em>OFFICIAL · 正式</em><IconBan :size="15" /><em class="experiment">CPA LAB · 实验</em></div></section>
 
     <section class="panel routes-main-panel">
-      <form class="route-filters" @submit.prevent="loadRoutes"><label class="route-search"><IconSearch :size="16" /><input v-model="search" maxlength="60" type="search" placeholder="搜索用途、别名、渠道、模型或岗位" /></label><label><IconSparkles :size="15" /><select v-model="category" @change="loadRoutes"><option value="all">全部用途</option><option v-for="item in routes?.options.categories ?? []" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><label><IconFilter :size="15" /><select v-model="environment" @change="loadRoutes"><option value="all">全部环境</option><option value="production">正式</option><option value="experiment">实验</option></select></label><label><IconShieldCheck :size="15" /><select v-model="status" @change="loadRoutes"><option value="all">全部状态</option><option value="healthy">健康</option><option value="degraded">降级</option><option value="disabled">停用</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
+      <form class="route-filters" @submit.prevent="applyFilters"><label class="route-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索用途与路由" maxlength="60" type="search" placeholder="搜索用途、别名、渠道、模型或岗位" /></label><label><IconSparkles :size="15" /><select v-model="category" @change="applyFilters"><option value="all">全部用途</option><option v-for="item in routes?.options.categories ?? []" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><label><IconFilter :size="15" /><select v-model="environment" @change="applyFilters"><option value="all">全部环境</option><option value="production">正式</option><option value="experiment">实验</option></select></label><label><IconShieldCheck :size="15" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="healthy">健康</option><option value="degraded">降级</option><option value="disabled">停用</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
 
       <div v-if="!routes && !errorMessage" class="data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取用途路由</strong><p>正在加载业务别名、渠道和降级策略…</p></div></div>
       <div v-else-if="errorMessage" class="data-state failed"><div class="state-icon"><IconAlertTriangle :size="22" /></div><div><strong>用途与路由加载失败</strong><p>{{ errorMessage }}</p></div><button class="btn btn-white" @click="loadRoutes">重试</button></div>

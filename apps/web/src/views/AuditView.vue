@@ -5,6 +5,7 @@ import {
   IconDatabase, IconDownload, IconFingerprint, IconHistory, IconLock, IconRefresh, IconSearch, IconShieldLock, IconUser, IconX,
 } from '@tabler/icons-vue'
 import { AuditApiError, fetchAuditDetail, fetchAuditEvents, type AuditDetail, type AuditEvent, type AuditFilters, type AuditResponse } from '../audit-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const audit = ref<AuditResponse | null>(null)
 const detail = ref<AuditDetail | null>(null)
@@ -53,7 +54,7 @@ const summaryCards = computed(() => {
 
 function currentFilters(): AuditFilters { return { period: period.value, search: search.value.trim(), eventId: eventId.value, actor: actor.value, action: action.value, resource: resource.value, result: result.value, source: source.value, page: page.value, pageSize } }
 function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)) }
-function applyFilters() { page.value = 1; void loadData() }
+function applyFilters() { cancelSearch(); page.value = 1; void loadData() }
 function removeLinkedAuditQuery() {
   if (typeof window === 'undefined') return
   const params = new URLSearchParams(window.location.search)
@@ -81,6 +82,8 @@ async function openDetail(item: AuditEvent) {
   catch (error) { if (!next.signal.aborted) errorMessage.value = error instanceof Error ? error.message : '审计详情暂时无法加载' }
   finally { if (detailRequest === next) detailLoadingId.value = '' }
 }
+
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => { page.value = 1; void loadData() })
 
 onMounted(() => void loadData())
 onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })

@@ -5,6 +5,7 @@ import {
   IconFilter, IconGauge, IconKey, IconRefresh, IconSearch, IconShieldLock, IconSparkles, IconUser, IconX,
 } from '@tabler/icons-vue'
 import { fetchLimits, LimitsApiError, updateMonthlySoftQuota, type LimitFilters, type LimitNode, type LimitsResponse, type QuotaUpdateBody, type QuotaUpdateResponse } from '../limits-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const limits = ref<LimitsResponse | null>(null)
 const selectedId = ref('company-xinzhi')
@@ -85,8 +86,8 @@ async function loadLimits() {
   } finally { if (request === next) isLoading.value = false }
 }
 
-function applyFilters() { void loadLimits() }
-function clearFilters() { level.value = 'all'; search.value = ''; void loadLimits() }
+function applyFilters() { cancelSearch(); void loadLimits() }
+function clearFilters() { level.value = 'all'; search.value = ''; applyFilters() }
 
 function openAdjust() {
   if (!selected.value || !month.value) return
@@ -121,6 +122,8 @@ async function submitAdjust() {
   }
 }
 
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadLimits())
+
 onMounted(() => void loadLimits())
 onBeforeUnmount(() => request?.abort())
 </script>
@@ -142,7 +145,7 @@ onBeforeUnmount(() => request?.abort())
 
     <template v-else-if="limits">
       <section class="panel limit-workbench">
-        <form class="limit-filters" @submit.prevent="applyFilters"><label class="limit-search"><IconSearch :size="16" /><input v-model="search" maxlength="60" type="search" placeholder="搜索范围、人员、用途或 Key 掩码" /></label><label><IconFilter :size="15" /><select v-model="level" @change="applyFilters"><option value="all">全部层级</option><option v-for="item in limits.options.levels" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
+        <form class="limit-filters" @submit.prevent="applyFilters"><label class="limit-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索额度范围" maxlength="60" type="search" placeholder="搜索范围、人员、用途或 Key 掩码" /></label><label><IconFilter :size="15" /><select v-model="level" @change="applyFilters"><option value="all">全部层级</option><option v-for="item in limits.options.levels" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
         <div class="limit-workbench-grid">
           <div class="limit-tree-column">
               <header><div><strong>五层额度树</strong><small>{{ limits.total }} 个策略范围</small></div><button class="tree-collapse-all" :disabled="!expandableIds.length" @click="toggleAll">{{ allCollapsed ? '全部展开' : '全部收起' }}</button></header>

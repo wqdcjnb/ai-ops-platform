@@ -17,6 +17,7 @@ import {
   IconUsers,
 } from '@tabler/icons-vue'
 import { createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonCreateBody } from '../people-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const people = ref<PeopleResponse | null>(null)
 const isLoading = ref(false)
@@ -88,6 +89,7 @@ async function loadPeople() {
 }
 
 function applyFilters() {
+  cancelSearch()
   page.value = 1
   void loadPeople()
 }
@@ -138,6 +140,11 @@ async function submitCreate() {
   }
 }
 
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => {
+  page.value = 1
+  void loadPeople()
+})
+
 onMounted(() => void loadPeople())
 onBeforeUnmount(() => activeRequest?.abort())
 </script>
@@ -178,7 +185,7 @@ onBeforeUnmount(() => activeRequest?.abort())
 
     <section class="panel people-panel-main">
       <form class="people-filters" @submit.prevent="applyFilters">
-        <label class="people-search"><IconSearch :size="17" /><input v-model="search" type="search" maxlength="60" placeholder="搜索姓名、岗位、负责人或用途" /></label>
+        <label class="people-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索人员" type="search" maxlength="60" placeholder="搜索姓名、岗位、负责人或用途" /></label>
         <label><IconBuilding :size="16" /><select v-model="department" @change="applyFilters"><option value="all">全部部门</option><option v-for="item in people?.departments ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label><IconUsers :size="16" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">在职</option><option value="offboarding">离职待回收</option><option value="disabled">已停用</option></select></label>
         <label><IconFilter :size="16" /><select v-model="goal" @change="applyFilters"><option value="all">全部目标状态</option><option value="normal">正常</option><option value="near">接近目标</option><option value="reached">已达目标</option></select></label>
