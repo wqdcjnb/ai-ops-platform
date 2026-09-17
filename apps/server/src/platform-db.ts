@@ -322,8 +322,29 @@ export class PlatformDatabase {
         targetPoints: number
         mode: 'soft' | 'hard'
         createdAt: string
-        updatedAt: string
+      updatedAt: string
       }>
+  }
+
+  listAuditEvents() {
+    const rows = this.db.prepare(`SELECT a.id, a.actor_user_id AS actorUserId, u.display_name AS actorName, u.role AS actorRole,
+      a.action, a.resource_type AS resourceType, a.resource_id AS resourceId, a.result, a.request_id AS requestId,
+      a.summary_json AS summaryJson, a.occurred_at AS occurredAt
+      FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id
+      ORDER BY a.occurred_at DESC, a.id DESC`).all() as Array<{
+        id: string
+        actorUserId: string | null
+        actorName: string | null
+        actorRole: PlatformUserRole | null
+        action: string
+        resourceType: string
+        resourceId: string | null
+        result: 'success' | 'failed' | 'denied'
+        requestId: string | null
+        summaryJson: string
+        occurredAt: string
+      }>
+    return rows.map((row) => ({ ...row, summary: JSON.parse(row.summaryJson) as Record<string, unknown> }))
   }
 
   tableCounts() {

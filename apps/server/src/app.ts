@@ -16,7 +16,7 @@ import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, create
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDemoUsage, createDemoUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDemoAlertDetail, createDemoAlertRules, createDemoAlerts, createDemoAlertSummary } from './alerts.js'
-import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDemoAudit, createDemoAuditDetail } from './audit.js'
+import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDemoConversationAccess, createDemoConversationAudits } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDemoEmployeeKeys, createDemoEmployeeModels, createDemoEmployeeProfile, createDemoEmployeeUsage, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
@@ -376,12 +376,12 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/audit-events', {
     schema: { querystring: auditQuerySchema, response: { 200: auditResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => createDemoAudit(request.query))
+  }, async (request) => createDatabaseAudit(database, request.query))
 
   app.get('/api/audit-events/:id', {
     schema: { params: auditParamsSchema, response: { 200: auditDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
-    const result = createDemoAuditDetail(request.params.id)
+    const result = createDatabaseAuditDetail(database, request.params.id)
     if (result) return result
     return reply.status(404).send({ error: { code: 'AUDIT_EVENT_NOT_FOUND', message: '未找到指定审计事件', requestId: request.id } })
   })

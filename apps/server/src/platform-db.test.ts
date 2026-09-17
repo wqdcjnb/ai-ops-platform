@@ -19,6 +19,10 @@ describe('platform database migrations', () => {
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
+    expect(database.listAuditEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'audit-key-rotate', resourceType: 'key', result: 'success', summary: expect.objectContaining({ sensitive: true }) }),
+      expect.objectContaining({ id: 'audit-export-denied', resourceType: 'export', result: 'denied' }),
+    ]))
     expect(database.status().migrationVersion).toBe(2)
     database.close()
   })

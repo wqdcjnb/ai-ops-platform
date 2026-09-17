@@ -395,11 +395,11 @@ describe('BFF', () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/audit-events?period=7d&action=rotate&resource=key&result=success&pageSize=10' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta).toMatchObject({ source: 'demo', period: '7d' })
+    expect(body.meta).toMatchObject({ source: 'database', period: '7d' })
     expect(body.items).toHaveLength(1)
     expect(body.items[0]).toMatchObject({ id: 'audit-key-rotate', contentAvailable: false, credentialValueAvailable: false })
     expect(body.items[0].changes[0]).toMatchObject({ before: '已变化', after: '已变化', sensitive: true })
-    expect(body.retention).toMatchObject({ deletionAllowed: false, appendOnlyVerified: false })
+    expect(body.retention).toMatchObject({ mode: 'database', deletionAllowed: false, appendOnlyVerified: false })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|sk-[A-Za-z0-9_-]{8,}/i)
 
     const invalid = await createApp().inject({ method: 'GET', url: '/api/audit-events?action=delete&period=90d' })
@@ -408,11 +408,11 @@ describe('BFF', () => {
   })
 
   it('returns audit detail without content or credentials and stable missing errors', async () => {
-    const response = await createApp().inject({ method: 'GET', url: '/api/audit-events/audit-route-failed' })
+    const response = await createApp().inject({ method: 'GET', url: '/api/audit-events/audit-key-rotate' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.event).toMatchObject({ id: 'audit-route-failed', result: { status: 'failed' }, contentAvailable: false, credentialValueAvailable: false })
-    expect(body.request).toMatchObject({ requestId: 'req-audit-route-12', traceState: 'demo_unverified' })
+    expect(body.event).toMatchObject({ id: 'audit-key-rotate', result: { status: 'success' }, contentAvailable: false, credentialValueAvailable: false })
+    expect(body.request).toMatchObject({ requestId: 'req-audit-key-02', traceState: 'database_unverified' })
     expect(body.integrity).toMatchObject({ deletionAllowed: false, appendOnlyVerified: false, hashChainVerified: false })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken/i)
 

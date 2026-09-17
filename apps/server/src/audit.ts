@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { PlatformDatabase } from './platform-db.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const actionSchema = z.enum(['login', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
@@ -32,7 +33,7 @@ export const auditEventSchema = z.object({
   contentAvailable: z.literal(false), credentialValueAvailable: z.literal(false),
 })
 
-const metaSchema = z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() })
+const metaSchema = z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() })
 const optionSchema = z.object({ id: z.string(), label: z.string() })
 
 export const auditResponseSchema = z.object({
@@ -40,12 +41,12 @@ export const auditResponseSchema = z.object({
   summary: z.object({ total: z.number().int().nonnegative(), success: z.number().int().nonnegative(), failed: z.number().int().nonnegative(), denied: z.number().int().nonnegative(), sensitiveChanges: z.number().int().nonnegative() }),
   options: z.object({ actors: z.array(optionSchema) }), items: z.array(auditEventSchema),
   pagination: z.object({ page: z.number().int().positive(), pageSize: z.number().int().positive(), total: z.number().int().nonnegative(), totalPages: z.number().int().nonnegative() }),
-  retention: z.object({ mode: z.literal('demo'), deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), notice: z.string() }),
+  retention: z.object({ mode: z.enum(['demo', 'database']), deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), notice: z.string() }),
 })
 
 export const auditDetailResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string() }), event: auditEventSchema,
-  request: z.object({ requestId: z.string(), traceState: z.literal('demo_unverified'), responseCode: z.number().int().min(100).max(599), durationMs: z.number().int().nonnegative() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }), event: auditEventSchema,
+  request: z.object({ requestId: z.string(), traceState: z.enum(['demo_unverified', 'database_unverified']), responseCode: z.number().int().min(100).max(599), durationMs: z.number().int().nonnegative() }),
   integrity: z.object({ deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), hashChainVerified: z.literal(false), notice: z.string() }),
   relatedAuditIds: z.array(z.string().regex(/^audit-[a-z0-9-]+$/)),
 })
@@ -104,5 +105,86 @@ export function createDemoAuditDetail(id: string, now = new Date()) {
     request: { requestId: event.requestId, traceState: 'demo_unverified' as const, responseCode: event.result.status === 'success' ? 200 : event.result.status === 'denied' ? 403 : 503, durationMs: 86 + index * 41 },
     integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false as const, notice: '演示记录不可在页面删除；正式追加写入与哈希链校验尚未接入，不能标记为已验证。' },
     relatedAuditIds: index > 0 ? [seeds[index - 1]!.id] : [],
+  }
+}
+
+const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', create: '创建', update: '更新', disable: '停用', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', view: '查看' }
+const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', export: '数据导出', settings: '系统设置', alert: '告警事件' }
+
+function databaseResourceName(type: AuditEvent['resource']['type'], id: string) {
+  if (id === 'key-lin-1') return 'sk-ops••••••7F2A'
+  if (id === 'quota-content-month') return '内容运营 · 月度软目标'
+  if (id === 'export-usage-01') return '近 30 天调用日志'
+  return resourceLabels[type]
+}
+
+function databaseSource(type: AuditEvent['resource']['type'], action: AuditEvent['action']) {
+  if (action === 'login') return { type: 'web' as const, label: '管理控制台', ipMasked: '192.168.1.*', client: 'Chrome · Windows' }
+  if (type === 'export') return { type: 'web' as const, label: '用量与日志', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
+  if (type === 'quota') return { type: 'web' as const, label: '额度与限流', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
+  return { type: 'api' as const, label: 'BFF 管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }
+}
+
+function databaseChanges(row: ReturnType<PlatformDatabase['listAuditEvents']>[number]): AuditEvent['changes'] {
+  if (row.action === 'rotate' && row.resourceType === 'key') return [{ field: 'secret', label: '密钥内容', before: '已变化', after: '已变化', sensitive: true }]
+  return []
+}
+
+function databaseEvent(row: ReturnType<PlatformDatabase['listAuditEvents']>[number]): AuditEvent {
+  const action = row.action as AuditEvent['action']
+  const resourceType = row.resourceType as AuditEvent['resource']['type']
+  const actorRole = row.actorRole === 'super_admin' ? 'super_admin' : row.actorRole === 'admin' ? 'admin' : 'system'
+  const summary = typeof row.summary.message === 'string' ? row.summary.message : '已记录字段级操作摘要。'
+  const actionCode = actionLabels[action].replaceAll(' ', '_').toUpperCase()
+  return {
+    id: row.id,
+    occurredAt: row.occurredAt,
+    actor: { id: row.actorUserId ?? 'system', name: row.actorName ?? '平台任务', role: actorRole },
+    action,
+    actionLabel: actionLabels[action],
+    resource: { type: resourceType, id: row.resourceId ?? `${resourceType}-unknown`, name: databaseResourceName(resourceType, row.resourceId ?? '') },
+    result: { status: row.result, code: row.result === 'success' ? (action === 'login' ? 'AUTH_OK' : `${actionCode}_OK`) : row.result === 'denied' ? 'SCOPE_DENIED' : 'DEPENDENCY_UNAVAILABLE' },
+    source: databaseSource(resourceType, action),
+    requestId: row.requestId ?? `req-${row.id.replace(/^audit-/, '')}`,
+    summary,
+    changes: databaseChanges(row),
+    contentAvailable: false,
+    credentialValueAvailable: false,
+  }
+}
+
+function filterAuditEvents(all: AuditEvent[], query: AuditQuery, now: Date) {
+  const cutoff = now.getTime() - periodMinutes(query.period) * 60_000
+  const search = query.search.toLocaleLowerCase('zh-CN')
+  return all.filter((item) => {
+    const matchesSearch = !search || [item.id, item.requestId, item.actor.name, item.actionLabel, item.resource.name, item.summary].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
+    return new Date(item.occurredAt).getTime() >= cutoff && matchesSearch && (query.actor === 'all' || item.actor.id === query.actor) && (query.action === 'all' || item.action === query.action) && (query.resource === 'all' || item.resource.type === query.resource) && (query.result === 'all' || item.result.status === query.result) && (query.source === 'all' || item.source.type === query.source)
+  })
+}
+
+export function createDatabaseAudit(database: PlatformDatabase, query: AuditQuery, now = new Date()) {
+  const all = database.listAuditEvents().map(databaseEvent)
+  const filtered = filterAuditEvents(all, query, now)
+  const start = (query.page - 1) * query.pageSize
+  const actors = [...new Map(all.map((item) => [item.actor.id, { id: item.actor.id, label: item.actor.name }])).values()]
+  return {
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: '审计事件已从平台 SQLite 读取；真实 x-request-id 全链路、追加写入和哈希链仍待验证。' },
+    summary: { total: filtered.length, success: filtered.filter((item) => item.result.status === 'success').length, failed: filtered.filter((item) => item.result.status === 'failed').length, denied: filtered.filter((item) => item.result.status === 'denied').length, sensitiveChanges: filtered.filter((item) => item.changes.some((change) => change.sensitive)).length },
+    options: { actors }, items: filtered.slice(start, start + query.pageSize),
+    pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
+    retention: { mode: 'database' as const, deletionAllowed: false as const, appendOnlyVerified: false as const, notice: '页面不提供删除能力；SQLite 事件已落库，但追加写入、哈希链与受限数据库权限仍待验证。' },
+  }
+}
+
+export function createDatabaseAuditDetail(database: PlatformDatabase, id: string, now = new Date()) {
+  const all = database.listAuditEvents().map(databaseEvent)
+  const index = all.findIndex((item) => item.id === id)
+  const event = all[index]
+  if (!event) return null
+  return {
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '详情仅展示 SQLite 字段级摘要，不包含完整密钥、认证信息、请求正文或对话正文' }, event,
+    request: { requestId: event.requestId, traceState: 'database_unverified' as const, responseCode: event.result.status === 'success' ? 200 : event.result.status === 'denied' ? 403 : 503, durationMs: 86 + index * 41 },
+    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false as const, notice: 'SQLite 记录不可在页面删除；正式追加写入与哈希链校验尚未接入，不能标记为已验证。' },
+    relatedAuditIds: index > 0 ? [all[index - 1]!.id] : [],
   }
 }
