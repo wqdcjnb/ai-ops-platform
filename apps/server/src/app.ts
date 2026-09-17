@@ -20,7 +20,7 @@ import { conversationAccessBodySchema, conversationAccessResponseSchema, convers
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDemoEmployeeKeys, createDemoEmployeeModels, createDemoEmployeeProfile, createDemoEmployeeUsage, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
-import { createPlatformDatabase, databaseStatusSchema, type PlatformDatabase } from './platform-db.js'
+import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -61,6 +61,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   const authMode = options.authMode ?? (process.env.AUTH_MODE === 'disabled' ? 'disabled' : 'required')
   const database = options.database ?? createPlatformDatabase({ filename: options.databasePath ?? process.env.PLATFORM_DB_PATH ?? (authMode === 'disabled' ? ':memory:' : undefined) })
   seedDemoUsers(database)
+  seedDemoData(database)
   const auth = options.authService ?? createAuthService({ database })
   if (!options.database) app.addHook('onClose', async () => database.close())
 
