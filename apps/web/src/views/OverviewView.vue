@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { RouterLink } from 'vue-router'
 import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -17,6 +18,7 @@ import {
   IconKey,
   IconRefresh,
 } from '@tabler/icons-vue'
+import { fetchCurrentUser, type AuthUser } from '../auth-api'
 import { fetchOverview, OverviewApiError, type OverviewResponse, type Period } from '../overview-api'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRenderer])
@@ -24,6 +26,7 @@ echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRendere
 const period = ref<Period>('7d')
 const isLoading = ref(false)
 const overview = ref<OverviewResponse | null>(null)
+const currentUser = ref<AuthUser | null>(null)
 const errorMessage = ref('')
 const chartElement = ref<HTMLElement | null>(null)
 let chart: ECharts | null = null
@@ -55,6 +58,7 @@ const selectedTrend = computed(() => overview.value?.trend ?? [])
 const alerts = computed(() => overview.value?.alerts ?? [])
 const people = computed(() => overview.value?.people ?? [])
 const channels = computed(() => overview.value?.channels ?? [])
+const canCreateKey = computed(() => ['super_admin', 'admin', 'department_lead'].includes(currentUser.value?.role ?? ''))
 const sourceLabel = computed(() => overview.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '等待数据')
 const lastUpdated = computed(() => {
   if (!overview.value) return '等待数据'
@@ -143,6 +147,7 @@ async function loadOverview() {
 
 watch(period, () => void loadOverview())
 onMounted(() => void loadOverview())
+onMounted(async () => { currentUser.value = (await fetchCurrentUser().catch(() => null))?.user ?? null })
 onBeforeUnmount(() => {
   activeRequest?.abort()
   resizeObserver?.disconnect()
@@ -163,7 +168,7 @@ onBeforeUnmount(() => {
         <button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadOverview">
           <IconRefresh :size="17" :class="{ spinning: isLoading }" /> {{ isLoading ? '更新中' : '刷新数据' }}
         </button>
-        <button class="btn create-key" disabled title="Key 写接口和审计完成后开放"><IconKey :size="17" /> 创建 Key</button>
+        <RouterLink v-if="canCreateKey" class="btn create-key" to="/keys" title="进入 Key 管理创建本地演示 Key"><IconKey :size="17" /> 创建 Key</RouterLink>
       </div>
     </section>
 
@@ -199,12 +204,12 @@ onBeforeUnmount(() => {
         </article>
 
         <article class="panel attention-panel">
-          <div class="panel-header"><div><h2>需要关注</h2><p>{{ alerts.length }} 个事件等待处理</p></div><button class="text-button" disabled>查看全部</button></div>
+          <div class="panel-header"><div><h2>需要关注</h2><p>{{ alerts.length }} 个事件等待处理</p></div><RouterLink class="text-button" to="/alerts">查看全部 <IconChevronRight :size="15" /></RouterLink></div>
           <div class="alert-list">
             <div v-for="alert in alerts" :key="alert.id" class="alert-item">
               <div class="alert-icon" :class="`alert-${alert.level}`"><IconAlertTriangle :size="18" /></div>
               <div class="alert-copy"><strong>{{ alert.title }}</strong><span>{{ alert.detail }}</span><small>{{ relativeTime(alert.occurredAt) }}</small></div>
-              <button :aria-label="`${alert.action}（尚未开放）`" disabled><IconChevronRight :size="18" /></button>
+              <RouterLink class="row-action enabled" :to="`/alerts?search=${encodeURIComponent(alert.title)}`" :aria-label="`${alert.action}：前往告警中心`" :title="`${alert.action}：前往告警中心`"><IconChevronRight :size="18" /></RouterLink>
             </div>
           </div>
           <div class="soft-limit-note"><IconFingerprint :size="18" /><span><strong>试点阶段为软额度</strong>达到 100% 仅产生提醒，当前不会阻断请求。</span></div>
@@ -213,7 +218,7 @@ onBeforeUnmount(() => {
 
       <section class="content-grid detail-grid">
         <article class="panel people-panel">
-          <div class="panel-header"><div><h2>人员消耗排行</h2><p>按本月成本点数排序；未配置个人目标时不估算比例</p></div><button class="text-button" disabled>人员与部门 <IconChevronRight :size="16" /></button></div>
+          <div class="panel-header"><div><h2>人员消耗排行</h2><p>按本月成本点数排序；未配置个人目标时不估算比例</p></div><RouterLink class="text-button" to="/people">人员与部门 <IconChevronRight :size="16" /></RouterLink></div>
           <div class="table-responsive">
             <table class="data-table">
               <thead><tr><th>人员</th><th>主要用途</th><th class="number-cell">请求数</th><th>个人目标</th><th class="number-cell">成本点数</th></tr></thead>
@@ -231,7 +236,7 @@ onBeforeUnmount(() => {
         </article>
 
         <article class="panel channel-panel">
-          <div class="panel-header"><div><h2>渠道摘要</h2><p>基于模拟调用元数据聚合，不等同于实时健康检查</p></div><button class="text-button" disabled>模型与渠道 <IconChevronRight :size="16" /></button></div>
+          <div class="panel-header"><div><h2>渠道摘要</h2><p>基于模拟调用元数据聚合，不等同于实时健康检查</p></div><RouterLink class="text-button" to="/models">模型与渠道 <IconChevronRight :size="16" /></RouterLink></div>
           <div class="channel-list">
             <div v-for="channel in channels" :key="channel.id" class="channel-row">
               <div class="channel-status" :class="{ unhealthy: channel.status !== 'healthy' }"><span /></div>

@@ -120,7 +120,7 @@ button { cursor: pointer; }
 .panel-header { min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px 12px; border-bottom: 1px solid #edf0f3; }
 .panel-header h2 { margin: 0; color: #223240; font-size: 13px; font-weight: 700; }
 .panel-header p { margin: 4px 0 0; color: #8b96a1; font-size: 9.5px; }
-.text-button { display: inline-flex; align-items: center; gap: 3px; padding: 5px; border: 0; color: var(--brand); background: transparent; font-size: 10px; font-weight: 700; }
+.text-button { display: inline-flex; align-items: center; gap: 3px; padding: 5px; border: 0; color: var(--brand); background: transparent; font-size: 10px; font-weight: 700; text-decoration: none; }
 .period-switch { display: flex; padding: 2px; border: 1px solid #e0e5ea; border-radius: 6px; background: #f7f9fa; }
 .period-switch button { min-width: 46px; padding: 5px 8px; border: 0; border-radius: 4px; color: #788592; background: transparent; font-size: 10px; }
 .period-switch button.active { color: #21313e; background: #fff; box-shadow: 0 1px 3px rgba(24,36,51,.12); font-weight: 700; }
