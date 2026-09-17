@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { alertDetailResponseSchema, alertFiltersSchema, alertRulesResponseSchema, alertSummaryResponseSchema, alertsResponseSchema } from './alerts-api'
 
-const meta = { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', notice: '演示' }
+const meta = { source: 'database', simulated: true, generatedAt: '2026-09-15T10:00:00.000Z', notice: '模拟数据' }
 const notificationConfig = { configured: false, channels: [{ type: 'wecom', state: 'not_configured' }], notice: '未配置' }
 const item = { id: 'alert-test', title: '测试告警', summary: '脱敏摘要', severity: 'critical', status: 'open', environment: 'production', source: 'error_rate', subject: { type: 'channel', id: 'channel-1', name: '渠道一' }, rule: { id: 'rule-1', name: '错误率规则', metric: '5xx', thresholdLabel: '≥ 5%' }, trigger: { valueLabel: '8%', comparator: 'gte' }, firstOccurredAt: '2026-09-15T09:00:00.000Z', lastOccurredAt: '2026-09-15T10:00:00.000Z', occurrences: 2, assignee: null, acknowledgedAt: null, closedAt: null, notification: { state: 'not_configured', channel: 'none', sentAt: null }, silence: { active: false, until: null }, relatedRequestIds: ['req-test-1'] }
 

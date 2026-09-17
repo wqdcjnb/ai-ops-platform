@@ -89,6 +89,54 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS usage_requests_occurred_at_idx ON usage_requests(occurred_at DESC);
   CREATE INDEX IF NOT EXISTS usage_requests_owner_idx ON usage_requests(owner_user_id, occurred_at DESC);`,
+  `CREATE TABLE IF NOT EXISTS alert_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('quota', 'traffic', 'error_rate', 'balance', 'credential', 'upstream')),
+    severity TEXT NOT NULL CHECK (severity IN ('critical', 'warning', 'info')),
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    environment TEXT NOT NULL CHECK (environment IN ('production', 'experiment')),
+    scope TEXT NOT NULL,
+    condition_label TEXT NOT NULL,
+    window_label TEXT NOT NULL,
+    cooldown_minutes INTEGER NOT NULL CHECK (cooldown_minutes >= 0),
+    notification_channel TEXT NOT NULL CHECK (notification_channel IN ('none', 'wecom', 'dingtalk')),
+    last_triggered_at TEXT,
+    trigger_count_7d INTEGER NOT NULL CHECK (trigger_count_7d >= 0),
+    description TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS alert_events (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    severity TEXT NOT NULL CHECK (severity IN ('critical', 'warning', 'info')),
+    status TEXT NOT NULL CHECK (status IN ('open', 'acknowledged', 'closed')),
+    environment TEXT NOT NULL CHECK (environment IN ('production', 'experiment')),
+    source TEXT NOT NULL CHECK (source IN ('quota', 'traffic', 'error_rate', 'balance', 'credential', 'upstream')),
+    subject_type TEXT NOT NULL CHECK (subject_type IN ('company', 'department', 'person', 'key', 'channel', 'upstream')),
+    subject_id TEXT NOT NULL,
+    subject_name TEXT NOT NULL,
+    rule_id TEXT NOT NULL REFERENCES alert_rules(id),
+    rule_name TEXT NOT NULL,
+    rule_metric TEXT NOT NULL,
+    threshold_label TEXT NOT NULL,
+    trigger_value_label TEXT NOT NULL,
+    trigger_comparator TEXT NOT NULL CHECK (trigger_comparator IN ('gte', 'gt', 'lte', 'eq')),
+    first_occurred_at TEXT NOT NULL,
+    last_occurred_at TEXT NOT NULL,
+    occurrences INTEGER NOT NULL CHECK (occurrences > 0),
+    assignee_user_id TEXT REFERENCES users(id),
+    acknowledged_at TEXT,
+    closed_at TEXT,
+    notification_state TEXT NOT NULL CHECK (notification_state IN ('not_configured', 'not_sent', 'sent', 'failed')),
+    notification_channel TEXT NOT NULL CHECK (notification_channel IN ('none', 'wecom', 'dingtalk')),
+    notification_sent_at TEXT,
+    silence_active INTEGER NOT NULL CHECK (silence_active IN (0, 1)),
+    silence_until TEXT,
+    related_request_ids_json TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS alert_events_last_occurred_at_idx ON alert_events(last_occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS alert_events_status_idx ON alert_events(status, severity, environment);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -178,6 +226,45 @@ export interface PlatformUsageRequestSeed {
   retryCount?: number
   requestIdPropagated?: boolean
   client: { name: 'Codex Desktop' | 'WorkBuddy'; mode: 'stream' | 'non_stream' }
+}
+
+export interface PlatformAlertRuleSeed {
+  id: string
+  name: string
+  category: 'quota' | 'traffic' | 'error_rate' | 'balance' | 'credential' | 'upstream'
+  severity: 'critical' | 'warning' | 'info'
+  enabled: boolean
+  environment: 'production' | 'experiment'
+  scope: string
+  condition: string
+  window: string
+  cooldownMinutes: number
+  notificationChannel?: 'none' | 'wecom' | 'dingtalk'
+  lastTriggeredAt?: string | null
+  triggerCount7d: number
+  description: string
+}
+
+export interface PlatformAlertEventSeed {
+  id: string
+  title: string
+  summary: string
+  severity: 'critical' | 'warning' | 'info'
+  status: 'open' | 'acknowledged' | 'closed'
+  environment: 'production' | 'experiment'
+  source: PlatformAlertRuleSeed['category']
+  subject: { type: 'company' | 'department' | 'person' | 'key' | 'channel' | 'upstream'; id: string; name: string }
+  rule: { id: string; name: string; metric: string; thresholdLabel: string }
+  trigger: { valueLabel: string; comparator: 'gte' | 'gt' | 'lte' | 'eq' }
+  firstOccurredAt: string
+  lastOccurredAt: string
+  occurrences: number
+  assigneeUserId?: string | null
+  acknowledgedAt?: string | null
+  closedAt?: string | null
+  notification?: { state: 'not_configured' | 'not_sent' | 'sent' | 'failed'; channel: 'none' | 'wecom' | 'dingtalk'; sentAt?: string | null }
+  silence?: { active: boolean; until?: string | null }
+  relatedRequestIds?: string[]
 }
 
 export interface PlatformPersonCreate {
@@ -324,6 +411,53 @@ export class PlatformDatabase {
     )
   }
 
+  seedAlertRule(seed: PlatformAlertRuleSeed) {
+    this.db.prepare(`INSERT INTO alert_rules(
+      id, name, category, severity, enabled, environment, scope, condition_label, window_label,
+      cooldown_minutes, notification_channel, last_triggered_at, trigger_count_7d, description
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name, category = excluded.category, severity = excluded.severity, enabled = excluded.enabled,
+      environment = excluded.environment, scope = excluded.scope, condition_label = excluded.condition_label,
+      window_label = excluded.window_label, cooldown_minutes = excluded.cooldown_minutes,
+      notification_channel = excluded.notification_channel, last_triggered_at = excluded.last_triggered_at,
+      trigger_count_7d = excluded.trigger_count_7d, description = excluded.description`).run(
+      seed.id, seed.name, seed.category, seed.severity, Number(seed.enabled), seed.environment, seed.scope,
+      seed.condition, seed.window, seed.cooldownMinutes, seed.notificationChannel ?? 'none',
+      seed.lastTriggeredAt ?? null, seed.triggerCount7d, seed.description,
+    )
+  }
+
+  seedAlertEvent(seed: PlatformAlertEventSeed) {
+    this.db.prepare(`INSERT INTO alert_events(
+      id, title, summary, severity, status, environment, source, subject_type, subject_id, subject_name,
+      rule_id, rule_name, rule_metric, threshold_label, trigger_value_label, trigger_comparator,
+      first_occurred_at, last_occurred_at, occurrences, assignee_user_id, acknowledged_at, closed_at,
+      notification_state, notification_channel, notification_sent_at, silence_active, silence_until,
+      related_request_ids_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      title = excluded.title, summary = excluded.summary, severity = excluded.severity, status = excluded.status,
+      environment = excluded.environment, source = excluded.source, subject_type = excluded.subject_type,
+      subject_id = excluded.subject_id, subject_name = excluded.subject_name, rule_id = excluded.rule_id,
+      rule_name = excluded.rule_name, rule_metric = excluded.rule_metric, threshold_label = excluded.threshold_label,
+      trigger_value_label = excluded.trigger_value_label, trigger_comparator = excluded.trigger_comparator,
+      first_occurred_at = excluded.first_occurred_at, last_occurred_at = excluded.last_occurred_at,
+      occurrences = excluded.occurrences, assignee_user_id = excluded.assignee_user_id,
+      acknowledged_at = excluded.acknowledged_at, closed_at = excluded.closed_at,
+      notification_state = excluded.notification_state, notification_channel = excluded.notification_channel,
+      notification_sent_at = excluded.notification_sent_at, silence_active = excluded.silence_active,
+      silence_until = excluded.silence_until, related_request_ids_json = excluded.related_request_ids_json`).run(
+      seed.id, seed.title, seed.summary, seed.severity, seed.status, seed.environment, seed.source,
+      seed.subject.type, seed.subject.id, seed.subject.name, seed.rule.id, seed.rule.name, seed.rule.metric,
+      seed.rule.thresholdLabel, seed.trigger.valueLabel, seed.trigger.comparator, seed.firstOccurredAt,
+      seed.lastOccurredAt, seed.occurrences, seed.assigneeUserId ?? null, seed.acknowledgedAt ?? null,
+      seed.closedAt ?? null, seed.notification?.state ?? 'not_configured', seed.notification?.channel ?? 'none',
+      seed.notification?.sentAt ?? null, Number(seed.silence?.active ?? false), seed.silence?.until ?? null,
+      JSON.stringify(seed.relatedRequestIds ?? []),
+    )
+  }
+
   setUserDepartment(userId: string, departmentId: string | null) {
     this.db.prepare('UPDATE users SET department_id = ?, updated_at = ? WHERE id = ?').run(departmentId, this.now().toISOString(), userId)
   }
@@ -458,6 +592,41 @@ export class PlatformDatabase {
       }>
   }
 
+  listAlertRules() {
+    return this.db.prepare(`SELECT id, name, category, severity, enabled, environment, scope,
+      condition_label AS condition, window_label AS window, cooldown_minutes AS cooldownMinutes,
+      notification_channel AS notificationChannel, last_triggered_at AS lastTriggeredAt,
+      trigger_count_7d AS triggerCount7d, description
+      FROM alert_rules ORDER BY environment, category, id`).all() as Array<{
+        id: string; name: string; category: PlatformAlertRuleSeed['category']; severity: PlatformAlertRuleSeed['severity']; enabled: number
+        environment: 'production' | 'experiment'; scope: string; condition: string; window: string; cooldownMinutes: number
+        notificationChannel: 'none' | 'wecom' | 'dingtalk'; lastTriggeredAt: string | null; triggerCount7d: number; description: string
+      }>
+  }
+
+  listAlertEvents() {
+    const rows = this.db.prepare(`SELECT e.id, e.title, e.summary, e.severity, e.status, e.environment, e.source,
+      e.subject_type AS subjectType, e.subject_id AS subjectId, e.subject_name AS subjectName,
+      e.rule_id AS ruleId, e.rule_name AS ruleName, e.rule_metric AS ruleMetric, e.threshold_label AS thresholdLabel,
+      e.trigger_value_label AS triggerValueLabel, e.trigger_comparator AS triggerComparator,
+      e.first_occurred_at AS firstOccurredAt, e.last_occurred_at AS lastOccurredAt, e.occurrences,
+      e.assignee_user_id AS assigneeUserId, u.display_name AS assigneeName, e.acknowledged_at AS acknowledgedAt,
+      e.closed_at AS closedAt, e.notification_state AS notificationState, e.notification_channel AS notificationChannel,
+      e.notification_sent_at AS notificationSentAt, e.silence_active AS silenceActive, e.silence_until AS silenceUntil,
+      e.related_request_ids_json AS relatedRequestIdsJson
+      FROM alert_events e LEFT JOIN users u ON u.id = e.assignee_user_id
+      ORDER BY e.last_occurred_at DESC, e.id DESC`).all() as Array<{
+        id: string; title: string; summary: string; severity: PlatformAlertRuleSeed['severity']; status: 'open' | 'acknowledged' | 'closed'
+        environment: 'production' | 'experiment'; source: PlatformAlertRuleSeed['category']; subjectType: PlatformAlertEventSeed['subject']['type']
+        subjectId: string; subjectName: string; ruleId: string; ruleName: string; ruleMetric: string; thresholdLabel: string
+        triggerValueLabel: string; triggerComparator: PlatformAlertEventSeed['trigger']['comparator']; firstOccurredAt: string
+        lastOccurredAt: string; occurrences: number; assigneeUserId: string | null; assigneeName: string | null; acknowledgedAt: string | null
+        closedAt: string | null; notificationState: 'not_configured' | 'not_sent' | 'sent' | 'failed'; notificationChannel: 'none' | 'wecom' | 'dingtalk'
+        notificationSentAt: string | null; silenceActive: number; silenceUntil: string | null; relatedRequestIdsJson: string
+      }>
+    return rows.map((row) => ({ ...row, relatedRequestIds: JSON.parse(row.relatedRequestIdsJson) as string[] }))
+  }
+
   tableCounts() {
     const count = (table: string) => (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
     return {
@@ -467,6 +636,8 @@ export class PlatformDatabase {
       quotaPolicies: count('quota_policies'),
       auditEvents: count('audit_events'),
       usageRequests: count('usage_requests'),
+      alertRules: count('alert_rules'),
+      alertEvents: count('alert_events'),
     }
   }
 
@@ -579,6 +750,32 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { requestId: 'req-demo-012', minutes: 4_330, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'experiment', name: '高能力实验', alias: 'ecommerce-pro-lab' }, model: { id: 'model-lab', displayName: 'CPA 高能力实验', actualModel: 'pro-oauth-lab' }, channel: { id: 'channel-cpa-lab-1', name: 'CPA Lab · 01', type: 'cpa_oauth' }, streamed: true, tokens: { input: 5560, output: 1940 }, points: 7.5, latency: { firstTokenMs: 2840, totalMs: 13620 }, cost: { type: 'cpa_estimate', amountUsd: .0212 }, status: 'succeeded', routeAlias: 'ecommerce-pro-lab', client: { name: 'WorkBuddy', mode: 'stream' } },
   ]
   for (const { minutes, ...request } of usageSeeds) database.seedUsageRequest({ ...request, occurredAt: new Date(now.getTime() - minutes * 60_000).toISOString() })
+
+  const at = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString()
+  const later = (minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString()
+  const alertRules: PlatformAlertRuleSeed[] = [
+    { id: 'rule-quota-warning', name: '软额度 80% 预警', category: 'quota', severity: 'warning', enabled: true, environment: 'production', scope: '公司 / 部门 / 人员 / 用途 / Key', condition: '使用率 ≥ 80%', window: '小时 / 日 / 周 / 月', cooldownMinutes: 60, lastTriggeredAt: at(120), triggerCount7d: 9, description: '提前提示额度接近目标，不会阻断调用。' },
+    { id: 'rule-quota-critical', name: '软额度 100% 告警', category: 'quota', severity: 'critical', enabled: true, environment: 'production', scope: '公司 / 部门 / 人员 / 用途 / Key', condition: '使用率 ≥ 100%', window: '小时 / 日 / 周 / 月', cooldownMinutes: 30, lastTriggeredAt: at(1270), triggerCount7d: 3, description: '达到软目标后记录严重告警，硬阻断仍未启用。' },
+    { id: 'rule-traffic-spike', name: '流量突增提示', category: 'traffic', severity: 'info', enabled: true, environment: 'production', scope: '全公司请求', condition: '请求量 ≥ 同期基线 2.5 倍', window: '10 分钟', cooldownMinutes: 30, lastTriggeredAt: at(132), triggerCount7d: 4, description: '识别异常请求增长，辅助核对活动或自动化任务。' },
+    { id: 'rule-error-critical', name: '错误率严重告警', category: 'error_rate', severity: 'critical', enabled: true, environment: 'production', scope: '官方生产渠道', condition: '5xx 错误率 ≥ 5%', window: '5 分钟', cooldownMinutes: 15, lastTriggeredAt: at(3), triggerCount7d: 7, description: '监控生产渠道服务异常，不展示上游完整错误正文。' },
+    { id: 'rule-balance-low', name: '上游余额预警', category: 'balance', severity: 'warning', enabled: true, environment: 'production', scope: '官方上游账号', condition: '预计可用天数 ≤ 3 天', window: '每天', cooldownMinutes: 720, lastTriggeredAt: at(35), triggerCount7d: 2, description: '按近期消耗估算余额安全天数。' },
+    { id: 'rule-credential-expiry', name: '凭证到期告警', category: 'credential', severity: 'critical', enabled: true, environment: 'experiment', scope: 'CPA 实验账号', condition: '剩余有效时间 ≤ 24 小时', window: '每小时', cooldownMinutes: 360, lastTriggeredAt: at(88), triggerCount7d: 2, description: '仅返回凭证状态与到期时间，不返回任何凭证内容。' },
+    { id: 'rule-upstream-failure', name: '上游连续失败', category: 'upstream', severity: 'warning', enabled: true, environment: 'experiment', scope: 'CPA 实验上游', condition: '连续失败次数 ≥ 3', window: '10 分钟', cooldownMinutes: 30, lastTriggeredAt: at(21), triggerCount7d: 4, description: '实验流量出现上游异常时提醒，不会回退至生产渠道。' },
+    { id: 'rule-upstream-latency', name: '上游延迟异常', category: 'upstream', severity: 'info', enabled: true, environment: 'production', scope: '官方生产渠道', condition: 'P95 总耗时 ≥ 10 秒', window: '10 分钟', cooldownMinutes: 30, lastTriggeredAt: at(2770), triggerCount7d: 6, description: '记录并跟踪上游延迟恢复状态。' },
+  ]
+  for (const rule of alertRules) database.seedAlertRule(rule)
+
+  const alertEvents: PlatformAlertEventSeed[] = [
+    { id: 'alert-error-global', title: '官方全球组错误率持续升高', summary: '近 5 分钟 5xx 错误率超过严重阈值，路由仍限定在官方生产组。', severity: 'critical', status: 'open', environment: 'production', source: 'error_rate', subject: { type: 'channel', id: 'channel-official-global-1', name: 'Official Global · 01' }, rule: { id: 'rule-error-critical', name: '错误率严重告警', metric: '5xx 错误率', thresholdLabel: '≥ 5% / 5 分钟' }, trigger: { valueLabel: '8.4%', comparator: 'gte' }, firstOccurredAt: at(42), lastOccurredAt: at(3), occurrences: 7 },
+    { id: 'alert-balance-low', title: '官方全球账号余额偏低', summary: '按近 7 天消耗速度估算，可用余额低于 3 天安全线。', severity: 'warning', status: 'open', environment: 'production', source: 'balance', subject: { type: 'upstream', id: 'upstream-official-global-1', name: 'Official Global · 01' }, rule: { id: 'rule-balance-low', name: '上游余额预警', metric: '预计可用天数', thresholdLabel: '≤ 3 天' }, trigger: { valueLabel: '2.1 天', comparator: 'lte' }, firstOccurredAt: at(310), lastOccurredAt: at(35), occurrences: 3 },
+    { id: 'alert-cpa-credential', title: 'CPA 实验凭证即将到期', summary: '实验渠道凭证预计 18 小时后失效，生产路由不会回退至该渠道。', severity: 'critical', status: 'acknowledged', environment: 'experiment', source: 'credential', subject: { type: 'upstream', id: 'upstream-cpa-lab-2', name: 'CPA Lab · 02' }, rule: { id: 'rule-credential-expiry', name: '凭证到期告警', metric: '剩余有效时间', thresholdLabel: '≤ 24 小时' }, trigger: { valueLabel: '18 小时', comparator: 'lte' }, firstOccurredAt: at(520), lastOccurredAt: at(88), occurrences: 2, assigneeUserId: 'user-super-admin', acknowledgedAt: at(76) },
+    { id: 'alert-quota-content', title: '内容运营部门本月额度接近目标', summary: '部门月度软额度达到 84.7%，当前仅提示，不会阻断请求。', severity: 'warning', status: 'open', environment: 'production', source: 'quota', subject: { type: 'department', id: 'content', name: '内容运营' }, rule: { id: 'rule-quota-warning', name: '软额度 80% 预警', metric: '月度额度使用率', thresholdLabel: '≥ 80%' }, trigger: { valueLabel: '84.7%', comparator: 'gte' }, firstOccurredAt: at(930), lastOccurredAt: at(120), occurrences: 5 },
+    { id: 'alert-traffic-copy', title: '商品文案用途请求量突增', summary: '10 分钟请求量较过去 7 天同时间段基线高 2.8 倍。', severity: 'info', status: 'acknowledged', environment: 'production', source: 'traffic', subject: { type: 'company', id: 'company-xinzhi', name: '新知科技' }, rule: { id: 'rule-traffic-spike', name: '流量突增提示', metric: '请求量基线倍数', thresholdLabel: '≥ 2.5 倍 / 10 分钟' }, trigger: { valueLabel: '2.8 倍', comparator: 'gte' }, firstOccurredAt: at(160), lastOccurredAt: at(132), occurrences: 2, assigneeUserId: 'user-super-admin', acknowledgedAt: at(128), silence: { active: true, until: later(45) }, relatedRequestIds: ['req-demo-004'] },
+    { id: 'alert-cpa-upstream', title: 'CPA Lab · 01 出现短时 5xx', summary: '实验流量独立运行，异常未跨组影响官方生产渠道。', severity: 'warning', status: 'open', environment: 'experiment', source: 'upstream', subject: { type: 'upstream', id: 'upstream-cpa-lab-1', name: 'CPA Lab · 01' }, rule: { id: 'rule-upstream-failure', name: '上游连续失败', metric: '连续失败次数', thresholdLabel: '≥ 3 次' }, trigger: { valueLabel: '4 次', comparator: 'gte' }, firstOccurredAt: at(68), lastOccurredAt: at(21), occurrences: 4, relatedRequestIds: ['req-demo-007', 'req-demo-012'] },
+    { id: 'alert-key-limit', title: '林筱雨 Key 达到单小时软目标', summary: 'Key 仅保存掩码；本次达到目标后继续放行，并记录告警。', severity: 'critical', status: 'closed', environment: 'production', source: 'quota', subject: { type: 'key', id: 'key-lin-1', name: 'sk-ops••••••7F2A' }, rule: { id: 'rule-quota-critical', name: '软额度 100% 告警', metric: '小时额度使用率', thresholdLabel: '≥ 100%' }, trigger: { valueLabel: '102.3%', comparator: 'gte' }, firstOccurredAt: at(1320), lastOccurredAt: at(1270), occurrences: 2, assigneeUserId: 'user-super-admin', acknowledgedAt: at(1260), closedAt: at(1190), relatedRequestIds: ['req-demo-001'] },
+    { id: 'alert-channel-recovered', title: 'Official CN · 02 延迟已恢复', summary: 'P95 延迟回落至正常区间，事件已自动关闭。', severity: 'info', status: 'closed', environment: 'production', source: 'upstream', subject: { type: 'channel', id: 'channel-official-cn-2', name: 'Official CN · 02' }, rule: { id: 'rule-upstream-latency', name: '上游延迟异常', metric: 'P95 总耗时', thresholdLabel: '≥ 10 秒 / 10 分钟' }, trigger: { valueLabel: '已恢复至 3.2 秒', comparator: 'lte' }, firstOccurredAt: at(2880), lastOccurredAt: at(2770), occurrences: 6, closedAt: at(2760), relatedRequestIds: ['req-demo-003'] },
+  ]
+  for (const event of alertEvents) database.seedAlertEvent(event)
 
   return database.tableCounts()
 }

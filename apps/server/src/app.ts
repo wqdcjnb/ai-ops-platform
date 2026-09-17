@@ -17,7 +17,7 @@ import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, create
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
-import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDemoAlertDetail, createDemoAlertRules, createDemoAlerts, createDemoAlertSummary } from './alerts.js'
+import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDemoConversationAccess, createDemoConversationAudits } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
@@ -379,20 +379,20 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/alerts/summary', {
     schema: { response: { 200: alertSummaryResponseSchema } },
-  }, async () => createDemoAlertSummary(await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
+  }, async () => createDatabaseAlertSummary(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
 
   app.get('/api/alerts', {
     schema: { querystring: alertsQuerySchema, response: { 200: alertsResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => createDemoAlerts(request.query, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
+  }, async (request) => createDatabaseAlerts(database, request.query, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
 
   app.get('/api/alert-rules', {
     schema: { response: { 200: alertRulesResponseSchema } },
-  }, async () => createDemoAlertRules(await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
+  }, async () => createDatabaseAlertRules(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)()))
 
   app.get('/api/alerts/:id', {
     schema: { params: alertParamsSchema, response: { 200: alertDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
-    const result = createDemoAlertDetail(request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)())
+    const result = createDatabaseAlertDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)())
     if (result) return result
     return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '未找到指定告警事件', requestId: request.id } })
   })

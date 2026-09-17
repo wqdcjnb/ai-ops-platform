@@ -25,7 +25,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(3)
+    expect(body.migrationVersion).toBe(4)
     expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests']))
   })
 
@@ -365,6 +365,7 @@ describe('BFF', () => {
   it('returns filterable alert events and explicit notification configuration state', async () => {
     const summary = await createApp().inject({ method: 'GET', url: '/api/alerts/summary' })
     expect(summary.statusCode).toBe(200)
+    expect(summary.json().meta).toMatchObject({ source: 'database', simulated: true })
     expect(summary.json().summary).toMatchObject({ open: 4, critical: 1, warning: 3, experiment: 2 })
     expect(summary.json().notificationConfig).toMatchObject({ configured: false })
 
@@ -372,6 +373,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.items).toHaveLength(1)
+    expect(body.meta).toMatchObject({ source: 'database', simulated: true })
     expect(body.items[0]).toMatchObject({ id: 'alert-cpa-upstream', severity: 'warning', status: 'open', environment: 'experiment' })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|rawUpstreamBody/i)
 
@@ -383,7 +385,8 @@ describe('BFF', () => {
   it('returns read-only alert rules and safe event details with stable missing errors', async () => {
     const rules = await createApp().inject({ method: 'GET', url: '/api/alert-rules' })
     expect(rules.statusCode).toBe(200)
-    expect(rules.json().items).toHaveLength(6)
+    expect(rules.json().meta).toMatchObject({ source: 'database', simulated: true })
+    expect(rules.json().items).toHaveLength(8)
     expect(rules.json().items.every((item: { notification: { configured: boolean } }) => item.notification.configured === false)).toBe(true)
 
     const response = await createApp().inject({ method: 'GET', url: '/api/alerts/alert-error-global' })
