@@ -1,5 +1,12 @@
 # 更新记录
 
+## 2026-09-17 · 平台 SQLite 核心表与迁移层
+
+- 使用 Node 24 内置 `node:sqlite` 建立平台数据库适配器，默认路径为 `data/platform.sqlite`，支持通过 `PLATFORM_DB_PATH` 覆盖。
+- 新增版本迁移表和部门、用户、API Key、额度策略、审计事件五类核心表，启用外键约束、WAL 和忙等待。
+- 新增 `GET /api/platform/database` 状态接口，返回迁移版本、表清单和检查时间，不返回任何凭据或业务正文。
+- 当前数据库层先作为结构和健康检查基础，账号会话、New API 管理数据和页面演示数据尚未迁移到持久化仓储。
+
 ## 2026-09-17 · 登录、会话与服务端 RBAC 最小闭环
 
 - 新增 `/api/auth/login`、`/api/auth/me` 和 `/api/auth/logout`，使用 HttpOnly、SameSite 会话 Cookie，默认 8 小时有效期；演示账号可通过环境变量替换。

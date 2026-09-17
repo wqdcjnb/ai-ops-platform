@@ -20,6 +20,7 @@ import { conversationAccessBodySchema, conversationAccessResponseSchema, convers
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDemoEmployeeKeys, createDemoEmployeeModels, createDemoEmployeeProfile, createDemoEmployeeUsage, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, type AppRole, type AuthService } from './auth.js'
+import { createPlatformDatabase, databaseStatusSchema, type PlatformDatabase } from './platform-db.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -33,6 +34,8 @@ export interface BuildAppOptions {
   logger?: boolean
   authMode?: 'required' | 'disabled'
   authService?: AuthService
+  database?: PlatformDatabase
+  databasePath?: string
   probeNewApi?: () => Promise<NewApiStatus>
   probeCpa?: () => Promise<PlatformProbeResult>
   probeDocs?: () => Promise<PlatformProbeResult>
@@ -57,6 +60,8 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   const authMode = options.authMode ?? (process.env.AUTH_MODE === 'disabled' ? 'disabled' : 'required')
   const auth = options.authService ?? createAuthService()
+  const database = options.database ?? createPlatformDatabase({ filename: options.databasePath ?? process.env.PLATFORM_DB_PATH ?? (authMode === 'disabled' ? ':memory:' : undefined) })
+  if (!options.database) app.addHook('onClose', async () => database.close())
 
   const requiredRoles = (path: string): readonly AppRole[] => {
     if (path.startsWith('/api/me')) return ['employee']
@@ -93,6 +98,10 @@ export function buildApp(options: BuildAppOptions = {}) {
       },
     },
   }, async () => ({ status: 'ok' as const, service: 'ai-ops-bff' as const }))
+
+  app.get('/api/platform/database', {
+    schema: { response: { 200: databaseStatusSchema } },
+  }, async () => database.status())
 
   app.post('/api/auth/login', {
     schema: {

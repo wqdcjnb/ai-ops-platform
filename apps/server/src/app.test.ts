@@ -19,6 +19,15 @@ afterEach(async () => {
 })
 
 describe('BFF', () => {
+  it('runs the platform database migration and reports its schema status', async () => {
+    const response = await createApp().inject({ method: 'GET', url: '/api/platform/database' })
+    const body = response.json()
+    expect(response.statusCode).toBe(200)
+    expect(body.state).toBe('ready')
+    expect(body.migrationVersion).toBe(1)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events']))
+  })
+
   it('requires a session for protected resources', async () => {
     const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
