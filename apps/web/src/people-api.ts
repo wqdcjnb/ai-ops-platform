@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 export const peopleFilterSchema = z.object({
   search: z.string(),
@@ -124,7 +125,7 @@ export async function fetchPeople(filters: PeopleFilters, signal?: AbortSignal):
 
 export async function createPerson(payload: PersonCreateBody): Promise<PersonCreateResponse> {
   const body = personCreateBodySchema.parse(payload)
-  const response = await fetch('/api/people', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const response = await fetch('/api/people', { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
   const requestId = response.headers.get('x-request-id') ?? undefined
   if (!response.ok) {
     const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 export const keyFiltersSchema = z.object({
   search: z.string(), owner: z.string(), purpose: z.string(), model: z.string(),
@@ -75,7 +76,7 @@ export function fetchKeyDetail(id: string, signal?: AbortSignal) {
 
 export async function createKey(payload: KeyCreateBody): Promise<KeyCreateResponse> {
   const body = keyCreateBodySchema.parse(payload)
-  const response = await fetch('/api/keys', { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const response = await fetch('/api/keys', { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
   const requestId = response.headers.get('x-request-id') ?? undefined
   if (!response.ok) {
     const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null

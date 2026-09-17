@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const captureStateSchema = z.enum(['captured', 'metadata_only', 'expired'])
@@ -27,4 +28,4 @@ export type ConversationAccessResponse = z.infer<typeof conversationAccessRespon
 export class ConversationAuditApiError extends Error { constructor(message: string, readonly requestId?: string) { super(message) } }
 async function parseResponse<T>(response: Response, schema: z.ZodType<T>, fallback: string) { const requestId = response.headers.get('x-request-id') ?? undefined; if (!response.ok) throw new ConversationAuditApiError(response.status === 404 ? '该记录没有可访问的对话内容' : fallback, requestId); const parsed = schema.safeParse(await response.json()); if (!parsed.success) throw new ConversationAuditApiError('对话审计数据格式不符合接口约定', requestId); return parsed.data }
 export async function fetchConversationAudits(filters: ConversationAuditFilters, signal?: AbortSignal) { const value = conversationAuditFiltersSchema.parse(filters); const params = new URLSearchParams(Object.entries(value).map(([key, item]) => [key, String(item)])); return parseResponse(await fetch(`/api/conversation-audits?${params}`, { headers: { accept: 'application/json' }, signal }), conversationAuditResponseSchema, '对话审计暂时无法加载') }
-export async function requestConversationAccess(id: string, reason: string, signal?: AbortSignal) { return parseResponse(await fetch(`/api/conversation-audits/${encodeURIComponent(id)}/access`, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({ reason, acknowledgeSensitiveScope: true }), signal }), conversationAccessResponseSchema, '无法打开脱敏轮次') }
+export async function requestConversationAccess(id: string, reason: string, signal?: AbortSignal) { return parseResponse(await fetch(`/api/conversation-audits/${encodeURIComponent(id)}/access`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify({ reason, acknowledgeSensitiveScope: true }), signal }), conversationAccessResponseSchema, '无法打开脱敏轮次') }

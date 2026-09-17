@@ -85,7 +85,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.addHook('preHandler', async (request, reply) => {
     const path = request.url.split('?')[0] ?? '/'
-    if (path === '/health' || path.startsWith('/api/auth/')) return
+    if (path === '/health' || path === '/api/auth/login') return
     if (authMode === 'disabled') return
     const user = auth.authenticate(request)
     if (!user) {
@@ -94,6 +94,9 @@ export function buildApp(options: BuildAppOptions = {}) {
     request.authUser = user
     if (!isRoleAllowed(user, requiredRoles(path, request.method, (request.query as { source?: string })?.source))) {
       return reply.status(403).send({ error: { code: 'AUTH_FORBIDDEN', message: '当前身份没有访问该资源的权限', requestId: request.id } })
+    }
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !auth.verifyCsrf(request)) {
+      return reply.status(403).send({ error: { code: 'CSRF_INVALID', message: '请求安全校验未通过，请刷新页面后重试', requestId: request.id } })
     }
   })
 
@@ -125,17 +128,16 @@ export function buildApp(options: BuildAppOptions = {}) {
     if (!session) {
       return reply.status(401).send({ error: { code: 'AUTH_INVALID', message: '用户名或密码不正确', requestId: request.id } })
     }
-    auth.setSessionCookie(reply, session.token, session.expiresAt)
+    auth.setSessionCookie(reply, session.token, session.csrfToken, session.expiresAt)
     return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
   })
 
   app.get('/api/auth/me', {
     schema: { response: { 200: authResponseSchema, 401: authErrorSchema } },
   }, async (request, reply) => {
-    const user = auth.authenticate(request)
-    if (!user) return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '当前会话已失效，请重新登录', requestId: request.id } })
-    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString()
-    return { authenticated: true as const, user, expiresAt }
+    const session = auth.getSession(request)
+    if (!session) return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '当前会话已失效，请重新登录', requestId: request.id } })
+    return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
   })
 
   app.post('/api/auth/logout', {

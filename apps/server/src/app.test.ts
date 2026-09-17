@@ -15,6 +15,18 @@ const createApp = () => {
   return app
 }
 
+function cookieValues(setCookie: string | string[] | undefined) {
+  return Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : []
+}
+
+function cookieHeader(setCookie: string | string[] | undefined) {
+  return cookieValues(setCookie).map((value) => value.split(';')[0]).join('; ')
+}
+
+function cookieValue(setCookie: string | string[] | undefined, name: string) {
+  return cookieHeader(setCookie).split('; ').find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1) ?? ''
+}
+
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()))
 })
@@ -25,8 +37,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(10)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status']))
+    expect(body.migrationVersion).toBe(11)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions']))
   })
 
   it('requires a session for protected resources', async () => {
@@ -42,13 +54,24 @@ describe('BFF', () => {
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
     expect(login.statusCode).toBe(200)
-    expect(login.headers['set-cookie']).toMatch(/ai_ops_session=.*HttpOnly/i)
-    const cookie = login.headers['set-cookie']
+    expect(cookieValues(login.headers['set-cookie']).join('\n')).toMatch(/ai_ops_session=.*HttpOnly.*SameSite=Strict/i)
+    expect(cookieValues(login.headers['set-cookie']).join('\n')).toMatch(/ai_ops_csrf=.*SameSite=Strict/i)
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    expect(csrfToken).not.toBe('')
     const settings = await app.inject({ method: 'GET', url: '/api/settings', headers: { cookie } })
     expect(settings.statusCode).toBe(200)
 
+    const missingCsrf = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { cookie } })
+    expect(missingCsrf.statusCode).toBe(403)
+    expect(missingCsrf.json().error.code).toBe('CSRF_INVALID')
+    const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: { cookie, 'x-csrf-token': csrfToken } })
+    expect(logout.statusCode).toBe(204)
+    const revoked = await app.inject({ method: 'GET', url: '/api/settings', headers: { cookie } })
+    expect(revoked.statusCode).toBe(401)
+
     const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeCookie = employeeLogin.headers['set-cookie']
+    const employeeCookie = cookieHeader(employeeLogin.headers['set-cookie'])
     const employeeAdminResource = await app.inject({ method: 'GET', url: '/api/people', headers: { cookie: employeeCookie } })
     expect(employeeAdminResource.statusCode).toBe(403)
     const employeeResource = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie: employeeCookie } })
@@ -62,6 +85,28 @@ describe('BFF', () => {
     expect(response.statusCode).toBe(401)
     expect(response.json().error.code).toBe('AUTH_INVALID')
     expect(response.headers['set-cookie']).toBeUndefined()
+  })
+
+  it('keeps a hashed SQLite session valid after the BFF restarts', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    const first = buildApp({ database, probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    try {
+      const login = await first.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+      const cookie = cookieHeader(login.headers['set-cookie'])
+      expect(database.tableCounts().userSessions).toBe(1)
+      await first.close()
+
+      const restarted = buildApp({ database, probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+      try {
+        const restored = await restarted.inject({ method: 'GET', url: '/api/settings', headers: { cookie } })
+        expect(restored.statusCode).toBe(200)
+        expect(JSON.stringify(database.listAuditEvents())).not.toContain(cookieValue(login.headers['set-cookie'], 'ai_ops_session'))
+      } finally {
+        await restarted.close()
+      }
+    } finally {
+      database.close()
+    }
   })
 
   it('authenticates users seeded in the platform database', async () => {
@@ -171,8 +216,9 @@ describe('BFF', () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
-    const cookie = login.headers['set-cookie']
-    const created = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie }, payload: { username: 'demo-new-person', displayName: '王小明', departmentId: 'content', password: 'demo-password-1' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const created = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { username: 'demo-new-person', displayName: '王小明', departmentId: 'content', password: 'demo-password-1' } })
     expect(created.statusCode).toBe(201)
     expect(created.json().person.displayName).toBe('王小明')
 
@@ -194,12 +240,12 @@ describe('BFF', () => {
     ]))
     expect(JSON.stringify(audit.json())).not.toContain('demo-password-1')
 
-    const duplicate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie }, payload: { username: 'demo-new-person', displayName: '王小明二号', departmentId: 'content', password: 'demo-password-2' } })
+    const duplicate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { username: 'demo-new-person', displayName: '王小明二号', departmentId: 'content', password: 'demo-password-2' } })
     expect(duplicate.statusCode).toBe(409)
     expect(duplicate.json().error.code).toBe('USERNAME_CONFLICT')
 
     const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeCreate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie: employeeLogin.headers['set-cookie'] }, payload: { username: 'employee-attempt', displayName: '越权员工', departmentId: 'content', password: 'demo-password-3' } })
+    const employeeCreate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) }, payload: { username: 'employee-attempt', displayName: '越权员工', departmentId: 'content', password: 'demo-password-3' } })
     expect(employeeCreate.statusCode).toBe(403)
   })
 
@@ -228,8 +274,9 @@ describe('BFF', () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
-    const cookie = login.headers['set-cookie']
-    const created = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie }, payload: { ownerId: 'person-lin', purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'], expiresInDays: 30, deviceNote: '本地演示设备' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const created = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ownerId: 'person-lin', purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'], expiresInDays: 30, deviceNote: '本地演示设备' } })
     expect(created.statusCode).toBe(201)
     expect(created.json().secret).toMatch(/^sk-ops-/)
     expect(created.json().key.masked).toContain('••••••')
@@ -255,7 +302,7 @@ describe('BFF', () => {
     expect(JSON.stringify(audit.json())).not.toContain(created.json().secret)
 
     const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: employeeLogin.headers['set-cookie'] }, payload: { ownerId: 'person-lin', purpose: '越权 Key', models: ['ecommerce-general'], expiresInDays: 30, deviceNote: '测试' } })
+    const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) }, payload: { ownerId: 'person-lin', purpose: '越权 Key', models: ['ecommerce-general'], expiresInDays: 30, deviceNote: '测试' } })
     expect(employeeCreate.statusCode).toBe(403)
   })
 

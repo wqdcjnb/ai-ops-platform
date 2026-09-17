@@ -96,7 +96,7 @@ describe('New API catalog mapping with simulated upstream responses', () => {
     const reader = readerFor()
     const app = buildApp({ databasePath: ':memory:', catalogReader: reader, probeNewApi: async () => ({ state: 'offline', authConfigured: false, checkedAt: now }), authService: {
       authenticate: () => ({ id: 'lead', username: 'lead', displayName: 'Lead', role: 'department_lead', roleLabel: '负责人' }),
-      login: () => null, revoke() {}, setSessionCookie() {}, clearSessionCookie() {},
+      getSession: () => null, verifyCsrf: () => true, login: () => null, revoke() {}, setSessionCookie() {}, clearSessionCookie() {},
     } })
     apps.push(app)
     expect((await app.inject('/api/models')).json()).toMatchObject({ meta: { source: 'demo' }, total: 4 })

@@ -203,6 +203,16 @@ const migrationSql = [
   `ALTER TABLE users ADD COLUMN employee_code TEXT;
   ALTER TABLE users ADD COLUMN manager_name TEXT;
   ALTER TABLE users ADD COLUMN joined_at TEXT;`,
+  `CREATE TABLE IF NOT EXISTS user_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    csrf_token_hash TEXT NOT NULL CHECK (length(csrf_token_hash) = 64),
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS user_sessions_active_token_idx ON user_sessions(token_hash, expires_at) WHERE revoked_at IS NULL;`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -362,6 +372,14 @@ export interface PlatformConversationAccessCreate {
   reasonProvided: boolean
   reasonLength: number
   acknowledgedSensitiveScope: boolean
+}
+
+export interface PlatformAuthSessionCreate {
+  id: string
+  userId: string
+  tokenHash: string
+  csrfTokenHash: string
+  expiresAt: string
 }
 
 export interface PlatformBusinessRuleSeed {
@@ -970,6 +988,48 @@ export class PlatformDatabase {
       }>
   }
 
+  createAuthSession(session: PlatformAuthSessionCreate, now = this.now()) {
+    this.db.prepare(`INSERT INTO user_sessions(id, user_id, token_hash, csrf_token_hash, expires_at, created_at, revoked_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL)`).run(
+      session.id, session.userId, session.tokenHash, session.csrfTokenHash, session.expiresAt, now.toISOString(),
+    )
+  }
+
+  findAuthSession(tokenHash: string, now = this.now()) {
+    const row = this.db.prepare(`SELECT s.id AS sessionId, s.csrf_token_hash AS csrfTokenHash, s.expires_at AS expiresAt,
+      u.id AS userId, u.username, u.display_name AS displayName, u.role, u.status
+      FROM user_sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.status = 'active'
+      LIMIT 1`).get(tokenHash, now.toISOString()) as {
+        sessionId: string
+        csrfTokenHash: string
+        expiresAt: string
+        userId: string
+        username: string
+        displayName: string
+        role: PlatformUserRole
+        status: PlatformUser['status']
+      } | undefined
+    if (!row) return null
+    return {
+      id: row.sessionId,
+      csrfTokenHash: row.csrfTokenHash,
+      expiresAt: row.expiresAt,
+      user: { id: row.userId, username: row.username, displayName: row.displayName, role: row.role, roleLabel: '', status: row.status },
+    }
+  }
+
+  isAuthSessionCsrfValid(tokenHash: string, csrfTokenHash: string, now = this.now()) {
+    return Boolean(this.db.prepare(`SELECT 1 FROM user_sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ? AND s.csrf_token_hash = ? AND s.revoked_at IS NULL
+      AND s.expires_at > ? AND u.status = 'active' LIMIT 1`).get(tokenHash, csrfTokenHash, now.toISOString()))
+  }
+
+  revokeAuthSession(tokenHash: string, now = this.now()) {
+    this.db.prepare(`UPDATE user_sessions SET revoked_at = COALESCE(revoked_at, ?)
+      WHERE token_hash = ?`).run(now.toISOString(), tokenHash)
+  }
+
   tableCounts() {
     const count = (table: string) => (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
     return {
@@ -987,6 +1047,7 @@ export class PlatformDatabase {
       roleDefinitions: count('system_role_definitions'),
       retentionPolicies: count('system_retention_policies'),
       backupStatus: count('system_backup_status'),
+      userSessions: count('user_sessions'),
     }
   }
 

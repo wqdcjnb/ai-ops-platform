@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { PlatformDatabase, PlatformUser } from './platform-db.js'
@@ -34,13 +34,14 @@ export const authResponseSchema = z.object({
 
 export const authErrorSchema = z.object({
   error: z.object({
-    code: z.enum(['AUTH_INVALID', 'AUTH_REQUIRED', 'AUTH_FORBIDDEN']),
+    code: z.enum(['AUTH_INVALID', 'AUTH_REQUIRED', 'AUTH_FORBIDDEN', 'CSRF_INVALID']),
     message: z.string(),
     requestId: z.string(),
   }),
 })
 
 export const SESSION_COOKIE = 'ai_ops_session'
+export const CSRF_COOKIE = 'ai_ops_csrf'
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000
 
 interface DemoAccount {
@@ -51,20 +52,37 @@ interface DemoAccount {
 interface Session {
   user: AuthUser
   expiresAt: number
+  csrfTokenHash: string
 }
 
 export interface AuthService {
   authenticate(request: FastifyRequest): AuthUser | null
-  login(username: string, password: string): { token: string; user: AuthUser; expiresAt: string } | null
+  getSession(request: FastifyRequest): { user: AuthUser; expiresAt: string } | null
+  verifyCsrf(request: FastifyRequest): boolean
+  login(username: string, password: string): { token: string; csrfToken: string; user: AuthUser; expiresAt: string } | null
   revoke(request: FastifyRequest): void
-  setSessionCookie(reply: FastifyReply, token: string, expiresAt: string): void
+  setSessionCookie(reply: FastifyReply, token: string, csrfToken: string, expiresAt: string): void
   clearSessionCookie(reply: FastifyReply): void
 }
 
-function cookieValue(request: FastifyRequest) {
+function cookieValue(request: FastifyRequest, name: string) {
   const raw = request.headers.cookie ?? ''
-  const item = raw.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${SESSION_COOKIE}=`))
-  return item?.slice(`${SESSION_COOKIE}=`.length) ?? null
+  const item = raw.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))
+  return item?.slice(`${name}=`.length) ?? null
+}
+
+function hashSessionValue(value: string) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function matchesToken(left: string, right: string) {
+  if (left.length !== right.length) return false
+  return timingSafeEqual(Buffer.from(left), Buffer.from(right))
+}
+
+function csrfHeader(request: FastifyRequest) {
+  const value = request.headers['x-csrf-token']
+  return Array.isArray(value) ? value[0] ?? null : value ?? null
 }
 
 function accountFromEnvironment(role: AppRole, fallback: { username: string; password: string; displayName: string; roleLabel: string }): DemoAccount {
@@ -132,17 +150,40 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
     }
   }
 
+  function getSession(request: FastifyRequest) {
+    const token = cookieValue(request, SESSION_COOKIE)
+    if (!token) return null
+    const tokenHash = hashSessionValue(token)
+    if (options.database) {
+      const session = options.database.findAuthSession(tokenHash)
+      if (!session) return null
+      return { user: toAuthUser(session.user), expiresAt: session.expiresAt }
+    }
+    purgeExpired()
+    const session = sessions.get(token)
+    if (!session || session.expiresAt <= Date.now()) {
+      if (session) sessions.delete(token)
+      return null
+    }
+    return { user: session.user, expiresAt: new Date(session.expiresAt).toISOString() }
+  }
+
   return {
     authenticate(request) {
+      return getSession(request)?.user ?? null
+    },
+    getSession,
+    verifyCsrf(request) {
+      const token = cookieValue(request, SESSION_COOKIE)
+      const csrfCookie = cookieValue(request, CSRF_COOKIE)
+      const csrf = csrfHeader(request)
+      if (!token || !csrfCookie || !csrf || !matchesToken(csrfCookie, csrf)) return false
+      const tokenHash = hashSessionValue(token)
+      const csrfTokenHash = hashSessionValue(csrf)
+      if (options.database) return options.database.isAuthSessionCsrfValid(tokenHash, csrfTokenHash)
       purgeExpired()
-      const token = cookieValue(request)
-      if (!token) return null
       const session = sessions.get(token)
-      if (!session || session.expiresAt <= Date.now()) {
-        if (session) sessions.delete(token)
-        return null
-      }
-      return session.user
+      return Boolean(session && session.expiresAt > Date.now() && matchesToken(session.csrfTokenHash, csrfTokenHash))
     },
     login(username, password) {
       const databaseUser = options.database?.passwordMatches(username, password)
@@ -155,22 +196,44 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
           : accounts.find((item) => item.user.username === username && item.password === password)
       if (!account) return null
       const token = randomBytes(32).toString('base64url')
+      const csrfToken = randomBytes(32).toString('base64url')
       const expiresAt = Date.now() + SESSION_TTL_MS
-      sessions.set(token, { user: account.user, expiresAt })
-      return { token, user: account.user, expiresAt: new Date(expiresAt).toISOString() }
+      const expiresAtIso = new Date(expiresAt).toISOString()
+      const tokenHash = hashSessionValue(token)
+      const csrfTokenHash = hashSessionValue(csrfToken)
+      if (options.database) {
+        options.database.createAuthSession({
+          id: `session-${randomBytes(16).toString('hex')}`,
+          userId: account.user.id,
+          tokenHash,
+          csrfTokenHash,
+          expiresAt: expiresAtIso,
+        })
+      } else {
+        sessions.set(token, { user: account.user, expiresAt, csrfTokenHash })
+      }
+      return { token, csrfToken, user: account.user, expiresAt: expiresAtIso }
     },
     revoke(request) {
-      const token = cookieValue(request)
-      if (token) sessions.delete(token)
+      const token = cookieValue(request, SESSION_COOKIE)
+      if (!token) return
+      if (options.database) options.database.revokeAuthSession(hashSessionValue(token))
+      else sessions.delete(token)
     },
-    setSessionCookie(reply, token, expiresAt) {
+    setSessionCookie(reply, token, csrfToken, expiresAt) {
       const maxAge = Math.max(0, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000))
       const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
-      reply.header('set-cookie', `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`)
+      reply.header('set-cookie', [
+        `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`,
+        `${CSRF_COOKIE}=${csrfToken}; Path=/; SameSite=Strict; Max-Age=${maxAge}${secure}`,
+      ])
     },
     clearSessionCookie(reply) {
       const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
-      reply.header('set-cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`)
+      reply.header('set-cookie', [
+        `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,
+        `${CSRF_COOKIE}=; Path=/; SameSite=Strict; Max-Age=0${secure}`,
+      ])
     },
   }
 }

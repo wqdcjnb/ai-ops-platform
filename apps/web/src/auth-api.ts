@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 export const appRoleSchema = z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee'])
 export type AppRole = z.infer<typeof appRoleSchema>
@@ -56,6 +57,6 @@ export async function login(username: string, password: string, signal?: AbortSi
 }
 
 export async function logout(signal?: AbortSignal) {
-  const response = await fetch('/api/auth/logout', { method: 'POST', headers: { accept: 'application/json' }, signal })
+  const response = await fetch('/api/auth/logout', { method: 'POST', headers: withCsrfHeader({ accept: 'application/json' }), signal })
   if (!response.ok) throw new AuthApiError('退出登录失败', response.headers.get('x-request-id') ?? undefined)
 }
