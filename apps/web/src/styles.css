@@ -179,7 +179,7 @@ button { cursor: pointer; }
 .entry-card-top, .entry-title, .entry-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .entry-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; }
 .source-tag { flex: 0 0 auto; padding: 3px 6px; border-radius: 4px; color: #146c70; background: #e5f2f2; font-size: 7.5px; font-weight: 800; letter-spacing: .08em; }
-.source-tag.demo { color: #875a00; background: #fff1d5; }.source-tag.config { color: #5c60a9; background: #ededfa; }.source-tag.live { color: #146c70; background: #e5f2f2; }.source-tag.待认证 { color: #9d6800; background: #fff3d9; }
+.source-tag.demo { color: #875a00; background: #fff1d5; }.source-tag.config { color: #5c60a9; background: #ededfa; }.source-tag.sqlite { color: #276c70; background: #e4f2f2; }.source-tag.live { color: #146c70; background: #e5f2f2; }.source-tag.待认证 { color: #9d6800; background: #fff3d9; }
 .entry-title { align-items: baseline; margin-top: 15px; }
 .entry-title h2 { margin: 0; color: #253542; font-size: 13px; }
 .entry-title > span { color: #1e303d; font-size: 22px; font-weight: 750; font-variant-numeric: tabular-nums; }

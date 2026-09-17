@@ -25,8 +25,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(5)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events']))
+    expect(body.migrationVersion).toBe(6)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags']))
   })
 
   it('requires a session for protected resources', async () => {
@@ -502,8 +502,10 @@ describe('BFF', () => {
     expect(response.statusCode).toBe(200)
     expect(body.meta.source).toBe('partial')
     expect(body.summary).toMatchObject({ sections: 6, roles: 5, servicesTotal: 4, enabledFeatures: 0, backupsVerified: 0 })
+    expect(body.businessRules).toMatchObject({ source: 'database', version: 'draft-v0.1' })
     expect(body.connections).toMatchObject({ source: 'live' })
     expect(body.connections.items.every((item: { credentialValueAvailable: boolean }) => item.credentialValueAvailable === false)).toBe(true)
+    expect(body.features.source).toBe('database')
     expect(body.features.items.every((item: { enabled: boolean; editable: boolean }) => item.enabled === false && item.editable === false)).toBe(true)
     expect(body.backup).toMatchObject({ configured: false, browserDownloadAllowed: false })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|password/i)

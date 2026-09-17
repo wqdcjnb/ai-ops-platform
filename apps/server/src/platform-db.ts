@@ -150,6 +150,25 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS conversation_access_events_record_idx ON conversation_access_events(record_id, occurred_at DESC);
   CREATE INDEX IF NOT EXISTS conversation_access_events_actor_idx ON conversation_access_events(actor_user_id, occurred_at DESC);`,
+  `CREATE TABLE IF NOT EXISTS system_business_rules (
+    id TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    label TEXT NOT NULL,
+    value TEXT NOT NULL,
+    impact TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('fixed', 'unverified')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS system_feature_flags (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    reason TEXT NOT NULL,
+    risk TEXT NOT NULL CHECK (risk IN ('low', 'medium', 'high')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -306,6 +325,23 @@ export interface PlatformConversationAccessCreate {
   reasonProvided: boolean
   reasonLength: number
   acknowledgedSensitiveScope: boolean
+}
+
+export interface PlatformBusinessRuleSeed {
+  id: string
+  version: string
+  label: string
+  value: string
+  impact: string
+  status: 'fixed' | 'unverified'
+}
+
+export interface PlatformFeatureFlagSeed {
+  id: string
+  label: string
+  enabled: boolean
+  reason: string
+  risk: 'low' | 'medium' | 'high'
 }
 
 export function hashPlatformPassword(value: string) {
@@ -490,6 +526,26 @@ export class PlatformDatabase {
     )
   }
 
+  seedBusinessRule(seed: PlatformBusinessRuleSeed, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO system_business_rules(id, version, label, value, impact, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET version = excluded.version, label = excluded.label, value = excluded.value,
+      impact = excluded.impact, status = excluded.status, updated_at = excluded.updated_at`).run(
+      seed.id, seed.version, seed.label, seed.value, seed.impact, seed.status, timestamp, timestamp,
+    )
+  }
+
+  seedFeatureFlag(seed: PlatformFeatureFlagSeed, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO system_feature_flags(id, label, enabled, reason, risk, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET label = excluded.label, enabled = excluded.enabled, reason = excluded.reason,
+      risk = excluded.risk, updated_at = excluded.updated_at`).run(
+      seed.id, seed.label, Number(seed.enabled), seed.reason, seed.risk, timestamp, timestamp,
+    )
+  }
+
   setUserDepartment(userId: string, departmentId: string | null) {
     this.db.prepare('UPDATE users SET department_id = ?, updated_at = ? WHERE id = ?').run(departmentId, this.now().toISOString(), userId)
   }
@@ -668,6 +724,29 @@ export class PlatformDatabase {
     return rows.map((row) => ({ ...row, relatedRequestIds: JSON.parse(row.relatedRequestIdsJson) as string[] }))
   }
 
+  listBusinessRules() {
+    return this.db.prepare(`SELECT id, version, label, value, impact, status FROM system_business_rules
+      ORDER BY id`).all() as Array<{
+        id: string
+        version: string
+        label: string
+        value: string
+        impact: string
+        status: 'fixed' | 'unverified'
+      }>
+  }
+
+  listFeatureFlags() {
+    return this.db.prepare(`SELECT id, label, enabled, reason, risk FROM system_feature_flags
+      ORDER BY id`).all() as Array<{
+        id: string
+        label: string
+        enabled: number
+        reason: string
+        risk: 'low' | 'medium' | 'high'
+      }>
+  }
+
   recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now()) {
     const occurredAt = now.toISOString()
     this.db.prepare(`INSERT INTO conversation_access_events(
@@ -702,6 +781,8 @@ export class PlatformDatabase {
       alertRules: count('alert_rules'),
       alertEvents: count('alert_events'),
       conversationAccessEvents: count('conversation_access_events'),
+      businessRules: count('system_business_rules'),
+      featureFlags: count('system_feature_flags'),
     }
   }
 
@@ -790,6 +871,24 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { id: 'quota-key-lin-1-month', level: 'key', subjectId: 'key-lin-1', period: 'month', targetPoints: 860 },
   ]
   for (const policy of policies) database.seedQuotaPolicy(policy)
+
+  const businessRules: PlatformBusinessRuleSeed[] = [
+    { id: 'timezone', version: 'draft-v0.1', label: '业务时区', value: 'Asia/Shanghai (UTC+8)', impact: '账期、告警窗口和日志展示', status: 'fixed' },
+    { id: 'currency', version: 'draft-v0.1', label: '预算单位', value: 'CNY · 点数', impact: '预算、分摊与软目标展示', status: 'unverified' },
+    { id: 'billing-cycle', version: 'draft-v0.1', label: '用量周期', value: '自然月 · 每月 1 日重置', impact: '个人、用途与公司软目标', status: 'fixed' },
+    { id: 'failed-billing', version: 'draft-v0.1', label: '失败请求计费', value: '不计点数', impact: '失败、取消及上游异常', status: 'unverified' },
+    { id: 'retry-billing', version: 'draft-v0.1', label: '重试计费', value: '按最终成功请求记一次', impact: '网关自动重试与成本归集', status: 'unverified' },
+  ]
+  for (const rule of businessRules) database.seedBusinessRule(rule)
+
+  const featureFlags: PlatformFeatureFlagSeed[] = [
+    { id: 'management-writes', label: '管理写操作', enabled: false, reason: '登录、RBAC、幂等、审计和回滚未完成', risk: 'high' },
+    { id: 'conversation-capture', label: '对话正文采集', enabled: false, reason: '独立存储、加密、脱敏和到期清理未完成', risk: 'high' },
+    { id: 'hard-quota', label: '硬额度阻断', enabled: false, reason: '并发预留、结算和恢复路径未验收', risk: 'high' },
+    { id: 'data-export', label: '数据导出', enabled: false, reason: '数据范围、敏感扫描和导出审计未完成', risk: 'medium' },
+    { id: 'employee-portal', label: '员工自助入口', enabled: false, reason: '本人数据范围与接入说明尚未完成', risk: 'medium' },
+  ]
+  for (const feature of featureFlags) database.seedFeatureFlag(feature)
 
   const auditEvents: PlatformAuditEventSeed[] = [
     { id: 'audit-login-success', actorUserId: 'user-super-admin', action: 'login', resourceType: 'session', resourceId: 'session-demo-01', result: 'success', requestId: 'req-audit-login-01', summary: { message: '超级管理员通过本机演示身份进入管理控制台。' } },

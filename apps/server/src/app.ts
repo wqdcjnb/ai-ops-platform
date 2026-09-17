@@ -458,7 +458,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       (options.probeCpa ?? (() => probeHttpService(cpaUrl)))(),
       (options.probeDocs ?? (() => probeHttpService(docsUrl)))(),
     ])
-    return createSettings(newApi, cpa, docs, new Date(), request.authUser?.role ?? 'super_admin')
+    return createSettings(newApi, cpa, docs, database, new Date(), request.authUser?.role ?? 'super_admin')
   })
 
   app.get('/api/me', {
