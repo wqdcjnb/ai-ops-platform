@@ -37,9 +37,10 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(12)
+    expect(body.migrationVersion).toBe(13)
     expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     expect(body.sessionCleanup).toMatchObject({ revokedRetentionHours: 24, lastRun: { triggeredBy: 'startup' } })
+    expect(body.auditChain).toMatchObject({ algorithm: 'sha256', verified: true, firstInvalidEventId: null })
   })
 
   it('requires a session for protected resources', async () => {
@@ -51,7 +52,7 @@ describe('BFF', () => {
   })
 
   it('issues an HttpOnly session cookie and enforces role boundaries', async () => {
-    const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
     expect(login.statusCode).toBe(200)
@@ -130,7 +131,7 @@ describe('BFF', () => {
   })
 
   it('rejects invalid credentials without creating a session', async () => {
-    const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const response = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'wrong-password' } })
     expect(response.statusCode).toBe(401)
@@ -586,6 +587,7 @@ describe('BFF', () => {
     expect(body.items[0]).toMatchObject({ id: 'audit-key-rotate', contentAvailable: false, credentialValueAvailable: false })
     expect(body.items[0].changes[0]).toMatchObject({ before: '已变化', after: '已变化', sensitive: true })
     expect(body.retention).toMatchObject({ mode: 'database', deletionAllowed: false, appendOnlyVerified: false })
+    expect(body.integrity).toMatchObject({ algorithm: 'sha256', hashChainVerified: true, firstInvalidEventId: null })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|sk-[A-Za-z0-9_-]{8,}/i)
 
     const invalid = await createApp().inject({ method: 'GET', url: '/api/audit-events?action=delete&period=90d' })
@@ -599,7 +601,7 @@ describe('BFF', () => {
     expect(response.statusCode).toBe(200)
     expect(body.event).toMatchObject({ id: 'audit-key-rotate', result: { status: 'success' }, contentAvailable: false, credentialValueAvailable: false })
     expect(body.request).toMatchObject({ requestId: 'req-audit-key-02', traceState: 'database_unverified' })
-    expect(body.integrity).toMatchObject({ deletionAllowed: false, appendOnlyVerified: false, hashChainVerified: false })
+    expect(body.integrity).toMatchObject({ deletionAllowed: false, appendOnlyVerified: false, hashChainVerified: true, algorithm: 'sha256', firstInvalidEventId: null })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken/i)
 
     const missing = await createApp().inject({ method: 'GET', url: '/api/audit-events/audit-missing' })

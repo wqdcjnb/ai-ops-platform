@@ -6,6 +6,11 @@ const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'd
 const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
+const integritySchema = z.object({
+  deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), hashChainVerified: z.boolean(),
+  algorithm: z.enum(['sha256', 'not_configured']), checkedAt: z.string().datetime().nullable(),
+  eventCount: z.number().int().nonnegative(), firstInvalidEventId: z.string().nullable(), notice: z.string(),
+})
 
 export const auditQuerySchema = z.object({
   period: periodSchema.default('7d'),
@@ -42,12 +47,13 @@ export const auditResponseSchema = z.object({
   options: z.object({ actors: z.array(optionSchema) }), items: z.array(auditEventSchema),
   pagination: z.object({ page: z.number().int().positive(), pageSize: z.number().int().positive(), total: z.number().int().nonnegative(), totalPages: z.number().int().nonnegative() }),
   retention: z.object({ mode: z.enum(['demo', 'database']), deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), notice: z.string() }),
+  integrity: integritySchema,
 })
 
 export const auditDetailResponseSchema = z.object({
   meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }), event: auditEventSchema,
   request: z.object({ requestId: z.string(), traceState: z.enum(['demo_unverified', 'database_unverified']), responseCode: z.number().int().min(100).max(599), durationMs: z.number().int().nonnegative() }),
-  integrity: z.object({ deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), hashChainVerified: z.literal(false), notice: z.string() }),
+  integrity: integritySchema,
   relatedAuditIds: z.array(z.string().regex(/^audit-[a-z0-9-]+$/)),
 })
 
@@ -93,6 +99,7 @@ export function createDemoAudit(query: AuditQuery, now = new Date()) {
     options: { actors: [admin, opsAdmin, system].map((item) => ({ id: item.id, label: item.name })) }, items: filtered.slice(start, start + query.pageSize),
     pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
     retention: { mode: 'demo' as const, deletionAllowed: false as const, appendOnlyVerified: false as const, notice: '页面不提供删除能力；正式环境的追加写入、哈希链与受限数据库权限仍待验证。' },
+    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false, algorithm: 'not_configured' as const, checkedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '演示事件未接入 SQLite 哈希链，不能标记为已验证。' },
   }
 }
 
@@ -103,7 +110,7 @@ export function createDemoAuditDetail(id: string, now = new Date()) {
   return {
     meta: { source: 'demo' as const, generatedAt: now.toISOString(), notice: '详情仅展示字段级摘要，不包含完整密钥、认证信息、请求正文或对话正文' }, event,
     request: { requestId: event.requestId, traceState: 'demo_unverified' as const, responseCode: event.result.status === 'success' ? 200 : event.result.status === 'denied' ? 403 : 503, durationMs: 86 + index * 41 },
-    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false as const, notice: '演示记录不可在页面删除；正式追加写入与哈希链校验尚未接入，不能标记为已验证。' },
+    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false, algorithm: 'not_configured' as const, checkedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '演示记录不可在页面删除；正式追加写入与哈希链校验尚未接入，不能标记为已验证。' },
     relatedAuditIds: index > 0 ? [seeds[index - 1]!.id] : [],
   }
 }
@@ -193,27 +200,30 @@ function filterAuditEvents(all: AuditEvent[], query: AuditQuery, now: Date) {
 
 export function createDatabaseAudit(database: PlatformDatabase, query: AuditQuery, now = new Date()) {
   const all = database.listAuditEvents().map(databaseEvent)
+  const chain = database.verifyAuditChain(now)
   const filtered = filterAuditEvents(all, query, now)
   const start = (query.page - 1) * query.pageSize
   const actors = [...new Map(all.map((item) => [item.actor.id, { id: item.actor.id, label: item.actor.name }])).values()]
   return {
-    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: '审计事件已从平台 SQLite 读取；本地登录、退出和安全拒绝，以及人员与 Key 创建会追加安全摘要。哈希链与生产审计完整性仍待验证。' },
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: '审计事件已从平台 SQLite 读取；本地登录、退出和安全拒绝，以及人员与 Key 创建会追加安全摘要。SQLite 哈希链会在读取时校验，生产审计完整性仍待验证。' },
     summary: { total: filtered.length, success: filtered.filter((item) => item.result.status === 'success').length, failed: filtered.filter((item) => item.result.status === 'failed').length, denied: filtered.filter((item) => item.result.status === 'denied').length, sensitiveChanges: filtered.filter((item) => item.changes.some((change) => change.sensitive)).length },
     options: { actors }, items: filtered.slice(start, start + query.pageSize),
     pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
     retention: { mode: 'database' as const, deletionAllowed: false as const, appendOnlyVerified: false as const, notice: '页面不提供删除能力；本地认证安全摘要、人员与 Key 创建已写入 SQLite 审计事件，哈希链与受限数据库权限仍待验证。' },
+    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: chain.verified, algorithm: chain.algorithm, checkedAt: chain.checkedAt, eventCount: chain.eventCount, firstInvalidEventId: chain.firstInvalidEventId, notice: chain.verified ? 'SQLite 事件内容与顺序已通过本地 SHA-256 链校验；这不等同于生产级不可篡改存储。' : `SQLite 哈希链校验失败，首个不一致事件：${chain.firstInvalidEventId ?? '未知'}；已停止将其视为完整证据。` },
   }
 }
 
 export function createDatabaseAuditDetail(database: PlatformDatabase, id: string, now = new Date()) {
   const all = database.listAuditEvents().map(databaseEvent)
+  const chain = database.verifyAuditChain(now)
   const index = all.findIndex((item) => item.id === id)
   const event = all[index]
   if (!event) return null
   return {
     meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '详情仅展示 SQLite 字段级摘要，不包含完整密钥、认证信息、请求正文或对话正文' }, event,
     request: { requestId: event.requestId, traceState: 'database_unverified' as const, responseCode: event.result.status === 'success' ? 200 : event.result.status === 'denied' ? 403 : 503, durationMs: 86 + index * 41 },
-    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: false as const, notice: 'SQLite 记录不可在页面删除；本地认证安全摘要、人员与 Key 创建会追加安全摘要，正式追加日志与哈希链校验尚未接入。' },
+    integrity: { deletionAllowed: false as const, appendOnlyVerified: false as const, hashChainVerified: chain.verified, algorithm: chain.algorithm, checkedAt: chain.checkedAt, eventCount: chain.eventCount, firstInvalidEventId: chain.firstInvalidEventId, notice: chain.verified ? 'SQLite 事件内容与顺序已通过本地 SHA-256 链校验；这不等同于生产级不可篡改存储。' : `SQLite 哈希链校验失败，首个不一致事件：${chain.firstInvalidEventId ?? '未知'}；已停止将其视为完整证据。` },
     relatedAuditIds: index > 0 ? [all[index - 1]!.id] : [],
   }
 }

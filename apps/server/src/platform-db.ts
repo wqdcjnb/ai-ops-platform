@@ -222,6 +222,8 @@ const migrationSql = [
     revoked_retention_hours INTEGER NOT NULL CHECK (revoked_retention_hours > 0)
   );
   CREATE INDEX IF NOT EXISTS session_cleanup_runs_completed_idx ON session_cleanup_runs(completed_at DESC);`,
+  `ALTER TABLE audit_events ADD COLUMN previous_hash TEXT;
+  ALTER TABLE audit_events ADD COLUMN event_hash TEXT;`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -238,6 +240,13 @@ export const databaseStatusSchema = z.object({
       deletedExpired: z.number().int().nonnegative(),
       deletedRevoked: z.number().int().nonnegative(),
     }).nullable(),
+  }),
+  auditChain: z.object({
+    algorithm: z.literal('sha256'),
+    verified: z.boolean(),
+    checkedAt: z.string().datetime(),
+    eventCount: z.number().int().nonnegative(),
+    firstInvalidEventId: z.string().nullable(),
   }),
 })
 export type DatabaseStatus = z.infer<typeof databaseStatusSchema>
@@ -411,6 +420,45 @@ export interface SessionCleanupResult {
   revokedRetentionHours: typeof REVOKED_SESSION_RETENTION_HOURS
 }
 
+export interface AuditChainVerification {
+  algorithm: 'sha256'
+  verified: boolean
+  checkedAt: string
+  eventCount: number
+  firstInvalidEventId: string | null
+}
+
+interface AuditChainRow {
+  sequence: number
+  id: string
+  actorUserId: string | null
+  action: string
+  resourceType: string
+  resourceId: string | null
+  result: 'success' | 'failed' | 'denied'
+  requestId: string | null
+  summaryJson: string
+  occurredAt: string
+  previousHash: string | null
+  eventHash: string | null
+}
+
+function auditEventHash(row: Omit<AuditChainRow, 'sequence' | 'previousHash' | 'eventHash'>, previousHash: string | null) {
+  return createHash('sha256').update(JSON.stringify({
+    version: 1,
+    previousHash,
+    id: row.id,
+    actorUserId: row.actorUserId,
+    action: row.action,
+    resourceType: row.resourceType,
+    resourceId: row.resourceId,
+    result: row.result,
+    requestId: row.requestId,
+    summaryJson: row.summaryJson,
+    occurredAt: row.occurredAt,
+  })).digest('hex')
+}
+
 export interface PlatformBusinessRuleSeed {
   id: string
   version: string
@@ -484,6 +532,7 @@ export class PlatformDatabase {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         this.db.exec(sql)
+        if (version === 13) this.rebuildAuditChain()
         this.db.prepare('INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)').run(version, `platform_core_${version}`, this.now().toISOString())
         this.db.exec('COMMIT')
       } catch (error) {
@@ -502,7 +551,38 @@ export class PlatformDatabase {
     return {
       state: 'ready', location: this.filename, migrationVersion: version.version, tables: rows.map((item) => item.name), checkedAt: this.now().toISOString(),
       sessionCleanup: { revokedRetentionHours: REVOKED_SESSION_RETENTION_HOURS, lastRun: lastRun ?? null },
+      auditChain: this.verifyAuditChain(),
     }
+  }
+
+  private auditChainRows() {
+    return this.db.prepare(`SELECT rowid AS sequence, id, actor_user_id AS actorUserId, action,
+      resource_type AS resourceType, resource_id AS resourceId, result, request_id AS requestId,
+      summary_json AS summaryJson, occurred_at AS occurredAt, previous_hash AS previousHash, event_hash AS eventHash
+      FROM audit_events ORDER BY rowid ASC`).all() as unknown as AuditChainRow[]
+  }
+
+  private rebuildAuditChain() {
+    let previousHash: string | null = null
+    const update = this.db.prepare('UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE rowid = ?')
+    for (const row of this.auditChainRows()) {
+      const eventHash = auditEventHash(row, previousHash)
+      update.run(previousHash, eventHash, row.sequence)
+      previousHash = eventHash
+    }
+  }
+
+  verifyAuditChain(now = this.now()): AuditChainVerification {
+    let previousHash: string | null = null
+    const rows = this.auditChainRows()
+    for (const row of rows) {
+      const expectedHash = auditEventHash(row, previousHash)
+      if (row.previousHash !== previousHash || row.eventHash !== expectedHash) {
+        return { algorithm: 'sha256', verified: false, checkedAt: now.toISOString(), eventCount: rows.length, firstInvalidEventId: row.id }
+      }
+      previousHash = row.eventHash
+    }
+    return { algorithm: 'sha256', verified: true, checkedAt: now.toISOString(), eventCount: rows.length, firstInvalidEventId: null }
   }
 
   seedUser(seed: PlatformUserSeed, now = this.now()) {
@@ -547,21 +627,24 @@ export class PlatformDatabase {
   }
 
   seedAuditEvent(seed: PlatformAuditEventSeed, now = this.now()) {
-    this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET actor_user_id = excluded.actor_user_id, action = excluded.action,
-      resource_type = excluded.resource_type, resource_id = excluded.resource_id, result = excluded.result,
-      request_id = excluded.request_id, summary_json = excluded.summary_json, occurred_at = excluded.occurred_at`).run(
-      seed.id, seed.actorUserId ?? null, seed.action, seed.resourceType, seed.resourceId ?? null, seed.result,
-      seed.requestId ?? null, JSON.stringify(seed.summary), now.toISOString(),
-    )
+    if (this.db.prepare('SELECT 1 FROM audit_events WHERE id = ? LIMIT 1').get(seed.id)) return
+    this.appendAuditEvent(seed, now)
   }
 
   appendAuditEvent(seed: PlatformAuditEventSeed, now = this.now()) {
-    this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      seed.id, seed.actorUserId ?? null, seed.action, seed.resourceType, seed.resourceId ?? null, seed.result,
-      seed.requestId ?? null, JSON.stringify(seed.summary), now.toISOString(),
+    const integrity = this.verifyAuditChain(now)
+    if (!integrity.verified) throw new Error(`AUDIT_CHAIN_INVALID:${integrity.firstInvalidEventId}`)
+    const previousHash = this.db.prepare('SELECT event_hash AS eventHash FROM audit_events ORDER BY rowid DESC LIMIT 1').get() as { eventHash: string } | undefined
+    const row = {
+      id: seed.id, actorUserId: seed.actorUserId ?? null, action: seed.action, resourceType: seed.resourceType,
+      resourceId: seed.resourceId ?? null, result: seed.result, requestId: seed.requestId ?? null,
+      summaryJson: JSON.stringify(seed.summary), occurredAt: now.toISOString(),
+    }
+    const eventHash = auditEventHash(row, previousHash?.eventHash ?? null)
+    this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at, previous_hash, event_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      row.id, row.actorUserId, row.action, row.resourceType, row.resourceId, row.result,
+      row.requestId, row.summaryJson, row.occurredAt, previousHash?.eventHash ?? null, eventHash,
     )
   }
 
@@ -842,7 +925,7 @@ export class PlatformDatabase {
   listAuditEvents() {
     const rows = this.db.prepare(`SELECT a.id, a.actor_user_id AS actorUserId, u.display_name AS actorName, u.role AS actorRole,
       a.action, a.resource_type AS resourceType, a.resource_id AS resourceId, a.result, a.request_id AS requestId,
-      a.summary_json AS summaryJson, a.occurred_at AS occurredAt
+      a.summary_json AS summaryJson, a.occurred_at AS occurredAt, a.previous_hash AS previousHash, a.event_hash AS eventHash
       FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id
       ORDER BY a.occurred_at DESC, a.id DESC`).all() as Array<{
         id: string
@@ -856,8 +939,16 @@ export class PlatformDatabase {
         requestId: string | null
         summaryJson: string
         occurredAt: string
+        previousHash: string | null
+        eventHash: string | null
       }>
-    return rows.map((row) => ({ ...row, summary: JSON.parse(row.summaryJson) as Record<string, unknown> }))
+    return rows.map((row) => {
+      try {
+        return { ...row, summary: JSON.parse(row.summaryJson) as Record<string, unknown> }
+      } catch {
+        return { ...row, summary: {} }
+      }
+    })
   }
 
   listUsageRequests(ownerUserId?: string) {
