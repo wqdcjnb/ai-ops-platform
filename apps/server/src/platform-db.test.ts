@@ -87,6 +87,25 @@ describe('platform database migrations', () => {
     database.close()
   })
 
+  it('commits synthetic conversation access metadata and its unified audit event together', () => {
+    const now = new Date('2026-09-17T10:00:00.000Z')
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
+    seedDemoData(database, now)
+
+    expect(() => database.recordConversationAccess({
+      id: 'access-demo-atomic-01', actorUserId: 'user-super-admin', recordId: 'conv-audit-copy-01', requestId: 'req-conv-atomic-01',
+      action: 'view_synthetic', reasonProvided: true, reasonLength: 18, acknowledgedSensitiveScope: true,
+    }, now, {
+      id: 'audit-login-success', actorUserId: 'user-super-admin', action: 'view', resourceType: 'conversation', resourceId: 'conv-audit-copy-01',
+      result: 'success', requestId: 'req-audit-atomic-01', summary: { message: '重复审计 ID 使事务回滚。' },
+    })).toThrow()
+
+    expect(database.listConversationAccessEvents()).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'access-demo-atomic-01' }),
+    ]))
+    database.close()
+  })
+
   it('detects deletion of the latest local audit event through the checkpoint', () => {
     const now = new Date('2026-09-17T10:00:00.000Z')
     const database = createPlatformDatabase({ filename: ':memory:', now: () => now })

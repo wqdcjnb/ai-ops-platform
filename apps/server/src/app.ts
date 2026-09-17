@@ -481,16 +481,35 @@ export function buildApp(options: BuildAppOptions = {}) {
     const now = new Date()
     const record = getDemoConversationAuditRecord(request.params.id, now)
     if (!record || !record.contentAccess.available) return reply.status(404).send({ error: { code: 'CONVERSATION_CONTENT_UNAVAILABLE', message: '该记录没有可访问的对话内容', requestId: request.id } })
+    const actorUserId = request.authUser?.id ?? 'user-super-admin'
     const accessEvent = database.recordConversationAccess({
       id: `access-demo-${crypto.randomUUID()}`,
-      actorUserId: request.authUser?.id ?? 'user-super-admin',
+      actorUserId,
       recordId: record.id,
       requestId: record.requestId,
       action: 'view_synthetic',
       reasonProvided: true,
       reasonLength: request.body.reason.length,
       acknowledgedSensitiveScope: request.body.acknowledgeSensitiveScope,
-    }, now)
+    }, now, {
+      id: `audit-conversation-${crypto.randomUUID()}`,
+      actorUserId,
+      action: 'view',
+      resourceType: 'conversation',
+      resourceId: record.id,
+      result: 'success',
+      requestId: request.id,
+      summary: {
+        code: 'CONVERSATION_ACCESS_RECORDED',
+        message: '已查看预先脱敏的合成对话轮次；查看原因原文不保存。',
+        resourceName: '预先脱敏合成轮次',
+        changes: [
+          { field: 'reason', label: '查看原因', before: null, after: '已提供（不记录原文）', sensitive: true },
+          { field: 'acknowledgedSensitiveScope', label: '敏感范围确认', before: null, after: '已确认', sensitive: false },
+          { field: 'contentMode', label: '内容模式', before: null, after: '合成且预先脱敏', sensitive: false },
+        ],
+      },
+    })
     const result = createDemoConversationAccess(request.params.id, request.body, now, { id: accessEvent.id, persisted: true })
     if (result) return result
     return reply.status(404).send({ error: { code: 'CONVERSATION_CONTENT_UNAVAILABLE', message: '该记录没有可访问的对话内容', requestId: request.id } })

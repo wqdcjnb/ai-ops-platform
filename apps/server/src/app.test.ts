@@ -627,11 +627,12 @@ describe('BFF', () => {
   })
 
   it('requires a reason before returning synthetic redacted demo turns', async () => {
-    const denied = await createApp().inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: { reason: '太短', acknowledgeSensitiveScope: true } })
+    const app = createApp()
+    const denied = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: { reason: '太短', acknowledgeSensitiveScope: true } })
     expect(denied.statusCode).toBe(400)
     expect(denied.json().error.code).toBe('INVALID_REQUEST')
 
-    const response = await createApp().inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: { reason: '复核客户投诉关联请求与脱敏结果', acknowledgeSensitiveScope: true } })
+    const response = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: { reason: '复核客户投诉关联请求与脱敏结果', acknowledgeSensitiveScope: true } })
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.content).toMatchObject({ synthetic: true, decrypted: false })
@@ -639,7 +640,25 @@ describe('BFF', () => {
     expect(body.content.messages.some((item: { redacted: boolean }) => item.redacted)).toBe(true)
     expect(JSON.stringify(body)).not.toContain('复核客户投诉关联请求与脱敏结果')
 
-    const unavailable = await createApp().inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-expired-05/access', payload: { reason: '复核历史记录的到期清理状态', acknowledgeSensitiveScope: true } })
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=view&resource=conversation&result=success' })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: 'view',
+        resource: { type: 'conversation', id: 'conv-audit-copy-01', name: '预先脱敏合成轮次' },
+        result: { status: 'success', code: 'CONVERSATION_ACCESS_RECORDED' },
+        requestId: response.headers['x-request-id'],
+        source: { type: 'web', label: '对话审计', ipMasked: null, client: '客户端信息未采集' },
+      }),
+    ]))
+    const accessAudit = audit.json().items.find((item: { resource: { type: string } }) => item.resource.type === 'conversation')
+    expect(accessAudit.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: 'reason', after: '已变化', sensitive: true }),
+      expect.objectContaining({ field: 'contentMode', after: '合成且预先脱敏', sensitive: false }),
+    ]))
+    expect(JSON.stringify(audit.json())).not.toContain('复核客户投诉关联请求与脱敏结果')
+
+    const unavailable = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-expired-05/access', payload: { reason: '复核历史记录的到期清理状态', acknowledgeSensitiveScope: true } })
     expect(unavailable.statusCode).toBe(404)
     expect(unavailable.json().error.code).toBe('CONVERSATION_CONTENT_UNAVAILABLE')
   })

@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'view'])
-const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
+const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert', 'conversation'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
 const integritySchema = z.object({ deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), verified: z.boolean(), hashChainVerified: z.boolean(), checkpointVerified: z.boolean(), algorithm: z.enum(['sha256', 'not_configured']), checkedAt: z.string().datetime().nullable(), checkpointUpdatedAt: z.string().datetime().nullable(), eventCount: z.number().int().nonnegative(), firstInvalidEventId: z.string().nullable(), notice: z.string() })

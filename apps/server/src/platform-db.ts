@@ -1162,14 +1162,22 @@ export class PlatformDatabase {
     } : null
   }
 
-  recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now()) {
+  recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now(), auditEvent?: PlatformAuditEventSeed) {
     const occurredAt = now.toISOString()
-    this.db.prepare(`INSERT INTO conversation_access_events(
-      id, actor_user_id, record_id, request_id, action, reason_provided, reason_length, acknowledged_sensitive_scope, occurred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      event.id, event.actorUserId, event.recordId, event.requestId, event.action, Number(event.reasonProvided),
-      event.reasonLength, Number(event.acknowledgedSensitiveScope), occurredAt,
-    )
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO conversation_access_events(
+        id, actor_user_id, record_id, request_id, action, reason_provided, reason_length, acknowledged_sensitive_scope, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        event.id, event.actorUserId, event.recordId, event.requestId, event.action, Number(event.reasonProvided),
+        event.reasonLength, Number(event.acknowledgedSensitiveScope), occurredAt,
+      )
+      if (auditEvent) this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
     return { id: event.id, occurredAt }
   }
 
