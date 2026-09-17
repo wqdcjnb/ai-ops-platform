@@ -19,7 +19,7 @@ import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditRe
 import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDemoConversationAccess, createDemoConversationAudits } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDemoEmployeeKeys, createDemoEmployeeModels, createDemoEmployeeProfile, createDemoEmployeeUsage, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
-import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, type AppRole, type AuthService } from './auth.js'
+import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
 import { createPlatformDatabase, databaseStatusSchema, type PlatformDatabase } from './platform-db.js'
 
 const errorResponseSchema = z.object({
@@ -59,8 +59,9 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
   const authMode = options.authMode ?? (process.env.AUTH_MODE === 'disabled' ? 'disabled' : 'required')
-  const auth = options.authService ?? createAuthService()
   const database = options.database ?? createPlatformDatabase({ filename: options.databasePath ?? process.env.PLATFORM_DB_PATH ?? (authMode === 'disabled' ? ':memory:' : undefined) })
+  seedDemoUsers(database)
+  const auth = options.authService ?? createAuthService({ database })
   if (!options.database) app.addHook('onClose', async () => database.close())
 
   const requiredRoles = (path: string): readonly AppRole[] => {

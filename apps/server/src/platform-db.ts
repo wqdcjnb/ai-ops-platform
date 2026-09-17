@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { createHash } from 'node:crypto'
 import { z } from 'zod'
 
 const migrationSql = [
@@ -64,6 +65,29 @@ export const databaseStatusSchema = z.object({
 })
 export type DatabaseStatus = z.infer<typeof databaseStatusSchema>
 
+export type PlatformUserRole = 'super_admin' | 'admin' | 'department_lead' | 'finance' | 'employee'
+export interface PlatformUser {
+  id: string
+  username: string
+  displayName: string
+  role: PlatformUserRole
+  roleLabel: string
+  status: 'active' | 'disabled'
+}
+
+export interface PlatformUserSeed {
+  id: string
+  username: string
+  displayName: string
+  role: PlatformUserRole
+  roleLabel: string
+  password: string
+}
+
+export function hashPlatformPassword(value: string) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
 export interface PlatformDatabaseOptions {
   filename?: string
   now?: () => Date
@@ -107,6 +131,27 @@ export class PlatformDatabase {
     const version = this.db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get() as { version: number }
     const rows = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>
     return { state: 'ready', location: this.filename, migrationVersion: version.version, tables: rows.map((item) => item.name), checkedAt: this.now().toISOString() }
+  }
+
+  seedUser(seed: PlatformUserSeed, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+      ON CONFLICT(username) DO UPDATE SET id = excluded.id, display_name = excluded.display_name,
+      role = excluded.role, password_hash = excluded.password_hash, status = 'active', updated_at = excluded.updated_at`).run(
+      seed.id, seed.username, seed.displayName, seed.role, hashPlatformPassword(seed.password), timestamp, timestamp,
+    )
+  }
+
+  findUserByUsername(username: string) {
+    const row = this.db.prepare(`SELECT id, username, display_name AS displayName, role, status
+      FROM users WHERE username = ? LIMIT 1`).get(username) as (PlatformUser & { status: PlatformUser['status'] }) | undefined
+    return row ?? null
+  }
+
+  passwordMatches(username: string, password: string) {
+    const row = this.db.prepare('SELECT password_hash AS passwordHash FROM users WHERE username = ? AND status = \'active\' LIMIT 1').get(username) as { passwordHash: string } | undefined
+    return Boolean(row && row.passwordHash === hashPlatformPassword(password))
   }
 
   close() {

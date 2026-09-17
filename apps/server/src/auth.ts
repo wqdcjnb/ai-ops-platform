@@ -1,6 +1,7 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { FastifyReply, FastifyRequest } from 'fastify'
+import type { PlatformDatabase, PlatformUser } from './platform-db.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -60,14 +61,6 @@ export interface AuthService {
   clearSessionCookie(reply: FastifyReply): void
 }
 
-function digest(value: string) {
-  return createHash('sha256').update(value).digest('hex')
-}
-
-function passwordsMatch(actual: string, expected: string) {
-  return digest(actual) === digest(expected)
-}
-
 function cookieValue(request: FastifyRequest) {
   const raw = request.headers.cookie ?? ''
   const item = raw.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${SESSION_COOKIE}=`))
@@ -88,7 +81,44 @@ function accountFromEnvironment(role: AppRole, fallback: { username: string; pas
   }
 }
 
-export function createAuthService(): AuthService {
+const roleLabels: Record<AppRole, string> = {
+  super_admin: '超级管理员',
+  admin: '运营管理员',
+  department_lead: '部门负责人',
+  finance: '财务只读',
+  employee: '员工',
+}
+
+function toAuthUser(user: PlatformUser): AuthUser {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role,
+    roleLabel: roleLabels[user.role],
+  }
+}
+
+export function seedDemoUsers(database: PlatformDatabase) {
+  database.seedUser({
+    id: 'user-super-admin',
+    username: process.env.AUTH_ADMIN_USERNAME ?? 'admin',
+    password: process.env.AUTH_ADMIN_PASSWORD ?? 'admin-demo',
+    displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
+    role: 'super_admin',
+    roleLabel: roleLabels.super_admin,
+  })
+  database.seedUser({
+    id: 'person-lin',
+    username: process.env.AUTH_EMPLOYEE_USERNAME ?? 'employee',
+    password: process.env.AUTH_EMPLOYEE_PASSWORD ?? 'employee-demo',
+    displayName: process.env.AUTH_EMPLOYEE_DISPLAY_NAME ?? '林筱雨',
+    role: 'employee',
+    roleLabel: roleLabels.employee,
+  })
+}
+
+export function createAuthService(options: { database?: PlatformDatabase } = {}): AuthService {
   const sessions = new Map<string, Session>()
   const accounts = [
     accountFromEnvironment('super_admin', { username: 'admin', password: 'admin-demo', displayName: '超级管理员', roleLabel: '超级管理员' }),
@@ -115,7 +145,14 @@ export function createAuthService(): AuthService {
       return session.user
     },
     login(username, password) {
-      const account = accounts.find((item) => item.user.username === username && passwordsMatch(password, item.password))
+      const databaseUser = options.database?.passwordMatches(username, password)
+        ? options.database.findUserByUsername(username)
+        : null
+      const account = databaseUser
+        ? { user: toAuthUser(databaseUser), password: '' }
+        : options.database
+          ? null
+          : accounts.find((item) => item.user.username === username && item.password === password)
       if (!account) return null
       const token = randomBytes(32).toString('base64url')
       const expiresAt = Date.now() + SESSION_TTL_MS

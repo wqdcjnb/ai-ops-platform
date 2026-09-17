@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { buildApp } from './app.js'
+import { createPlatformDatabase } from './platform-db.js'
 
 const apps: ReturnType<typeof buildApp>[] = []
 const reachableNewApi = async () => ({
@@ -61,6 +62,24 @@ describe('BFF', () => {
     expect(response.statusCode).toBe(401)
     expect(response.json().error.code).toBe('AUTH_INVALID')
     expect(response.headers['set-cookie']).toBeUndefined()
+  })
+
+  it('authenticates users seeded in the platform database', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    const app = buildApp({ database, probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    try {
+      const seeded = database.findUserByUsername('admin')
+      expect(seeded).toMatchObject({ username: 'admin', role: 'super_admin', status: 'active' })
+      expect(JSON.stringify(seeded)).not.toContain('password')
+      expect(database.passwordMatches('admin', 'admin-demo')).toBe(true)
+
+      const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+      expect(login.statusCode).toBe(200)
+      expect(login.json().user.roleLabel).toBe('超级管理员')
+    } finally {
+      await app.close()
+      database.close()
+    }
   })
 
   it('reports health without caching', async () => {
