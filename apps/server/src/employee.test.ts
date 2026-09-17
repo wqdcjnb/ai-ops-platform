@@ -8,7 +8,7 @@ describe('employee self-service contracts', () => {
     const models = createDemoEmployeeModels(now)
     expect(employeeUsageResponseSchema.safeParse(usage).success).toBe(true)
     expect(usage.trend).toHaveLength(30)
-    expect(usage.scope).toMatchObject({ currentUserVerified: false, serverRbacVerified: false, otherPeopleAvailable: false })
+    expect(usage.scope).toMatchObject({ currentUserVerified: true, serverRbacVerified: true, otherPeopleAvailable: false })
     expect(usage.summary).toMatchObject({ softTarget: true, requestBlockingEnabled: false })
     expect(employeeModelsResponseSchema.safeParse(models).success).toBe(true)
     expect(models.items.every((item) => !item.providerAvailable && !item.actualModelAvailable && !item.channelAvailable)).toBe(true)

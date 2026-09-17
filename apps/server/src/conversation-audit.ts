@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { AppRole } from './auth.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const captureStateSchema = z.enum(['captured', 'metadata_only', 'expired'])
@@ -43,7 +44,7 @@ const recordSchema = z.object({
 const metaSchema = z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() })
 export const conversationAuditResponseSchema = z.object({
   meta: metaSchema,
-  accessControl: z.object({ currentRole: z.literal('super_admin'), serverRbacVerified: z.literal(false), contentRequiresReason: z.literal(true), notice: z.string() }),
+  accessControl: z.object({ currentRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), serverRbacVerified: z.literal(true), contentRequiresReason: z.literal(true), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), captured: z.number().int().nonnegative(), metadataOnly: z.number().int().nonnegative(), expiringSoon: z.number().int().nonnegative(), independentCalls: z.number().int().nonnegative(), reviewRequired: z.number().int().nonnegative() }),
   scope: z.object({ defaultCaptureEnabled: z.literal(false), activePolicies: z.number().int().nonnegative(), nearestExpiryAt: z.string().datetime(), storageEncryptedVerified: z.literal(false), accessAuditPersisted: z.literal(false), notice: z.string() }),
   options: z.object({ people: z.array(optionSchema), keys: z.array(optionSchema), purposes: z.array(optionSchema), models: z.array(optionSchema), policies: z.array(optionSchema) }),
@@ -60,7 +61,7 @@ const messageSchema = z.object({
 export const conversationAccessResponseSchema = z.object({
   meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string() }),
   record: recordSchema,
-  access: z.object({ accessRecordId: z.string().regex(/^access-demo-[a-z0-9-]+$/), reasonAccepted: z.literal(true), persisted: z.literal(false), authorizedByServerRbac: z.literal(false), copyAllowed: z.literal(false), exportAllowed: z.literal(false), deleteAllowed: z.literal(false) }),
+  access: z.object({ accessRecordId: z.string().regex(/^access-demo-[a-z0-9-]+$/), reasonAccepted: z.literal(true), persisted: z.literal(false), authorizedByServerRbac: z.literal(true), copyAllowed: z.literal(false), exportAllowed: z.literal(false), deleteAllowed: z.literal(false) }),
   content: z.object({ synthetic: z.literal(true), decrypted: z.literal(false), redactionPassed: z.boolean(), conversationTitle: z.string(), messages: z.array(messageSchema) }),
   retention: z.object({ expiresAt: z.string().datetime(), cleanupState: z.enum(['scheduled', 'expired', 'not_applicable']), deletionProofAvailable: z.literal(false), notice: z.string() }),
   linkedUsage: z.object({ requestId: z.string(), metadataEndpoint: z.string(), requestIdVerified: z.literal(false) }),
@@ -90,7 +91,7 @@ function records(now: Date): ConversationAuditRecord[] {
 }
 function periodMinutes(period: ConversationAuditQuery['period']) { return period === 'today' ? 1_440 : period === '7d' ? 10_080 : 43_200 }
 
-export function createDemoConversationAudits(query: ConversationAuditQuery, now = new Date()) {
+export function createDemoConversationAudits(query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin') {
   const all = records(now)
   const cutoff = now.getTime() - periodMinutes(query.period) * 60_000
   const needle = query.search.toLocaleLowerCase('zh-CN')
@@ -103,7 +104,7 @@ export function createDemoConversationAudits(query: ConversationAuditQuery, now 
   const expiry = all.filter((item) => item.state === 'captured').map((item) => item.policy.expiresAt).sort()[0] ?? now.toISOString()
   return {
     meta: { source: 'demo' as const, generatedAt: now.toISOString(), period: query.period, notice: '独立审计存储尚未接入；列表为不含真实正文的安全演示数据' },
-    accessControl: { currentRole: 'super_admin' as const, serverRbacVerified: false as const, contentRequiresReason: true as const, notice: '前端路由仅允许超级管理员；真实登录会话与服务端 RBAC 仍待接入。' },
+    accessControl: { currentRole, serverRbacVerified: true as const, contentRequiresReason: true as const, notice: '当前请求已通过服务端超级管理员 RBAC；查看脱敏内容仍要求填写原因。' },
     summary: { total: filtered.length, captured: filtered.filter((item) => item.state === 'captured').length, metadataOnly: filtered.filter((item) => item.state === 'metadata_only').length, expiringSoon: filtered.filter((item) => item.state === 'captured' && new Date(item.policy.expiresAt).getTime() - now.getTime() <= 1_440 * 60_000).length, independentCalls: filtered.filter((item) => item.grouping.type === 'independent_call').length, reviewRequired: filtered.filter((item) => item.redaction.status === 'review_required').length },
     scope: { defaultCaptureEnabled: false as const, activePolicies: 3, nearestExpiryAt: expiry, storageEncryptedVerified: false as const, accessAuditPersisted: false as const, notice: '默认关闭采集；演示页面不代表正文加密、访问审计或到期清理已经验收。' },
     options: { people: unique(all.map((item) => ({ id: item.person.id, label: item.person.name }))), keys: unique(all.map((item) => ({ id: item.key.id, label: item.key.masked }))), purposes: unique(all.map((item) => item.purpose)), models: unique(all.map((item) => ({ id: item.model.id, label: item.model.label }))), policies: unique(all.map((item) => ({ id: item.policy.id, label: item.policy.label }))) },
@@ -118,7 +119,7 @@ export function createDemoConversationAccess(id: string, _body: ConversationAcce
   const at = (seconds: number) => new Date(baseTime + seconds * 1_000).toISOString()
   return {
     meta: { source: 'demo' as const, generatedAt: now.toISOString(), notice: '以下为合成且预先脱敏的演示轮次；未读取、解密或返回任何真实对话正文。' }, record,
-    access: { accessRecordId: `access-demo-${id.replace('conv-audit-', '')}`, reasonAccepted: true as const, persisted: false as const, authorizedByServerRbac: false as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
+    access: { accessRecordId: `access-demo-${id.replace('conv-audit-', '')}`, reasonAccepted: true as const, persisted: false as const, authorizedByServerRbac: true as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
     content: { synthetic: true as const, decrypted: false as const, redactionPassed: record.redaction.status === 'passed', conversationTitle: record.grouping.type === 'independent_call' ? '独立调用 · 演示内容' : `${record.purpose.label} · 演示会话`, messages: [
       { id: 'msg-user-1', role: 'user' as const, label: '用户输入', occurredAt: at(0), text: '请根据订单 [ORDER_ID] 的公开商品信息，整理一版不超过 120 字的回复。客户联系方式已替换为 [PHONE_REDACTED]。', redacted: true, redactionLabels: ['订单编号', '手机号'], tool: null },
       { id: 'msg-tool-1', role: 'tool' as const, label: '工具调用摘要', occurredAt: at(2), text: '读取公开商品目录，返回 3 条匹配记录。参数和原始输出未保留。', redacted: false, redactionLabels: [], tool: { name: 'catalog_search', summary: '按脱敏商品编号查询公开目录', argumentsAvailable: false as const, outputAvailable: false as const } },

@@ -1,13 +1,14 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
 import type { PlatformProbeResult } from './platform.js'
+import type { AppRole } from './auth.js'
 
 const sourceStateSchema = z.enum(['live', 'demo', 'unverified'])
 const serviceStateSchema = z.enum(['ready', 'reachable', 'auth_required', 'offline'])
 
 export const settingsResponseSchema = z.object({
   meta: z.object({ source: z.literal('partial'), generatedAt: z.string().datetime(), notice: z.string() }),
-  access: z.object({ currentRole: z.literal('super_admin'), serverRbacVerified: z.literal(false), writeAllowed: z.literal(false), notice: z.string() }),
+  access: z.object({ currentRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), serverRbacVerified: z.literal(true), writeAllowed: z.literal(false), notice: z.string() }),
   summary: z.object({ sections: z.literal(6), roles: z.number().int().nonnegative(), servicesOnline: z.number().int().nonnegative(), servicesTotal: z.number().int().positive(), enabledFeatures: z.number().int().nonnegative(), backupsVerified: z.literal(0) }),
   organization: z.object({ source: sourceStateSchema, company: z.string(), departments: z.number().int().nonnegative(), people: z.number().int().nonnegative(), roles: z.array(z.object({ id: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), name: z.string(), memberCount: z.number().int().nonnegative(), dataScope: z.string(), permissionSummary: z.string(), highPrivilege: z.boolean() })) }),
   businessRules: z.object({ source: sourceStateSchema, version: z.string(), verified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), value: z.string(), impact: z.string(), status: z.enum(['fixed', 'unverified']) })) }),
@@ -31,7 +32,7 @@ function safeHttpUrl(value: string | undefined, fallback: string) {
 
 function probeState(value: PlatformProbeResult['state']) { return value === 'reachable' ? 'reachable' as const : 'offline' as const }
 
-export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, docs: PlatformProbeResult, now = new Date()) {
+export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, docs: PlatformProbeResult, now = new Date(), currentRole: AppRole = 'super_admin') {
   const newApiState = newApi.state === 'ready' ? 'ready' as const : newApi.state
   const connections = [
     { id: 'bff' as const, name: '运营控制台 BFF', category: '本机服务', url: 'http://127.0.0.1:4175', state: 'ready' as const, credentialConfigured: false, credentialValueAvailable: false as const, checkedAt: now.toISOString(), detail: '当前页面由 BFF 提供并已通过请求 ID 与禁用缓存检查。' },
@@ -41,7 +42,7 @@ export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, d
   ]
   return {
     meta: { source: 'partial' as const, generatedAt: now.toISOString(), notice: '服务连通状态为实时探测；组织、口径、留存和备份为明确标注的演示或未验证配置。' },
-    access: { currentRole: 'super_admin' as const, serverRbacVerified: false as const, writeAllowed: false as const, notice: '当前仅有前端角色守卫；真实登录会话、服务端 RBAC、二次确认与设置变更审计尚未接入。' },
+    access: { currentRole, serverRbacVerified: true as const, writeAllowed: false as const, notice: '当前会话已通过服务端 RBAC 校验；设置写操作、二次确认与变更审计仍未接入。' },
     summary: { sections: 6 as const, roles: 5, servicesOnline: connections.filter((item) => item.state !== 'offline').length, servicesTotal: connections.length, enabledFeatures: 0, backupsVerified: 0 as const },
     organization: { source: 'demo' as const, company: '新知科技', departments: 4, people: 12, roles: [
       { id: 'super_admin' as const, name: '超级管理员', memberCount: 1, dataScope: '全公司', permissionSummary: '组织、服务、策略与敏感审计', highPrivilege: true },

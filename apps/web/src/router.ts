@@ -16,27 +16,36 @@ import AuditView from './views/AuditView.vue'
 import ConversationAuditView from './views/ConversationAuditView.vue'
 import SettingsView from './views/SettingsView.vue'
 import EmployeeHomeView from './views/EmployeeHomeView.vue'
-
-export type AppRole = 'super_admin' | 'admin' | 'department_lead' | 'finance' | 'employee'
+import LoginView from './views/LoginView.vue'
+import type { AppRole } from './auth-api'
 
 declare module 'vue-router' {
   interface RouteMeta {
     roles: AppRole[]
     title: string
     stage?: string
+    public?: boolean
   }
 }
 
 export interface CreateRouterOptions {
   history?: RouterHistory
   role?: AppRole
+  authenticated?: boolean
 }
 
 export function createAppRouter(options: CreateRouterOptions = {}) {
   const role = options.role ?? 'super_admin'
+  const authenticated = options.authenticated ?? true
   const router = createRouter({
     history: options.history ?? createWebHistory(),
     routes: [
+      {
+        path: '/login',
+        name: 'login',
+        component: LoginView,
+        meta: { title: '登录', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'], public: true },
+      },
       {
         path: '/',
         component: AdminLayout,
@@ -150,6 +159,8 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
   })
 
   router.beforeEach((to) => {
+    if (to.meta.public) return true
+    if (!authenticated) return { name: 'login', query: { redirect: to.fullPath } }
     if (to.meta.roles.includes(role)) return true
     return role === 'employee' ? '/me' : '/'
   })

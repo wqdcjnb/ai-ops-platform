@@ -3,6 +3,21 @@ import { createMemoryHistory } from 'vue-router'
 import { createAppRouter } from './router'
 
 describe('application routing', () => {
+  it('redirects unauthenticated users to the public login page', async () => {
+    const router = createAppRouter({ history: createMemoryHistory(), role: 'super_admin', authenticated: false })
+    await router.push('/settings')
+    await router.isReady()
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/settings')
+  })
+
+  it('keeps the login page public before a session exists', async () => {
+    const router = createAppRouter({ history: createMemoryHistory(), role: 'super_admin', authenticated: false })
+    await router.push('/login')
+    await router.isReady()
+    expect(router.currentRoute.value.name).toBe('login')
+  })
+
   it('opens the unified entry page at the root route', async () => {
     const router = createAppRouter({ history: createMemoryHistory(), role: 'super_admin' })
     await router.push('/')

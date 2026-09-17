@@ -23,6 +23,7 @@ import {
   IconX,
 } from '@tabler/icons-vue'
 import { fetchPlatformStatus, type PlatformService, type PlatformStatus } from '../home-api'
+import { fetchCurrentUser, logout, type AuthUser } from '../auth-api'
 
 interface NavItem {
   label: string
@@ -38,6 +39,7 @@ interface NavSection {
 
 const mobileNavOpen = ref(false)
 const route = useRoute()
+const currentUser = ref<AuthUser | null>(null)
 const bffState = ref<'checking' | 'online' | 'offline'>('checking')
 const platform = ref<PlatformStatus | null>(null)
 const statusController = new AbortController()
@@ -107,6 +109,17 @@ async function loadServiceStatus() {
 
 onMounted(() => void loadServiceStatus())
 onBeforeUnmount(() => statusController.abort())
+
+async function loadCurrentUser() {
+  currentUser.value = (await fetchCurrentUser().catch(() => null))?.user ?? null
+}
+
+async function signOut() {
+  await logout().catch(() => undefined)
+  window.location.assign('/login')
+}
+
+onMounted(() => void loadCurrentUser())
 </script>
 
 <template>
@@ -143,11 +156,11 @@ onBeforeUnmount(() => statusController.abort())
 
       <div class="sidebar-footer">
         <RouterLink to="/settings" class="nav-item" active-class="" :class="{ active: route.path === '/settings' }" @click="mobileNavOpen = false"><IconSettings :size="18" /> <span>系统设置</span></RouterLink>
-        <div class="operator-card">
-          <div class="avatar avatar-sm">超</div>
-          <div><strong>超级管理员</strong><small>本机演示身份</small></div>
+        <button class="operator-card" type="button" @click="signOut">
+          <div class="avatar avatar-sm">{{ currentUser?.displayName.slice(0, 1) ?? '—' }}</div>
+          <div><strong>{{ currentUser?.displayName ?? '当前身份' }}</strong><small>{{ currentUser?.roleLabel ?? '会话加载中' }} · 退出登录</small></div>
           <IconChevronRight :size="17" />
-        </div>
+        </button>
       </div>
     </aside>
 
@@ -165,7 +178,7 @@ onBeforeUnmount(() => statusController.abort())
             <small>· {{ newApiLabel }} · {{ cpaLabel }}</small>
           </div>
           <RouterLink class="icon-button notification-button" to="/alerts" aria-label="打开告警中心"><IconBell :size="20" /></RouterLink>
-          <button class="avatar-button" aria-label="当前身份：超级管理员">超</button>
+          <button class="avatar-button" aria-label="退出登录" @click="signOut">{{ currentUser?.displayName.slice(0, 1) ?? '—' }}</button>
         </div>
       </header>
 

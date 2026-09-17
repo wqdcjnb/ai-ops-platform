@@ -19,6 +19,7 @@ import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditRe
 import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDemoConversationAccess, createDemoConversationAudits } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDemoEmployeeKeys, createDemoEmployeeModels, createDemoEmployeeProfile, createDemoEmployeeUsage, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
+import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, type AppRole, type AuthService } from './auth.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -30,6 +31,8 @@ const errorResponseSchema = z.object({
 
 export interface BuildAppOptions {
   logger?: boolean
+  authMode?: 'required' | 'disabled'
+  authService?: AuthService
   probeNewApi?: () => Promise<NewApiStatus>
   probeCpa?: () => Promise<PlatformProbeResult>
   probeDocs?: () => Promise<PlatformProbeResult>
@@ -52,6 +55,31 @@ export function buildApp(options: BuildAppOptions = {}) {
   })
   app.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
+  const authMode = options.authMode ?? (process.env.AUTH_MODE === 'disabled' ? 'disabled' : 'required')
+  const auth = options.authService ?? createAuthService()
+
+  const requiredRoles = (path: string): readonly AppRole[] => {
+    if (path.startsWith('/api/me')) return ['employee']
+    if (path.startsWith('/api/conversation-audits')) return ['super_admin']
+    if (path.startsWith('/api/audit-events') || path.startsWith('/api/settings') || path.startsWith('/api/upstreams') || path.startsWith('/api/routes')) return ['super_admin', 'admin']
+    if (path.startsWith('/api/people') || path.startsWith('/api/keys') || path.startsWith('/api/models') || path.startsWith('/api/channels')) return ['super_admin', 'admin', 'department_lead']
+    return ['super_admin', 'admin', 'department_lead', 'finance']
+  }
+
+  app.addHook('preHandler', async (request, reply) => {
+    const path = request.url.split('?')[0] ?? '/'
+    if (path === '/health' || path.startsWith('/api/auth/')) return
+    if (authMode === 'disabled') return
+    const user = auth.authenticate(request)
+    if (!user) {
+      return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '请先登录后再访问该资源', requestId: request.id } })
+    }
+    request.authUser = user
+    if (!isRoleAllowed(user, requiredRoles(path))) {
+      return reply.status(403).send({ error: { code: 'AUTH_FORBIDDEN', message: '当前身份没有访问该资源的权限', requestId: request.id } })
+    }
+  })
+
   app.addHook('onSend', async (request, reply, payload) => {
     reply.header('x-request-id', request.id)
     reply.header('cache-control', 'no-store')
@@ -65,6 +93,36 @@ export function buildApp(options: BuildAppOptions = {}) {
       },
     },
   }, async () => ({ status: 'ok' as const, service: 'ai-ops-bff' as const }))
+
+  app.post('/api/auth/login', {
+    schema: {
+      body: loginBodySchema,
+      response: { 200: authResponseSchema, 400: errorResponseSchema, 401: authErrorSchema },
+    },
+  }, async (request, reply) => {
+    const session = auth.login(request.body.username, request.body.password)
+    if (!session) {
+      return reply.status(401).send({ error: { code: 'AUTH_INVALID', message: '用户名或密码不正确', requestId: request.id } })
+    }
+    auth.setSessionCookie(reply, session.token, session.expiresAt)
+    return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
+  })
+
+  app.get('/api/auth/me', {
+    schema: { response: { 200: authResponseSchema, 401: authErrorSchema } },
+  }, async (request, reply) => {
+    const user = auth.authenticate(request)
+    if (!user) return reply.status(401).send({ error: { code: 'AUTH_REQUIRED', message: '当前会话已失效，请重新登录', requestId: request.id } })
+    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString()
+    return { authenticated: true as const, user, expiresAt }
+  })
+
+  app.post('/api/auth/logout', {
+  }, async (request, reply) => {
+    auth.revoke(request)
+    auth.clearSessionCookie(reply)
+    return reply.status(204).send()
+  })
 
   app.get('/api/overview', {
     schema: {
@@ -245,7 +303,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/conversation-audits', {
     schema: { querystring: conversationAuditQuerySchema, response: { 200: conversationAuditResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => createDemoConversationAudits(request.query))
+  }, async (request) => createDemoConversationAudits(request.query, new Date(), request.authUser?.role ?? 'super_admin'))
 
   app.post('/api/conversation-audits/:id/access', {
     schema: { params: conversationAuditParamsSchema, body: conversationAccessBodySchema, response: { 200: conversationAccessResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
@@ -257,7 +315,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/settings', {
     schema: { response: { 200: settingsResponseSchema } },
-  }, async () => {
+  }, async (request) => {
     const cpaUrl = process.env.CPA_BASE_URL ?? 'http://127.0.0.1:8317/management.html'
     const docsUrl = process.env.DOCS_BASE_URL ?? 'http://127.0.0.1:4173'
     const [newApi, cpa, docs] = await Promise.all([
@@ -265,7 +323,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       (options.probeCpa ?? (() => probeHttpService(cpaUrl)))(),
       (options.probeDocs ?? (() => probeHttpService(docsUrl)))(),
     ])
-    return createSettings(newApi, cpa, docs)
+    return createSettings(newApi, cpa, docs, new Date(), request.authUser?.role ?? 'super_admin')
   })
 
   app.get('/api/me', {

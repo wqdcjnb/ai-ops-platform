@@ -9,7 +9,7 @@ const reachableNewApi = async () => ({
 })
 const reachableService = async () => ({ state: 'reachable' as const, checkedAt: '2026-09-15T10:00:00.000Z' })
 const createApp = () => {
-  const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+  const app = buildApp({ authMode: 'disabled', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
   apps.push(app)
   return app
 }
@@ -19,6 +19,41 @@ afterEach(async () => {
 })
 
 describe('BFF', () => {
+  it('requires a session for protected resources', async () => {
+    const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const response = await app.inject({ method: 'GET', url: '/api/overview' })
+    expect(response.statusCode).toBe(401)
+    expect(response.json().error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it('issues an HttpOnly session cookie and enforces role boundaries', async () => {
+    const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    expect(login.statusCode).toBe(200)
+    expect(login.headers['set-cookie']).toMatch(/ai_ops_session=.*HttpOnly/i)
+    const cookie = login.headers['set-cookie']
+    const settings = await app.inject({ method: 'GET', url: '/api/settings', headers: { cookie } })
+    expect(settings.statusCode).toBe(200)
+
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeCookie = employeeLogin.headers['set-cookie']
+    const employeeAdminResource = await app.inject({ method: 'GET', url: '/api/people', headers: { cookie: employeeCookie } })
+    expect(employeeAdminResource.statusCode).toBe(403)
+    const employeeResource = await app.inject({ method: 'GET', url: '/api/me', headers: { cookie: employeeCookie } })
+    expect(employeeResource.statusCode).toBe(200)
+  })
+
+  it('rejects invalid credentials without creating a session', async () => {
+    const app = buildApp({ probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const response = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'wrong-password' } })
+    expect(response.statusCode).toBe(401)
+    expect(response.json().error.code).toBe('AUTH_INVALID')
+    expect(response.headers['set-cookie']).toBeUndefined()
+  })
+
   it('reports health without caching', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/health' })
     expect(response.statusCode).toBe(200)
@@ -340,7 +375,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.content).toMatchObject({ synthetic: true, decrypted: false })
-    expect(body.access).toMatchObject({ reasonAccepted: true, persisted: false, authorizedByServerRbac: false, copyAllowed: false, exportAllowed: false, deleteAllowed: false })
+    expect(body.access).toMatchObject({ reasonAccepted: true, persisted: false, authorizedByServerRbac: true, copyAllowed: false, exportAllowed: false, deleteAllowed: false })
     expect(body.content.messages.some((item: { redacted: boolean }) => item.redacted)).toBe(true)
     expect(JSON.stringify(body)).not.toContain('复核客户投诉关联请求与脱敏结果')
 
@@ -366,7 +401,7 @@ describe('BFF', () => {
     const profile = await createApp().inject({ method: 'GET', url: '/api/me' })
     const keys = await createApp().inject({ method: 'GET', url: '/api/me/keys' })
     expect(profile.statusCode).toBe(200)
-    expect(profile.json().scope).toMatchObject({ mode: 'self_demo', currentUserVerified: false, serverRbacVerified: false, otherPeopleAvailable: false })
+    expect(profile.json().scope).toMatchObject({ mode: 'self_demo', currentUserVerified: true, serverRbacVerified: true, otherPeopleAvailable: false })
     expect(profile.json().person).toMatchObject({ id: 'person-lin', role: 'employee' })
     expect(keys.statusCode).toBe(200)
     expect(keys.json().items).toHaveLength(2)

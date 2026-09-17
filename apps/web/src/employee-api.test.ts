@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageResponseSchema } from './employee-api'
 
 const meta = { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', notice: '演示' }
-const scope = { mode: 'self_demo', currentUserVerified: false, serverRbacVerified: false, otherPeopleAvailable: false, notice: '身份未验证' }
+const scope = { mode: 'self_demo', currentUserVerified: true, serverRbacVerified: true, otherPeopleAvailable: false, notice: '会话已验证' }
 
 describe('employee API contracts', () => {
   it('accepts only self-scoped profiles and masked Keys', () => {

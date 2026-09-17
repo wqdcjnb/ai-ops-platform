@@ -10,7 +10,7 @@ describe('settings contract', () => {
       new Date('2026-09-15T10:00:00.000Z'),
     )
     expect(settingsResponseSchema.safeParse(value).success).toBe(true)
-    expect(value.access).toMatchObject({ serverRbacVerified: false, writeAllowed: false })
+    expect(value.access).toMatchObject({ serverRbacVerified: true, writeAllowed: false })
     expect(value.connections.items.every((item) => item.credentialValueAvailable === false)).toBe(true)
     expect(value.features.items.every((item) => item.enabled === false && item.editable === false)).toBe(true)
     expect(value.backup).toMatchObject({ configured: false, browserDownloadAllowed: false })

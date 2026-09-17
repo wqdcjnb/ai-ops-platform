@@ -4,12 +4,11 @@ import '@tabler/core/dist/css/tabler.min.css'
 import './styles.css'
 import App from './App.vue'
 import { createAppRouter } from './router'
+import { fetchCurrentUser } from './auth-api'
 
-// Authentication is not implemented yet. A direct /me visit selects the fixed,
-// explicitly unverified employee demo scope; all other routes use the admin demo.
-const demoRole = window.location.pathname.startsWith('/me') ? 'employee' : 'super_admin'
+const currentUser = await fetchCurrentUser().catch(() => null)
 
 createApp(App)
   .use(createPinia())
-  .use(createAppRouter({ role: demoRole }))
+  .use(createAppRouter({ role: currentUser?.user.role ?? 'super_admin', authenticated: Boolean(currentUser) }))
   .mount('#app')

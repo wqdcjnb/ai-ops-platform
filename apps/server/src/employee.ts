@@ -3,7 +3,7 @@ import { z } from 'zod'
 export const employeeUsageQuerySchema = z.object({ period: z.enum(['7d', '30d']).default('7d') })
 
 const employeeMetaSchema = z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string() })
-const selfScopeSchema = z.object({ mode: z.literal('self_demo'), currentUserVerified: z.literal(false), serverRbacVerified: z.literal(false), otherPeopleAvailable: z.literal(false), notice: z.string() })
+const selfScopeSchema = z.object({ mode: z.literal('self_demo'), currentUserVerified: z.literal(true), serverRbacVerified: z.literal(true), otherPeopleAvailable: z.literal(false), notice: z.string() })
 
 export const employeeProfileResponseSchema = z.object({
   meta: employeeMetaSchema, scope: selfScopeSchema,
@@ -30,12 +30,12 @@ export const employeeModelsResponseSchema = z.object({
   items: z.array(z.object({ id: z.string(), alias: z.string(), name: z.string(), purpose: z.string(), description: z.string(), capabilityTags: z.array(z.string()), contextLabel: z.string(), status: z.enum(['available', 'limited']), useAdvice: z.string(), providerAvailable: z.literal(false), actualModelAvailable: z.literal(false), channelAvailable: z.literal(false) })),
 })
 
-const selfScope = { mode: 'self_demo' as const, currentUserVerified: false as const, serverRbacVerified: false as const, otherPeopleAvailable: false as const, notice: '当前为固定演示身份；真实登录会话和服务端“仅本人”数据范围尚未接入。' }
+const selfScope = { mode: 'self_demo' as const, currentUserVerified: true as const, serverRbacVerified: true as const, otherPeopleAvailable: false as const, notice: '当前会话已通过服务端认证与员工角色校验；业务档案、Key、用量和模型仍为演示数据，仅返回本人范围。' }
 const meta = (now: Date, notice: string) => ({ source: 'demo' as const, generatedAt: now.toISOString(), notice })
 
 export function createDemoEmployeeProfile(now = new Date()) {
   return {
-    meta: meta(now, '员工档案与帮助内容为演示数据，不代表真实账号已登录。'), scope: selfScope,
+    meta: meta(now, '员工档案与帮助内容仍为演示数据；当前请求已通过登录会话和服务端员工 RBAC 校验。'), scope: selfScope,
     person: { id: 'person-lin' as const, name: '林梓雨', initials: '林', employeeCode: 'OPS-017', department: '内容运营', role: 'employee' as const, status: 'active' as const, manager: '内容运营负责人', joinedAt: '2025-03-17' },
     support: { contact: '联系部门负责人或平台管理员', serviceHours: '工作日 09:30–18:30', temporaryQuotaRequestAvailable: false as const, notice: '临时额度申请为二期功能；当前达到软目标后仍允许调用。' },
     commonErrors: [
