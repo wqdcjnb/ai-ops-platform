@@ -25,8 +25,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(4)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests']))
+    expect(body.migrationVersion).toBe(5)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests', 'conversation_access_events']))
   })
 
   it('requires a session for protected resources', async () => {
@@ -470,7 +470,7 @@ describe('BFF', () => {
     expect(body.items).toHaveLength(1)
     expect(body.items[0]).toMatchObject({ id: 'conv-audit-independent-03', state: 'captured', grouping: { type: 'independent_call', reliable: false } })
     expect(body.items[0].redaction.rawContentAvailable).toBe(false)
-    expect(body.scope).toMatchObject({ defaultCaptureEnabled: false, storageEncryptedVerified: false, accessAuditPersisted: false })
+    expect(body.scope).toMatchObject({ defaultCaptureEnabled: false, storageEncryptedVerified: false, accessAuditPersisted: true })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|rawPrompt|rawResponse/i)
 
     const invalid = await createApp().inject({ method: 'GET', url: '/api/conversation-audits?state=deleted&period=90d' })
@@ -487,7 +487,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.content).toMatchObject({ synthetic: true, decrypted: false })
-    expect(body.access).toMatchObject({ reasonAccepted: true, persisted: false, authorizedByServerRbac: true, copyAllowed: false, exportAllowed: false, deleteAllowed: false })
+    expect(body.access).toMatchObject({ reasonAccepted: true, persisted: true, authorizedByServerRbac: true, copyAllowed: false, exportAllowed: false, deleteAllowed: false })
     expect(body.content.messages.some((item: { redacted: boolean }) => item.redacted)).toBe(true)
     expect(JSON.stringify(body)).not.toContain('复核客户投诉关联请求与脱敏结果')
 

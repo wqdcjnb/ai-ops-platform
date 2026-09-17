@@ -116,7 +116,7 @@ const auditSummarySchema = z.object({
   changes: z.array(changeSchema).max(8).optional(),
 }).passthrough()
 const credentialPattern = /(?:bearer\s+\S+|sk-[a-z0-9_-]{8,})/giu
-const maskedKeyPattern = /^sk-ops••••••[A-Z0-9]{4}$/u
+const maskedKeyPattern = /^sk-ops••••••[A-Z0-9_-]{4}$/u
 
 function safeAuditSummary(row: ReturnType<PlatformDatabase['listAuditEvents']>[number]) {
   const parsed = auditSummarySchema.safeParse(row.summary)

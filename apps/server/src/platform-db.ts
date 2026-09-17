@@ -137,6 +137,19 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS alert_events_last_occurred_at_idx ON alert_events(last_occurred_at DESC);
   CREATE INDEX IF NOT EXISTS alert_events_status_idx ON alert_events(status, severity, environment);`,
+  `CREATE TABLE IF NOT EXISTS conversation_access_events (
+    id TEXT PRIMARY KEY,
+    actor_user_id TEXT NOT NULL REFERENCES users(id),
+    record_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('view_synthetic')),
+    reason_provided INTEGER NOT NULL CHECK (reason_provided IN (0, 1)),
+    reason_length INTEGER NOT NULL CHECK (reason_length BETWEEN 8 AND 200),
+    acknowledged_sensitive_scope INTEGER NOT NULL CHECK (acknowledged_sensitive_scope IN (0, 1)),
+    occurred_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS conversation_access_events_record_idx ON conversation_access_events(record_id, occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS conversation_access_events_actor_idx ON conversation_access_events(actor_user_id, occurred_at DESC);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -282,6 +295,17 @@ export interface PlatformApiKeyCreate {
   purpose: string
   expiresAt: string
   models: string[]
+}
+
+export interface PlatformConversationAccessCreate {
+  id: string
+  actorUserId: string
+  recordId: string
+  requestId: string
+  action: 'view_synthetic'
+  reasonProvided: boolean
+  reasonLength: number
+  acknowledgedSensitiveScope: boolean
 }
 
 export function hashPlatformPassword(value: string) {
@@ -644,6 +668,28 @@ export class PlatformDatabase {
     return rows.map((row) => ({ ...row, relatedRequestIds: JSON.parse(row.relatedRequestIdsJson) as string[] }))
   }
 
+  recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now()) {
+    const occurredAt = now.toISOString()
+    this.db.prepare(`INSERT INTO conversation_access_events(
+      id, actor_user_id, record_id, request_id, action, reason_provided, reason_length, acknowledged_sensitive_scope, occurred_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      event.id, event.actorUserId, event.recordId, event.requestId, event.action, Number(event.reasonProvided),
+      event.reasonLength, Number(event.acknowledgedSensitiveScope), occurredAt,
+    )
+    return { id: event.id, occurredAt }
+  }
+
+  listConversationAccessEvents() {
+    return this.db.prepare(`SELECT e.id, e.actor_user_id AS actorUserId, u.display_name AS actorName, e.record_id AS recordId,
+      e.request_id AS requestId, e.action, e.reason_provided AS reasonProvided, e.reason_length AS reasonLength,
+      e.acknowledged_sensitive_scope AS acknowledgedSensitiveScope, e.occurred_at AS occurredAt
+      FROM conversation_access_events e JOIN users u ON u.id = e.actor_user_id
+      ORDER BY e.occurred_at DESC, e.id DESC`).all() as Array<{
+        id: string; actorUserId: string; actorName: string; recordId: string; requestId: string; action: 'view_synthetic'
+        reasonProvided: number; reasonLength: number; acknowledgedSensitiveScope: number; occurredAt: string
+      }>
+  }
+
   tableCounts() {
     const count = (table: string) => (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
     return {
@@ -655,6 +701,7 @@ export class PlatformDatabase {
       usageRequests: count('usage_requests'),
       alertRules: count('alert_rules'),
       alertEvents: count('alert_events'),
+      conversationAccessEvents: count('conversation_access_events'),
     }
   }
 
