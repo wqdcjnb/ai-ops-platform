@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
+import { createConversationAuditMetadataSeeds, type ConversationAuditMetadataSeed } from './conversation-audit-seeds.js'
 
 const migrationSql = [
   `CREATE TABLE IF NOT EXISTS departments (
@@ -231,6 +232,35 @@ const migrationSql = [
     head_hash TEXT,
     updated_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS conversation_audit_records (
+    id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    captured_at TEXT NOT NULL,
+    person_id TEXT NOT NULL REFERENCES users(id),
+    key_id TEXT NOT NULL,
+    key_masked TEXT NOT NULL,
+    purpose_id TEXT NOT NULL,
+    purpose_label TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    model_label TEXT NOT NULL,
+    policy_id TEXT NOT NULL,
+    policy_label TEXT NOT NULL,
+    policy_scope TEXT NOT NULL,
+    policy_expires_at TEXT NOT NULL,
+    capture_state TEXT NOT NULL CHECK (capture_state IN ('captured', 'metadata_only', 'expired')),
+    redaction_status TEXT NOT NULL CHECK (redaction_status IN ('passed', 'review_required', 'not_applicable')),
+    redaction_findings INTEGER NOT NULL CHECK (redaction_findings >= 0),
+    grouping_type TEXT NOT NULL CHECK (grouping_type IN ('conversation', 'independent_call')),
+    grouping_reliable INTEGER NOT NULL CHECK (grouping_reliable IN (0, 1)),
+    grouping_label TEXT NOT NULL,
+    turns INTEGER NOT NULL CHECK (turns >= 0),
+    tool_calls INTEGER NOT NULL CHECK (tool_calls >= 0),
+    total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+    content_access_available INTEGER NOT NULL CHECK (content_access_available IN (0, 1)),
+    CHECK (content_access_available = 0 OR capture_state = 'captured')
+  );
+  CREATE INDEX IF NOT EXISTS conversation_audit_records_captured_idx ON conversation_audit_records(captured_at DESC);
+  CREATE INDEX IF NOT EXISTS conversation_audit_records_filter_idx ON conversation_audit_records(person_id, key_id, capture_state, redaction_status);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -410,6 +440,35 @@ export interface PlatformConversationAccessCreate {
   reasonProvided: boolean
   reasonLength: number
   acknowledgedSensitiveScope: boolean
+}
+
+export interface PlatformConversationAuditRecord {
+  id: string
+  requestId: string
+  capturedAt: string
+  personId: string
+  personName: string
+  departmentName: string
+  keyId: string
+  keyMasked: string
+  purposeId: string
+  purposeLabel: string
+  modelId: string
+  modelLabel: string
+  policyId: string
+  policyLabel: string
+  policyScope: string
+  policyExpiresAt: string
+  state: 'captured' | 'metadata_only' | 'expired'
+  redactionStatus: 'passed' | 'review_required' | 'not_applicable'
+  redactionFindings: number
+  groupingType: 'conversation' | 'independent_call'
+  groupingReliable: number
+  groupingLabel: string
+  turns: number
+  toolCalls: number
+  totalTokens: number
+  contentAccessAvailable: number
 }
 
 export interface PlatformAuthSessionCreate {
@@ -732,6 +791,31 @@ export class PlatformDatabase {
       seed.points, seed.latency.firstTokenMs, seed.latency.totalMs, seed.cost.type, seed.cost.amountUsd, seed.status,
       seed.error?.category ?? null, seed.error?.summary ?? null, seed.routeAlias, seed.retryCount ?? 0,
       Number(seed.requestIdPropagated ?? true), seed.client.name, seed.client.mode,
+    )
+  }
+
+  seedConversationAuditRecord(seed: ConversationAuditMetadataSeed) {
+    this.db.prepare(`INSERT INTO conversation_audit_records(
+      id, request_id, captured_at, person_id, key_id, key_masked, purpose_id, purpose_label,
+      model_id, model_label, policy_id, policy_label, policy_scope, policy_expires_at,
+      capture_state, redaction_status, redaction_findings, grouping_type, grouping_reliable,
+      grouping_label, turns, tool_calls, total_tokens, content_access_available
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      request_id = excluded.request_id, captured_at = excluded.captured_at, person_id = excluded.person_id,
+      key_id = excluded.key_id, key_masked = excluded.key_masked, purpose_id = excluded.purpose_id,
+      purpose_label = excluded.purpose_label, model_id = excluded.model_id, model_label = excluded.model_label,
+      policy_id = excluded.policy_id, policy_label = excluded.policy_label, policy_scope = excluded.policy_scope,
+      policy_expires_at = excluded.policy_expires_at, capture_state = excluded.capture_state,
+      redaction_status = excluded.redaction_status, redaction_findings = excluded.redaction_findings,
+      grouping_type = excluded.grouping_type, grouping_reliable = excluded.grouping_reliable,
+      grouping_label = excluded.grouping_label, turns = excluded.turns, tool_calls = excluded.tool_calls,
+      total_tokens = excluded.total_tokens, content_access_available = excluded.content_access_available`).run(
+      seed.id, seed.requestId, seed.capturedAt, seed.personId, seed.key.id, seed.key.masked,
+      seed.purpose.id, seed.purpose.label, seed.model.id, seed.model.label, seed.policy.id,
+      seed.policy.label, seed.policy.scope, seed.policy.expiresAt, seed.state, seed.redaction.status,
+      seed.redaction.findings, seed.grouping.type, Number(seed.grouping.reliable), seed.grouping.label,
+      seed.metrics.turns, seed.metrics.toolCalls, seed.metrics.totalTokens, Number(seed.contentAccessAvailable),
     )
   }
 
@@ -1192,6 +1276,22 @@ export class PlatformDatabase {
       }>
   }
 
+  listConversationAuditRecords(): PlatformConversationAuditRecord[] {
+    return this.db.prepare(`SELECT r.id, r.request_id AS requestId, r.captured_at AS capturedAt,
+      r.person_id AS personId, u.display_name AS personName, COALESCE(d.name, '未归属部门') AS departmentName,
+      r.key_id AS keyId, r.key_masked AS keyMasked, r.purpose_id AS purposeId, r.purpose_label AS purposeLabel,
+      r.model_id AS modelId, r.model_label AS modelLabel, r.policy_id AS policyId, r.policy_label AS policyLabel,
+      r.policy_scope AS policyScope, r.policy_expires_at AS policyExpiresAt, r.capture_state AS state,
+      r.redaction_status AS redactionStatus, r.redaction_findings AS redactionFindings,
+      r.grouping_type AS groupingType, r.grouping_reliable AS groupingReliable, r.grouping_label AS groupingLabel,
+      r.turns, r.tool_calls AS toolCalls, r.total_tokens AS totalTokens,
+      r.content_access_available AS contentAccessAvailable
+      FROM conversation_audit_records r
+      JOIN users u ON u.id = r.person_id
+      LEFT JOIN departments d ON d.id = u.department_id
+      ORDER BY r.captured_at DESC, r.id DESC`).all() as unknown as PlatformConversationAuditRecord[]
+  }
+
   createAuthSession(session: PlatformAuthSessionCreate, now = this.now()) {
     this.db.prepare(`INSERT INTO user_sessions(id, user_id, token_hash, csrf_token_hash, expires_at, created_at, revoked_at)
       VALUES (?, ?, ?, ?, ?, ?, NULL)`).run(
@@ -1264,6 +1364,7 @@ export class PlatformDatabase {
       alertRules: count('alert_rules'),
       alertEvents: count('alert_events'),
       conversationAccessEvents: count('conversation_access_events'),
+      conversationAuditRecords: count('conversation_audit_records'),
       businessRules: count('system_business_rules'),
       featureFlags: count('system_feature_flags'),
       roleDefinitions: count('system_role_definitions'),
@@ -1436,6 +1537,8 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { requestId: 'req-demo-012', minutes: 4_330, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'experiment', name: '高能力实验', alias: 'ecommerce-pro-lab' }, model: { id: 'model-lab', displayName: 'CPA 高能力实验', actualModel: 'pro-oauth-lab' }, channel: { id: 'channel-cpa-lab-1', name: 'CPA Lab · 01', type: 'cpa_oauth' }, streamed: true, tokens: { input: 5560, output: 1940 }, points: 7.5, latency: { firstTokenMs: 2840, totalMs: 13620 }, cost: { type: 'cpa_estimate', amountUsd: .0212 }, status: 'succeeded', routeAlias: 'ecommerce-pro-lab', client: { name: 'WorkBuddy', mode: 'stream' } },
   ]
   for (const { minutes, ...request } of usageSeeds) database.seedUsageRequest({ ...request, occurredAt: new Date(now.getTime() - minutes * 60_000).toISOString() })
+
+  for (const record of createConversationAuditMetadataSeeds(now)) database.seedConversationAuditRecord(record)
 
   const at = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString()
   const later = (minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString()

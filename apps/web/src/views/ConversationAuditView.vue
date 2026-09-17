@@ -30,6 +30,7 @@ let accessRequest: AbortController | undefined
 const stateText = { captured: '已采集', metadata_only: '仅元数据', expired: '已到期' }
 const redactionText = { passed: '脱敏通过', review_required: '需要复核', not_applicable: '不适用' }
 const updatedAt = computed(() => data.value ? dateTime(data.value.meta.generatedAt) : '—')
+const sourceText = computed(() => data.value?.meta.source === 'database' ? 'SQLite 模拟元数据' : 'DEMO')
 const canOpen = computed(() => selected.value?.contentAccess.available && reason.value.trim().length >= 8 && acknowledged.value && !isOpening.value)
 const summaryCards = computed(() => {
   const value = data.value?.summary
@@ -72,7 +73,7 @@ onBeforeUnmount(() => { request?.abort(); accessRequest?.abort() })
 <template>
   <div class="dashboard conversation-audit-dashboard">
     <section class="page-heading"><div><div class="eyebrow">CONVERSATION AUDIT</div><h1>对话审计</h1><p>按获准策略复核脱敏轮次；正文采集与普通调用日志完全隔离。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="正式访问审计与异步导出接入后开放"><IconDownload :size="16" />导出</button></div></section>
-    <div v-if="data" class="source-banner"><span>DEMO</span>{{ data.meta.notice }}</div>
+    <div v-if="data" class="source-banner"><span>{{ data.meta.source === 'database' ? 'SQLITE' : 'DEMO' }}</span>{{ data.meta.notice }}</div>
     <section class="audit-summary-grid" aria-label="对话审计汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
     <div v-if="!data && !errorMessage" class="panel data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取对话审计记录</strong><p>正在加载采集策略、脱敏状态、留存时间与请求关联…</p></div></div>
@@ -106,7 +107,7 @@ onBeforeUnmount(() => { request?.abort(); accessRequest?.abort() })
           </section>
         </div>
       </section>
-      <footer class="page-footer">数据来源：DEMO · 默认关闭采集 · 原始正文永不返回 · 仅超级管理员路由可见 · 复制、导出、删除均禁用</footer>
+      <footer class="page-footer">数据来源：{{ sourceText }} · 默认关闭采集 · 原始正文永不返回 · 仅超级管理员路由可见 · 复制、导出、删除均禁用</footer>
     </template>
   </div>
 </template>

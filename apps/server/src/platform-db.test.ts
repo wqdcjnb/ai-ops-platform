@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 14, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
-    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 15, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
+    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'system_business_rules', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(14)
+    expect(database.status().migrationVersion).toBe(15)
     database.close()
   })
 
@@ -15,7 +15,7 @@ describe('platform database migrations', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
     const first = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
     const second = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
-    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
+    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
@@ -35,6 +35,11 @@ describe('platform database migrations', () => {
     expect(database.listAlertRules()).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'rule-upstream-failure', category: 'upstream', enabled: 1 }),
     ]))
+    expect(database.listConversationAuditRecords()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'conv-audit-copy-01', state: 'captured', personName: '林筱雨', keyMasked: 'sk-ops••••••7F2A', contentAccessAvailable: 1 }),
+      expect.objectContaining({ id: 'conv-audit-metadata-04', state: 'metadata_only', contentAccessAvailable: 0 }),
+    ]))
+    expect(JSON.stringify(database.listConversationAuditRecords())).not.toMatch(/rawPrompt|rawResponse|viewReason|reasonText/i)
     expect(database.listBusinessRules()).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'timezone', version: 'draft-v0.1', status: 'fixed' }),
     ]))
@@ -66,7 +71,7 @@ describe('platform database migrations', () => {
       action: 'view_synthetic', reasonProvided: 1, reasonLength: 18, acknowledgedSensitiveScope: 1,
     })])
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
-    expect(database.status().migrationVersion).toBe(14)
+    expect(database.status().migrationVersion).toBe(15)
     database.close()
   })
 

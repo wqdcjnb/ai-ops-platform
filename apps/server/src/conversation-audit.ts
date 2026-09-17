@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { AppRole } from './auth.js'
+import type { PlatformConversationAuditRecord, PlatformDatabase } from './platform-db.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const captureStateSchema = z.enum(['captured', 'metadata_only', 'expired'])
@@ -41,7 +42,7 @@ const recordSchema = z.object({
   contentAccess: z.object({ available: z.boolean(), requiresReason: z.literal(true), requiredRole: z.literal('super_admin') }),
 })
 
-const metaSchema = z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() })
+const metaSchema = z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() })
 export const conversationAuditResponseSchema = z.object({
   meta: metaSchema,
   accessControl: z.object({ currentRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), serverRbacVerified: z.literal(true), contentRequiresReason: z.literal(true), notice: z.string() }),
@@ -59,7 +60,7 @@ const messageSchema = z.object({
 })
 
 export const conversationAccessResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }),
   record: recordSchema,
   access: z.object({ accessRecordId: z.string().regex(/^access-demo-[a-z0-9-]+$/), reasonAccepted: z.literal(true), persisted: z.boolean(), authorizedByServerRbac: z.literal(true), copyAllowed: z.literal(false), exportAllowed: z.literal(false), deleteAllowed: z.literal(false) }),
   content: z.object({ synthetic: z.literal(true), decrypted: z.literal(false), redactionPassed: z.boolean(), conversationTitle: z.string(), messages: z.array(messageSchema) }),
@@ -89,41 +90,74 @@ const seeds: Seed[] = [
 function records(now: Date): ConversationAuditRecord[] {
   return seeds.map(({ minutes, policy, ...item }) => ({ ...item, capturedAt: ago(now, minutes), policy: { id: policy.id, label: policy.label, scope: policy.scope, expiresAt: after(now, policy.expiresInMinutes) } }))
 }
+
+function recordFromDatabase(row: PlatformConversationAuditRecord): ConversationAuditRecord {
+  return {
+    id: row.id,
+    requestId: row.requestId,
+    capturedAt: row.capturedAt,
+    person: { id: row.personId, name: row.personName, department: row.departmentName },
+    key: { id: row.keyId, masked: row.keyMasked },
+    purpose: { id: row.purposeId, label: row.purposeLabel },
+    model: { id: row.modelId, label: row.modelLabel },
+    policy: { id: row.policyId, label: row.policyLabel, scope: row.policyScope, expiresAt: row.policyExpiresAt },
+    state: row.state,
+    redaction: { status: row.redactionStatus, findings: row.redactionFindings, rawContentAvailable: false },
+    grouping: { type: row.groupingType, reliable: row.groupingReliable === 1, label: row.groupingLabel },
+    metrics: { turns: row.turns, toolCalls: row.toolCalls, totalTokens: row.totalTokens },
+    contentAccess: { available: row.contentAccessAvailable === 1, requiresReason: true, requiredRole: 'super_admin' },
+  }
+}
+
 function periodMinutes(period: ConversationAuditQuery['period']) { return period === 'today' ? 1_440 : period === '7d' ? 10_080 : 43_200 }
 
-export function createDemoConversationAudits(query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin', accessAuditPersisted = false) {
-  const all = records(now)
+function filterRecords(all: ConversationAuditRecord[], query: ConversationAuditQuery, now: Date) {
   const cutoff = now.getTime() - periodMinutes(query.period) * 60_000
   const needle = query.search.toLocaleLowerCase('zh-CN')
-  const filtered = all.filter((item) => {
+  return all.filter((item) => {
     const matchesSearch = !needle || [item.id, item.requestId, item.person.name, item.key.masked, item.purpose.label, item.model.label, item.policy.label].some((value) => value.toLocaleLowerCase('zh-CN').includes(needle))
     return new Date(item.capturedAt).getTime() >= cutoff && matchesSearch && (query.person === 'all' || item.person.id === query.person) && (query.key === 'all' || item.key.id === query.key) && (query.purpose === 'all' || item.purpose.id === query.purpose) && (query.model === 'all' || item.model.id === query.model) && (query.policy === 'all' || item.policy.id === query.policy) && (query.state === 'all' || item.state === query.state) && (query.redaction === 'all' || item.redaction.status === query.redaction) && (query.grouping === 'all' || item.grouping.type === query.grouping)
   })
+}
+
+function createConversationAuditResponse(all: ConversationAuditRecord[], query: ConversationAuditQuery, now: Date, currentRole: AppRole, source: 'demo' | 'database', accessAuditPersisted: boolean) {
+  const filtered = filterRecords(all, query, now)
   const start = (query.page - 1) * query.pageSize
   const unique = <T extends { id: string; label: string }>(values: T[]) => [...new Map(values.map((item) => [item.id, item])).values()]
   const expiry = all.filter((item) => item.state === 'captured').map((item) => item.policy.expiresAt).sort()[0] ?? now.toISOString()
+  const databaseMetadata = source === 'database'
   return {
-    meta: { source: 'demo' as const, generatedAt: now.toISOString(), period: query.period, notice: '独立审计存储尚未接入；列表为不含真实正文的安全演示数据' },
+    meta: { source, generatedAt: now.toISOString(), period: query.period, notice: databaseMetadata ? 'SQLite 仅保存可筛选的合成审计元数据；不保存真实正文、原始提示词或查看原因。' : '独立审计存储尚未接入；列表为不含真实正文的安全演示数据' },
     accessControl: { currentRole, serverRbacVerified: true as const, contentRequiresReason: true as const, notice: '当前请求已通过服务端超级管理员 RBAC；查看脱敏内容仍要求填写原因。' },
     summary: { total: filtered.length, captured: filtered.filter((item) => item.state === 'captured').length, metadataOnly: filtered.filter((item) => item.state === 'metadata_only').length, expiringSoon: filtered.filter((item) => item.state === 'captured' && new Date(item.policy.expiresAt).getTime() - now.getTime() <= 1_440 * 60_000).length, independentCalls: filtered.filter((item) => item.grouping.type === 'independent_call').length, reviewRequired: filtered.filter((item) => item.redaction.status === 'review_required').length },
-    scope: { defaultCaptureEnabled: false as const, activePolicies: 3, nearestExpiryAt: expiry, storageEncryptedVerified: false as const, accessAuditPersisted, notice: accessAuditPersisted ? '默认关闭采集；查看合成演示内容时仅将访问元数据写入 SQLite，不保存原因原文。正文加密、独立存储与到期清理仍未验收。' : '默认关闭采集；演示页面不代表正文加密、访问审计或到期清理已经验收。' },
+    scope: { defaultCaptureEnabled: false as const, activePolicies: 3, nearestExpiryAt: expiry, storageEncryptedVerified: false as const, accessAuditPersisted, notice: databaseMetadata ? '默认关闭采集；SQLite 仅保存合成演示元数据。查看合成内容时，访问元数据与统一审计事件同时写入；原因原文、真实正文、加密存储和到期清理仍未验收。' : '默认关闭采集；演示页面不代表正文加密、访问审计或到期清理已经验收。' },
     options: { people: unique(all.map((item) => ({ id: item.person.id, label: item.person.name }))), keys: unique(all.map((item) => ({ id: item.key.id, label: item.key.masked }))), purposes: unique(all.map((item) => item.purpose)), models: unique(all.map((item) => ({ id: item.model.id, label: item.model.label }))), policies: unique(all.map((item) => ({ id: item.policy.id, label: item.policy.label }))) },
     items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
   }
+}
+
+export function createDatabaseConversationAudits(database: PlatformDatabase, query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin') {
+  return createConversationAuditResponse(database.listConversationAuditRecords().map(recordFromDatabase), query, now, currentRole, 'database', true)
+}
+
+export function getDatabaseConversationAuditRecord(database: PlatformDatabase, id: string) {
+  return database.listConversationAuditRecords().map(recordFromDatabase).find((item) => item.id === id) ?? null
+}
+
+export function createDemoConversationAudits(query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin', accessAuditPersisted = false) {
+  return createConversationAuditResponse(records(now), query, now, currentRole, 'demo', accessAuditPersisted)
 }
 
 export function getDemoConversationAuditRecord(id: string, now = new Date()) {
   return records(now).find((item) => item.id === id) ?? null
 }
 
-export function createDemoConversationAccess(id: string, _body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean }) {
-  const record = getDemoConversationAuditRecord(id, now)
-  if (!record || !record.contentAccess.available) return null
+function createSyntheticConversationAccess(record: ConversationAuditRecord, now: Date, accessRecord: { id: string; persisted: boolean } | undefined, source: 'demo' | 'database') {
   const baseTime = new Date(record.capturedAt).getTime()
   const at = (seconds: number) => new Date(baseTime + seconds * 1_000).toISOString()
   return {
-    meta: { source: 'demo' as const, generatedAt: now.toISOString(), notice: '以下为合成且预先脱敏的演示轮次；未读取、解密或返回任何真实对话正文。' }, record,
-    access: { accessRecordId: accessRecord?.id ?? `access-demo-${id.replace('conv-audit-', '')}`, reasonAccepted: true as const, persisted: accessRecord?.persisted ?? false, authorizedByServerRbac: true as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
+    meta: { source, generatedAt: now.toISOString(), notice: source === 'database' ? '以下为合成且预先脱敏的演示轮次；SQLite 仅保存元数据，未读取、解密或返回任何真实对话正文。' : '以下为合成且预先脱敏的演示轮次；未读取、解密或返回任何真实对话正文。' }, record,
+    access: { accessRecordId: accessRecord?.id ?? `access-demo-${record.id.replace('conv-audit-', '')}`, reasonAccepted: true as const, persisted: accessRecord?.persisted ?? false, authorizedByServerRbac: true as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
     content: { synthetic: true as const, decrypted: false as const, redactionPassed: record.redaction.status === 'passed', conversationTitle: record.grouping.type === 'independent_call' ? '独立调用 · 演示内容' : `${record.purpose.label} · 演示会话`, messages: [
       { id: 'msg-user-1', role: 'user' as const, label: '用户输入', occurredAt: at(0), text: '请根据订单 [ORDER_ID] 的公开商品信息，整理一版不超过 120 字的回复。客户联系方式已替换为 [PHONE_REDACTED]。', redacted: true, redactionLabels: ['订单编号', '手机号'], tool: null },
       { id: 'msg-tool-1', role: 'tool' as const, label: '工具调用摘要', occurredAt: at(2), text: '读取公开商品目录，返回 3 条匹配记录。参数和原始输出未保留。', redacted: false, redactionLabels: [], tool: { name: 'catalog_search', summary: '按脱敏商品编号查询公开目录', argumentsAvailable: false as const, outputAvailable: false as const } },
@@ -132,4 +166,16 @@ export function createDemoConversationAccess(id: string, _body: ConversationAcce
     retention: { expiresAt: record.policy.expiresAt, cleanupState: 'scheduled' as const, deletionProofAvailable: false as const, notice: '到期清理与无正文删除证明尚未接入；本页面不提供删除操作。' },
     linkedUsage: { requestId: record.requestId, metadataEndpoint: `/api/usage/${record.requestId}`, requestIdVerified: false as const },
   }
+}
+
+export function createDemoConversationAccess(id: string, _body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean }) {
+  const record = getDemoConversationAuditRecord(id, now)
+  if (!record || !record.contentAccess.available) return null
+  return createSyntheticConversationAccess(record, now, accessRecord, 'demo')
+}
+
+export function createDatabaseConversationAccess(record: ConversationAuditRecord, body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean }) {
+  void body
+  if (!record.contentAccess.available) return null
+  return createSyntheticConversationAccess(record, now, accessRecord, 'database')
 }
