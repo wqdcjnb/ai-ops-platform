@@ -118,6 +118,9 @@ describe('BFF', () => {
     expect(alerts.json().items.every((item: { subject: { type: string } }) => ['department', 'person', 'key'].includes(item.subject.type))).toBe(true)
     const globalAlert = await app.inject({ method: 'GET', url: '/api/alerts/alert-error-global', headers: { cookie } })
     expect(globalAlert.statusCode).toBe(404)
+    const hiddenExactAlert = await app.inject({ method: 'GET', url: '/api/alerts?alertId=alert-error-global', headers: { cookie } })
+    expect(hiddenExactAlert.statusCode).toBe(200)
+    expect(hiddenExactAlert.json().items).toEqual([])
     const rules = await app.inject({ method: 'GET', url: '/api/alert-rules', headers: { cookie } })
     expect(rules.statusCode).toBe(200)
     expect(rules.json().items).toEqual([])
@@ -786,6 +789,10 @@ describe('BFF', () => {
     expect(related.json().items).toHaveLength(1)
     expect(related.json().items[0]).toMatchObject({ id: 'alert-cpa-credential', subject: { id: 'upstream-cpa-lab-2' } })
 
+    const exactAlert = await createApp().inject({ method: 'GET', url: '/api/alerts?alertId=alert-error-global' })
+    expect(exactAlert.statusCode).toBe(200)
+    expect(exactAlert.json().items).toEqual([expect.objectContaining({ id: 'alert-error-global' })])
+
     const invalid = await createApp().inject({ method: 'GET', url: '/api/alerts?severity=fatal' })
     expect(invalid.statusCode).toBe(400)
     expect(invalid.json().error.code).toBe('INVALID_REQUEST')
@@ -793,6 +800,10 @@ describe('BFF', () => {
     const invalidSubject = await createApp().inject({ method: 'GET', url: '/api/alerts?subjectId=upstream_cpa_lab_2' })
     expect(invalidSubject.statusCode).toBe(400)
     expect(invalidSubject.json().error.code).toBe('INVALID_REQUEST')
+
+    const invalidAlert = await createApp().inject({ method: 'GET', url: '/api/alerts?alertId=not-an-alert-event' })
+    expect(invalidAlert.statusCode).toBe(400)
+    expect(invalidAlert.json().error.code).toBe('INVALID_REQUEST')
   })
 
   it('returns read-only alert rules and safe event details with stable missing errors', async () => {

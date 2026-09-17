@@ -7,7 +7,7 @@ const sourceSchema = z.enum(['quota', 'traffic', 'error_rate', 'balance', 'crede
 const environmentSchema = z.enum(['production', 'experiment'])
 const channelSchema = z.enum(['none', 'wecom', 'dingtalk'])
 
-export const alertFiltersSchema = z.object({ search: z.string().max(80), subjectId: z.string().max(80).regex(/^[a-z0-9-]*$/), severity: z.union([z.literal('all'), severitySchema]), status: z.union([z.literal('all'), statusSchema]), source: z.union([z.literal('all'), sourceSchema]), environment: z.union([z.literal('all'), environmentSchema]), page: z.number().int().positive(), pageSize: z.number().int().min(5).max(50) })
+export const alertFiltersSchema = z.object({ search: z.string().max(80), subjectId: z.string().max(80).regex(/^[a-z0-9-]*$/), alertId: z.union([z.literal(''), z.string().regex(/^alert-[a-z0-9-]{1,80}$/)]).default(''), severity: z.union([z.literal('all'), severitySchema]), status: z.union([z.literal('all'), statusSchema]), source: z.union([z.literal('all'), sourceSchema]), environment: z.union([z.literal('all'), environmentSchema]), page: z.number().int().positive(), pageSize: z.number().int().min(5).max(50) })
 
 export const alertEventSchema = z.object({
   id: z.string(), title: z.string(), summary: z.string(), severity: severitySchema, status: statusSchema, environment: environmentSchema, source: sourceSchema,

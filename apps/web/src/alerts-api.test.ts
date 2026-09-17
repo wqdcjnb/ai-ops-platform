@@ -7,8 +7,9 @@ const item = { id: 'alert-test', title: '测试告警', summary: '脱敏摘要',
 
 describe('alert API contracts', () => {
   it('validates explicit filters, summaries and safe event metadata', () => {
-    expect(alertFiltersSchema.safeParse({ search: '', subjectId: 'upstream-cpa-lab-2', severity: 'critical', status: 'open', source: 'error_rate', environment: 'production', page: 1, pageSize: 10 }).success).toBe(true)
+    expect(alertFiltersSchema.safeParse({ search: '', subjectId: 'upstream-cpa-lab-2', alertId: 'alert-error-global', severity: 'critical', status: 'open', source: 'error_rate', environment: 'production', page: 1, pageSize: 10 }).success).toBe(true)
     expect(alertFiltersSchema.safeParse({ search: '', subjectId: 'upstream_cpa_lab_2', severity: 'fatal', status: 'open', source: 'error_rate', environment: 'production', page: 0, pageSize: 10 }).success).toBe(false)
+    expect(alertFiltersSchema.safeParse({ search: '', subjectId: '', alertId: 'not-an-alert-event', severity: 'critical', status: 'open', source: 'error_rate', environment: 'production', page: 1, pageSize: 10 }).success).toBe(false)
     expect(alertSummaryResponseSchema.safeParse({ meta, summary: { open: 1, critical: 1, warning: 0, experiment: 0, acknowledged: 0, closed: 0 }, notificationConfig }).success).toBe(true)
     expect(alertsResponseSchema.safeParse({ meta, options: { sources: [{ id: 'error_rate', label: '错误率' }] }, items: [item], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 } }).success).toBe(true)
   })

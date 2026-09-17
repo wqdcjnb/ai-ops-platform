@@ -23,6 +23,7 @@ function acknowledgement(): AlertActionResponse { return { meta: { source: 'data
 
 let host: HTMLDivElement
 let app: App
+function mount(path = '/alerts') { window.history.replaceState({}, '', path); app = createApp(AlertsView); app.mount(host) }
 beforeEach(() => {
   vi.resetAllMocks()
   host = document.createElement('div'); document.body.append(host)
@@ -32,7 +33,7 @@ beforeEach(() => {
   vi.mocked(fetchAlertDetail).mockResolvedValue(detail())
   vi.mocked(acknowledgeLocalAlert).mockResolvedValue(acknowledgement())
 })
-afterEach(() => { app?.unmount(); host.remove() })
+afterEach(() => { app?.unmount(); window.history.replaceState({}, '', '/'); host.remove() })
 
 describe('alerts view database simulation', () => {
   it('labels SQLite simulation data, filters events, and keeps the safe detail boundary', async () => {
@@ -65,5 +66,14 @@ describe('alerts view database simulation', () => {
     await vi.waitFor(() => expect(acknowledgeLocalAlert).toHaveBeenCalledWith('alert-error-global', expect.objectContaining({ acknowledgeSimulation: true })))
     await vi.waitFor(() => expect(host.textContent).toContain('处置摘要已写入 SQLite 审计记录'))
     expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 audit-alert-ack-1a2b3c4d 操作审计"]')?.getAttribute('href')).toBe('/audit?eventId=audit-alert-ack-1a2b3c4d&origin=alert_action')
+  })
+
+  it('accepts a safe audit-to-alert filter and removes it when cleared', async () => {
+    mount('/alerts?alertId=alert-error-global')
+    await vi.waitFor(() => expect(fetchAlerts).toHaveBeenCalledWith(expect.objectContaining({ alertId: 'alert-error-global', page: 1 }), expect.any(AbortSignal)))
+    await vi.waitFor(() => expect(host.textContent).toContain('正在显示关联审计记录对应的模拟告警'))
+    host.querySelector<HTMLButtonElement>('[aria-label="清除关联告警筛选"]')!.click()
+    await vi.waitFor(() => expect(fetchAlerts).toHaveBeenLastCalledWith(expect.objectContaining({ alertId: '', subjectId: '', page: 1 }), undefined))
+    expect(window.location.search).toBe('')
   })
 })
