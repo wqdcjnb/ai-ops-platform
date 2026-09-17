@@ -21,7 +21,7 @@ import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema,
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDemoConversationAccess, createDemoConversationAudits, getDemoConversationAuditRecord } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
-import { createDemoEmployeeKeys, createDemoEmployeeModels, createDemoEmployeeProfile, createDemoEmployeeUsage, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
+import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
 import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
 
@@ -463,15 +463,15 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/me', {
     schema: { response: { 200: employeeProfileResponseSchema } },
-  }, async () => createDemoEmployeeProfile())
+  }, async (request) => createDatabaseEmployeeProfile(database, request.authUser?.id ?? 'person-lin'))
 
   app.get('/api/me/keys', {
     schema: { response: { 200: employeeKeysResponseSchema } },
-  }, async () => createDemoEmployeeKeys())
+  }, async (request) => createDatabaseEmployeeKeys(database, request.authUser?.id ?? 'person-lin'))
 
   app.get('/api/me/usage', {
     schema: { querystring: employeeUsageQuerySchema, response: { 200: employeeUsageResponseSchema, 400: errorResponseSchema } },
-  }, async (request) => createDemoEmployeeUsage(request.query.period))
+  }, async (request) => createDatabaseEmployeeUsage(database, request.authUser?.id ?? 'person-lin', request.query.period))
 
   app.get('/api/me/models', {
     schema: { response: { 200: employeeModelsResponseSchema } },

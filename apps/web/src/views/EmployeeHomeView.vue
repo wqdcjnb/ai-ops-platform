@@ -51,7 +51,7 @@ onBeforeUnmount(() => { request?.abort(); usageRequest?.abort(); if (copyTimer) 
 
 <template>
   <main class="employee-dashboard">
-    <div v-if="profile" class="employee-demo-banner"><span>DEMO</span>{{ profile.scope.notice }}</div>
+    <div v-if="profile" class="employee-demo-banner"><span>SQLITE</span>{{ profile.scope.notice }}</div>
     <section v-if="profile" class="employee-hero"><div class="employee-hero-avatar">{{ profile.person.initials }}</div><div class="employee-hero-copy"><span>欢迎回来</span><h1>{{ profile.person.name }}</h1><p>{{ profile.person.department }} · {{ profile.person.employeeCode }} · 负责人：{{ profile.person.manager }}</p><div><em><IconUser :size="13" />仅本人数据</em><em><IconShieldCheck :size="13" />会话与权限已验证</em></div></div><div class="employee-hero-actions"><button class="employee-secondary-button"><IconHelpCircle :size="16" />获取帮助</button><button class="employee-primary-button" disabled title="临时额度申请将在二期开放">申请临时额度</button></div></section>
     <section v-if="profile" class="employee-metric-grid" aria-label="本人用量汇总"><article v-for="card in summaryCards" :key="card.label"><header><span>{{ card.label }}</span><i :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></i></header><strong>{{ card.value }}</strong><small>{{ card.hint }}</small></article></section>
 
@@ -76,6 +76,6 @@ onBeforeUnmount(() => { request?.abort(); usageRequest?.abort(); if (copyTimer) 
         <section class="employee-help-card"><span><IconHelpCircle :size="21" /></span><div><strong>仍然无法解决？</strong><p>{{ profile.support.contact }} · {{ profile.support.serviceHours }}</p></div><button>查看联系说明</button></section>
       </aside>
     </div>
-    <footer v-if="profile" class="employee-page-footer">DEMO 数据 · 会话已认证 · 服务端员工 RBAC 已启用 · 仅展示本人范围 · 不含完整 Key、供应商、实际模型、上游渠道或管理配置</footer>
+    <footer v-if="profile" class="employee-page-footer">SQLite 模拟资料、Key 与调用元数据 · 模型目录仍为 DEMO · 会话已认证 · 服务端员工 RBAC 已启用 · 仅展示本人范围 · 不含完整 Key、供应商、实际模型、上游渠道或管理配置</footer>
   </main>
 </template>

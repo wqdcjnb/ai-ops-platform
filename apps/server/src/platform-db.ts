@@ -200,6 +200,9 @@ const migrationSql = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`,
+  `ALTER TABLE users ADD COLUMN employee_code TEXT;
+  ALTER TABLE users ADD COLUMN manager_name TEXT;
+  ALTER TABLE users ADD COLUMN joined_at TEXT;`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -230,6 +233,9 @@ export interface PlatformUserSeed {
   password: string
   status?: 'active' | 'disabled'
   departmentId?: string | null
+  employeeCode?: string | null
+  managerName?: string | null
+  joinedAt?: string | null
 }
 
 export interface PlatformDepartmentSeed {
@@ -448,12 +454,14 @@ export class PlatformDatabase {
 
   seedUser(seed: PlatformUserSeed, now = this.now()) {
     const timestamp = now.toISOString()
-    this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, employee_code, manager_name, joined_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(username) DO UPDATE SET id = excluded.id, display_name = excluded.display_name,
       role = excluded.role, password_hash = excluded.password_hash, status = excluded.status,
-      department_id = excluded.department_id, updated_at = excluded.updated_at`).run(
-      seed.id, seed.username, seed.displayName, seed.role, hashPlatformPassword(seed.password), seed.status ?? 'active', seed.departmentId ?? null, timestamp, timestamp,
+      department_id = excluded.department_id, employee_code = excluded.employee_code,
+      manager_name = excluded.manager_name, joined_at = excluded.joined_at, updated_at = excluded.updated_at`).run(
+      seed.id, seed.username, seed.displayName, seed.role, hashPlatformPassword(seed.password), seed.status ?? 'active', seed.departmentId ?? null,
+      seed.employeeCode ?? null, seed.managerName ?? null, seed.joinedAt ?? null, timestamp, timestamp,
     )
   }
 
@@ -652,6 +660,24 @@ export class PlatformDatabase {
       }>
   }
 
+  getEmployeeProfile(userId: string) {
+    return this.db.prepare(`SELECT u.id, u.display_name AS displayName, u.status,
+      COALESCE(d.name, '未分配部门') AS departmentName,
+      COALESCE(u.employee_code, 'LOCAL-' || UPPER(SUBSTR(u.id, 1, 8))) AS employeeCode,
+      COALESCE(u.manager_name, '未设置负责人') AS managerName,
+      SUBSTR(COALESCE(u.joined_at, u.created_at), 1, 10) AS joinedAt
+      FROM users u LEFT JOIN departments d ON d.id = u.department_id
+      WHERE u.id = ? AND u.role = 'employee' AND u.status = 'active' LIMIT 1`).get(userId) as {
+        id: string
+        displayName: string
+        status: 'active'
+        departmentName: string
+        employeeCode: string
+        managerName: string
+        joinedAt: string
+      } | undefined
+  }
+
   departmentExists(departmentId: string) {
     return Boolean(this.db.prepare('SELECT 1 FROM departments WHERE id = ? AND status = \'active\' LIMIT 1').get(departmentId))
   }
@@ -690,6 +716,26 @@ export class PlatformDatabase {
         ownerName: string
         departmentId: string | null
         departmentName: string | null
+      }>
+    return rows.map((row) => ({ ...row, models: JSON.parse(row.modelsJson) as string[] }))
+  }
+
+  listApiKeysForOwner(ownerUserId: string) {
+    const rows = this.db.prepare(`SELECT k.id, k.masked_value AS maskedValue, k.purpose, k.status,
+      k.expires_at AS expiresAt, k.models_json AS modelsJson, k.created_at AS createdAt,
+      MAX(r.occurred_at) AS lastUsedAt
+      FROM api_keys k LEFT JOIN usage_requests r ON r.api_key_id = k.id AND r.owner_user_id = k.owner_user_id
+      WHERE k.owner_user_id = ? AND k.status IN ('active', 'expiring')
+      GROUP BY k.id, k.masked_value, k.purpose, k.status, k.expires_at, k.models_json, k.created_at
+      ORDER BY k.created_at DESC, k.id`).all(ownerUserId) as Array<{
+        id: string
+        maskedValue: string
+        purpose: string
+        status: 'active' | 'expiring'
+        expiresAt: string | null
+        modelsJson: string
+        createdAt: string
+        lastUsedAt: string | null
       }>
     return rows.map((row) => ({ ...row, models: JSON.parse(row.modelsJson) as string[] }))
   }
@@ -750,7 +796,7 @@ export class PlatformDatabase {
     return rows.map((row) => ({ ...row, summary: JSON.parse(row.summaryJson) as Record<string, unknown> }))
   }
 
-  listUsageRequests() {
+  listUsageRequests(ownerUserId?: string) {
     return this.db.prepare(`SELECT r.request_id AS requestId, r.occurred_at AS occurredAt,
       u.id AS personId, u.display_name AS personName, d.id AS departmentId, d.name AS departmentName,
       k.id AS keyId, k.masked_value AS maskedValue,
@@ -766,7 +812,8 @@ export class PlatformDatabase {
       JOIN users u ON u.id = r.owner_user_id
       LEFT JOIN departments d ON d.id = u.department_id
       JOIN api_keys k ON k.id = r.api_key_id
-      ORDER BY r.occurred_at DESC, r.request_id DESC`).all() as Array<{
+      WHERE (? IS NULL OR r.owner_user_id = ?)
+      ORDER BY r.occurred_at DESC, r.request_id DESC`).all(ownerUserId ?? null, ownerUserId ?? null) as Array<{
         requestId: string; occurredAt: string; personId: string; personName: string; departmentId: string | null; departmentName: string | null
         keyId: string; maskedValue: string; purposeId: string; purposeName: string; purposeAlias: string
         modelId: string; modelDisplayName: string; actualModel: string; channelId: string; channelName: string; channelType: 'official_api' | 'cpa_oauth'
@@ -999,6 +1046,9 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     roleLabel: '员工',
     password: process.env.AUTH_EMPLOYEE_PASSWORD ?? 'employee-demo',
     departmentId: 'content',
+    employeeCode: 'OPS-017',
+    managerName: '内容运营负责人',
+    joinedAt: '2025-03-17',
   })
 
   const people: PlatformUserSeed[] = [
