@@ -16,7 +16,7 @@ import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './rou
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
-import { createDemoUsage, createDemoUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
+import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDemoAlertDetail, createDemoAlertRules, createDemoAlerts, createDemoAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDemoConversationAccess, createDemoConversationAudits } from './conversation-audit.js'
@@ -365,14 +365,14 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { querystring: usageQuerySchema, response: { 200: usageResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDemoUsage(request.query, newApi)
+    return createDatabaseUsage(database, request.query, newApi)
   })
 
   app.get('/api/usage/:requestId', {
     schema: { params: usageRequestParamsSchema, response: { 200: usageDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },
   }, async (request, reply) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    const result = createDemoUsageDetail(request.params.requestId, newApi)
+    const result = createDatabaseUsageDetail(database, request.params.requestId, newApi)
     if (result) return result
     return reply.status(404).send({ error: { code: 'USAGE_NOT_FOUND', message: '未找到指定调用记录', requestId: request.id } })
   })

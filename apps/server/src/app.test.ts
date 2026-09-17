@@ -25,8 +25,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(2)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events']))
+    expect(body.migrationVersion).toBe(3)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'audit_events', 'usage_requests']))
   })
 
   it('requires a session for protected resources', async () => {
@@ -336,7 +336,7 @@ describe('BFF', () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/usage?period=7d&status=failed&pageSize=10' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta).toMatchObject({ source: 'demo', period: '7d' })
+    expect(body.meta).toMatchObject({ source: 'database', simulated: true, period: '7d' })
     expect(body.items.length).toBeGreaterThan(0)
     expect(body.items.every((item: { status: string; conversationContentAvailable: boolean }) => item.status === 'failed' && item.conversationContentAvailable === false)).toBe(true)
     expect(body.summary.costs).toEqual(expect.objectContaining({ officialActualUsd: expect.any(Number), platformEstimateUsd: expect.any(Number), cpaEstimateUsd: expect.any(Number) }))
@@ -348,10 +348,10 @@ describe('BFF', () => {
   })
 
   it('returns metadata-only usage detail and a stable missing-record error', async () => {
-    const response = await createApp().inject({ method: 'GET', url: '/api/usage/req-260915-8f31' })
+    const response = await createApp().inject({ method: 'GET', url: '/api/usage/req-demo-001' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.item).toMatchObject({ requestId: 'req-260915-8f31', conversationContentAvailable: false })
+    expect(body.item).toMatchObject({ requestId: 'req-demo-001', conversationContentAvailable: false })
     expect(body.content).toMatchObject({ stored: false })
     expect(body.route.requestIdPropagated).toBe(true)
     expect(body.item.key.masked).toContain('••••••')
