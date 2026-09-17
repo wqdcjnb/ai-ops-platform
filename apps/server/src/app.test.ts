@@ -807,6 +807,40 @@ describe('BFF', () => {
     expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
   })
 
+  it('acknowledges and closes only local simulated alerts with CSRF, idempotency, and safe audit summaries', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const acknowledgeBody = { idempotencyKey: 'alert-ack-1a2b3c4d', reason: '已完成本地模拟事件复核并由管理员接手处理', acknowledgeSimulation: true }
+    const acknowledged = await app.inject({ method: 'POST', url: '/api/alerts/alert-error-global/acknowledge', headers: { cookie, 'x-csrf-token': csrfToken }, payload: acknowledgeBody })
+    expect(acknowledged.statusCode).toBe(200)
+    expect(acknowledged.json()).toMatchObject({ meta: { source: 'database' }, item: { id: 'alert-error-global', status: 'acknowledged', assignee: { name: '超级管理员' } }, operation: { action: 'acknowledge', idempotencyKey: acknowledgeBody.idempotencyKey, idempotent: false, auditEventId: 'audit-alert-ack-1a2b3c4d' } })
+    const replay = await app.inject({ method: 'POST', url: '/api/alerts/alert-error-global/acknowledge', headers: { cookie, 'x-csrf-token': csrfToken }, payload: acknowledgeBody })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json().operation.idempotent).toBe(true)
+
+    const closeBody = { idempotencyKey: 'alert-close-1a2b3c4d', reason: '本地演示复核已经完成，模拟事件可安全关闭', acknowledgeSimulation: true }
+    const closed = await app.inject({ method: 'POST', url: '/api/alerts/alert-error-global/close', headers: { cookie, 'x-csrf-token': csrfToken }, payload: closeBody })
+    expect(closed.statusCode).toBe(200)
+    expect(closed.json()).toMatchObject({ item: { id: 'alert-error-global', status: 'closed', assignee: { name: '超级管理员' } }, operation: { action: 'close', idempotencyKey: closeBody.idempotencyKey, idempotent: false, auditEventId: 'audit-alert-close-1a2b3c4d' } })
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&resource=alert&pageSize=20', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'acknowledge', resource: expect.objectContaining({ id: 'alert-error-global', name: '官方全球组错误率持续升高' }), result: { status: 'success', code: 'ALERT_ACKNOWLEDGED' } }),
+      expect.objectContaining({ action: 'update', resource: expect.objectContaining({ id: 'alert-error-global', name: '官方全球组错误率持续升高' }), result: { status: 'success', code: 'ALERT_CLOSED' } }),
+    ]))
+    expect(JSON.stringify({ acknowledged: acknowledged.json(), closed: closed.json(), audit: audit.json() })).not.toContain(acknowledgeBody.reason)
+    expect(JSON.stringify({ acknowledged: acknowledged.json(), closed: closed.json(), audit: audit.json() })).not.toContain(closeBody.reason)
+
+    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/alerts/alert-balance-low/acknowledge', headers: { cookie }, payload: { ...acknowledgeBody, idempotencyKey: 'alert-ack-5e6f7g8h' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeWrite = await app.inject({ method: 'POST', url: '/api/alerts/alert-balance-low/acknowledge', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...acknowledgeBody, idempotencyKey: 'alert-ack-9i0j1k2l' } })
+    expect(employeeWrite.statusCode).toBe(403)
+  })
+
   it('returns filterable audit events with safe sensitive-field summaries', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/audit-events?period=7d&action=rotate&resource=key&result=success&pageSize=10' })
     const body = response.json()

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alertDetailResponseSchema, alertFiltersSchema, alertRulesResponseSchema, alertSummaryResponseSchema, alertsResponseSchema } from './alerts-api'
+import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertFiltersSchema, alertRulesResponseSchema, alertSummaryResponseSchema, alertsResponseSchema } from './alerts-api'
 
 const meta = { source: 'database', simulated: true, generatedAt: '2026-09-15T10:00:00.000Z', notice: '模拟数据' }
 const notificationConfig = { configured: false, channels: [{ type: 'wecom', state: 'not_configured' }], notice: '未配置' }
@@ -20,5 +20,12 @@ describe('alert API contracts', () => {
     const detail = { meta, item, analysis: { cause: '摘要', impact: '范围', recommendation: '建议', rawUpstreamBodyAvailable: false }, timeline: [{ id: 'event-1', type: 'detected', occurredAt: '2026-09-15T09:00:00.000Z', title: '检测到', description: '说明' }] }
     expect(alertDetailResponseSchema.safeParse(detail).success).toBe(true)
     expect(alertDetailResponseSchema.safeParse({ ...detail, analysis: { ...detail.analysis, rawUpstreamBodyAvailable: true } }).success).toBe(false)
+  })
+
+  it('accepts only explicit local simulated acknowledgement and close payloads', () => {
+    expect(alertAcknowledgeBodySchema.safeParse({ idempotencyKey: 'alert-ack-1a2b3c4d', reason: '完成本地模拟告警复核并接手处置', acknowledgeSimulation: true }).success).toBe(true)
+    expect(alertCloseBodySchema.safeParse({ idempotencyKey: 'alert-close-1a2b3c4d', reason: '完成本地模拟告警复核并关闭事件', acknowledgeSimulation: true }).success).toBe(true)
+    expect(alertCloseBodySchema.safeParse({ idempotencyKey: 'alert-ack-1a2b3c4d', reason: '完成本地模拟告警复核并关闭事件', acknowledgeSimulation: true }).success).toBe(false)
+    expect(alertActionResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '仅本地模拟' }, item: { ...item, status: 'acknowledged', assignee: { id: 'user-super-admin', name: '超级管理员' }, acknowledgedAt: '2026-09-17T10:00:00.000Z' }, operation: { action: 'acknowledge', idempotencyKey: 'alert-ack-1a2b3c4d', idempotent: false, auditEventId: 'audit-alert-ack-1a2b3c4d' } }).success).toBe(true)
   })
 })

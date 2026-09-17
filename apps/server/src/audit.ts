@@ -141,6 +141,7 @@ function databaseResourceName(type: AuditEvent['resource']['type'], id: string, 
   if (type === 'conversation' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (type === 'route' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (type === 'channel' && summary.resourceName) return redactAuditText(summary.resourceName)
+  if (type === 'alert' && summary.resourceName) return redactAuditText(summary.resourceName)
   if (id === 'key-lin-1') return 'sk-ops••••••7F2A'
   if (id === 'quota-content-month') return '内容运营 · 月度软目标'
   if (id === 'export-usage-01') return '近 30 天调用日志'
@@ -152,6 +153,7 @@ function databaseSource(type: AuditEvent['resource']['type'], action: AuditEvent
   if (type === 'conversation') return { type: 'web' as const, label: '对话审计', ipMasked: null, client: '客户端信息未采集' }
   if (type === 'export') return { type: 'web' as const, label: '用量与日志', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
   if (type === 'quota') return { type: 'web' as const, label: '额度与限流', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
+  if (type === 'alert') return { type: 'web' as const, label: '告警中心', ipMasked: null, client: '客户端信息未采集' }
   return { type: 'api' as const, label: 'BFF 管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }
 }
 

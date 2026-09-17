@@ -17,7 +17,7 @@ import { channelCheckBodySchema, channelCheckResponseSchema, channelIdParamsSche
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
-import { alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
+import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessHistoryResponseSchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDatabaseConversationAccess, createDatabaseConversationAccessHistory, createDatabaseConversationAudits, getDatabaseConversationAuditRecord } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
@@ -104,6 +104,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     if (path.startsWith('/api/keys') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/limits') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/channels') && method !== 'GET') return ['super_admin', 'admin']
+    if (path.startsWith('/api/alerts') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/people') || path.startsWith('/api/keys') || path.startsWith('/api/models') || path.startsWith('/api/channels')) return ['super_admin', 'admin', 'department_lead']
     return ['super_admin', 'admin', 'department_lead', 'finance']
   }
@@ -673,6 +674,75 @@ export function buildApp(options: BuildAppOptions = {}) {
     const result = createDatabaseAlertDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '未找到指定告警事件', requestId: request.id } })
+  })
+
+  app.post('/api/alerts/:id/acknowledge', {
+    schema: { params: alertParamsSchema, body: alertAcknowledgeBodySchema, response: { 200: alertActionResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const now = new Date()
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visible = createDatabaseAlertDetail(database, request.params.id, newApi, now, dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '未找到可确认的模拟告警事件', requestId: request.id } })
+    const idempotencyFingerprint = createHash('sha256').update(`${visible.item.id}:acknowledge`).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.applyLocalAlertAction({ id: visible.item.id, action: 'acknowledge', actorUserId: request.authUser?.id ?? 'user-super-admin' }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'acknowledge', resourceType: 'alert', resourceId: visible.item.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          code: 'ALERT_ACKNOWLEDGED', message: '已确认本地 SQLite 模拟告警；未发送通知、未调用 New API，也未记录处置说明原文。',
+          resourceName: visible.item.title, reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint,
+          changes: [
+            { field: 'status', label: '告警状态', before: '待处理', after: '已确认', sensitive: false },
+            { field: 'assignee', label: '处理人', before: visible.item.assignee?.name ?? '未分派', after: request.authUser?.displayName ?? '超级管理员', sensitive: false },
+          ],
+        },
+      }, now)
+      if (!result) return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '该模拟告警事件已不可用，请刷新后重试', requestId: request.id } })
+      const updated = createDatabaseAlertDetail(database, visible.item.id, newApi, new Date(), dataScopeFor(request.authUser))
+      if (!updated) return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '该模拟告警事件已不可用，请刷新后重试', requestId: request.id } })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '该本地模拟告警已确认；未发送外部通知。' : '已确认本地 SQLite 模拟告警；未发送通知、未调用 New API，也未改变真实事件。' }, item: updated.item, operation: { action: 'acknowledge' as const, idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他模拟告警操作', requestId: request.id } })
+      if (error instanceof Error && error.message === 'ALERT_ALREADY_ACKNOWLEDGED') return reply.status(409).send({ error: { code: 'ALERT_ALREADY_ACKNOWLEDGED', message: '该模拟告警已确认，请勿使用新的操作编号重复提交', requestId: request.id } })
+      if (error instanceof Error && error.message === 'ALERT_ALREADY_CLOSED') return reply.status(409).send({ error: { code: 'ALERT_ALREADY_CLOSED', message: '该模拟告警已关闭，不能再确认', requestId: request.id } })
+      if (error instanceof Error && error.message === 'ALERT_ACTION_CONFLICT') return reply.status(409).send({ error: { code: 'ALERT_ACTION_CONFLICT', message: '该模拟告警状态已变化，请刷新后重试', requestId: request.id } })
+      throw error
+    }
+  })
+
+  app.post('/api/alerts/:id/close', {
+    schema: { params: alertParamsSchema, body: alertCloseBodySchema, response: { 200: alertActionResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const now = new Date()
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visible = createDatabaseAlertDetail(database, request.params.id, newApi, now, dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '未找到可关闭的模拟告警事件', requestId: request.id } })
+    const idempotencyFingerprint = createHash('sha256').update(`${visible.item.id}:close`).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.applyLocalAlertAction({ id: visible.item.id, action: 'close', actorUserId: request.authUser?.id ?? 'user-super-admin' }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'alert', resourceId: visible.item.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          code: 'ALERT_CLOSED', message: '已关闭本地 SQLite 模拟告警；未发送通知、未调用 New API，也未记录处置说明原文。',
+          resourceName: visible.item.title, reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint,
+          changes: [
+            { field: 'status', label: '告警状态', before: visible.item.status === 'acknowledged' ? '已确认' : '待处理', after: '已关闭', sensitive: false },
+            { field: 'closedAt', label: '关闭时间', before: null, after: '已写入 SQLite', sensitive: false },
+          ],
+        },
+      }, now)
+      if (!result) return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '该模拟告警事件已不可用，请刷新后重试', requestId: request.id } })
+      const updated = createDatabaseAlertDetail(database, visible.item.id, newApi, new Date(), dataScopeFor(request.authUser))
+      if (!updated) return reply.status(404).send({ error: { code: 'ALERT_NOT_FOUND', message: '该模拟告警事件已不可用，请刷新后重试', requestId: request.id } })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '该本地模拟告警已关闭；未发送外部通知。' : '已关闭本地 SQLite 模拟告警；未发送通知、未调用 New API，也未改变真实事件。' }, item: updated.item, operation: { action: 'close' as const, idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他模拟告警操作', requestId: request.id } })
+      if (error instanceof Error && error.message === 'ALERT_ALREADY_CLOSED') return reply.status(409).send({ error: { code: 'ALERT_ALREADY_CLOSED', message: '该模拟告警已关闭，请勿使用新的操作编号重复提交', requestId: request.id } })
+      if (error instanceof Error && error.message === 'ALERT_ACTION_CONFLICT') return reply.status(409).send({ error: { code: 'ALERT_ACTION_CONFLICT', message: '该模拟告警状态已变化，请刷新后重试', requestId: request.id } })
+      throw error
+    }
   })
 
   app.get('/api/audit-events', {

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 const severitySchema = z.enum(['critical', 'warning', 'info'])
 const statusSchema = z.enum(['open', 'acknowledged', 'closed'])
@@ -27,6 +28,10 @@ export const alertsResponseSchema = z.object({ meta: metaSchema, options: z.obje
 export const alertRuleSchema = z.object({ id: z.string(), name: z.string(), category: sourceSchema, severity: severitySchema, enabled: z.boolean(), environment: environmentSchema, scope: z.string(), condition: z.string(), window: z.string(), cooldownMinutes: z.number().int().nonnegative(), notification: z.object({ configured: z.literal(false), channel: channelSchema }), lastTriggeredAt: z.string().datetime().nullable(), triggerCount7d: z.number().int().nonnegative(), description: z.string() })
 export const alertRulesResponseSchema = z.object({ meta: metaSchema, items: z.array(alertRuleSchema), notificationConfig: notificationConfigSchema })
 export const alertDetailResponseSchema = z.object({ meta: metaSchema, item: alertEventSchema, analysis: z.object({ cause: z.string(), impact: z.string(), recommendation: z.string(), rawUpstreamBodyAvailable: z.literal(false) }), timeline: z.array(z.object({ id: z.string(), type: z.enum(['detected', 'notification', 'acknowledged', 'closed']), occurredAt: z.string().datetime(), title: z.string(), description: z.string() })) })
+const alertActionBodySchema = z.object({ reason: z.string().trim().min(8).max(200), acknowledgeSimulation: z.literal(true) })
+export const alertAcknowledgeBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-ack-[a-z0-9-]{8,96}$/) })
+export const alertCloseBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-close-[a-z0-9-]{8,96}$/) })
+export const alertActionResponseSchema = z.object({ meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }), item: alertEventSchema, operation: z.object({ action: z.enum(['acknowledge', 'close']), idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }) })
 
 export type AlertFilters = z.infer<typeof alertFiltersSchema>
 export type AlertEvent = z.infer<typeof alertEventSchema>
@@ -34,6 +39,9 @@ export type AlertSummary = z.infer<typeof alertSummaryResponseSchema>
 export type AlertsResponse = z.infer<typeof alertsResponseSchema>
 export type AlertRules = z.infer<typeof alertRulesResponseSchema>
 export type AlertDetail = z.infer<typeof alertDetailResponseSchema>
+export type AlertAcknowledgeBody = z.infer<typeof alertAcknowledgeBodySchema>
+export type AlertCloseBody = z.infer<typeof alertCloseBodySchema>
+export type AlertActionResponse = z.infer<typeof alertActionResponseSchema>
 
 export class AlertsApiError extends Error { constructor(message: string, readonly requestId?: string) { super(message) } }
 async function getResource<T>(url: string, schema: z.ZodType<T>, signal?: AbortSignal): Promise<T> { const response = await fetch(url, { headers: { accept: 'application/json' }, signal }); const requestId = response.headers.get('x-request-id') ?? undefined; if (!response.ok) throw new AlertsApiError(response.status === 404 ? '未找到指定告警事件' : '告警中心暂时无法加载', requestId); const parsed = schema.safeParse(await response.json()); if (!parsed.success) throw new AlertsApiError('告警数据格式不符合接口约定', requestId); return parsed.data }
@@ -42,3 +50,20 @@ export function fetchAlertSummary(signal?: AbortSignal) { return getResource('/a
 export function fetchAlerts(filters: AlertFilters, signal?: AbortSignal) { const value = alertFiltersSchema.parse(filters); const params = new URLSearchParams(Object.entries(value).map(([key, item]) => [key, String(item)])); return getResource(`/api/alerts?${params}`, alertsResponseSchema, signal) }
 export function fetchAlertRules(signal?: AbortSignal) { return getResource('/api/alert-rules', alertRulesResponseSchema, signal) }
 export function fetchAlertDetail(id: string, signal?: AbortSignal) { return getResource(`/api/alerts/${encodeURIComponent(id)}`, alertDetailResponseSchema, signal) }
+
+async function performLocalAlertAction<T extends AlertAcknowledgeBody | AlertCloseBody>(id: string, action: 'acknowledge' | 'close', payload: T): Promise<AlertActionResponse> {
+  const schema = action === 'acknowledge' ? alertAcknowledgeBodySchema : alertCloseBodySchema
+  const body = schema.parse(payload)
+  const response = await fetch(`/api/alerts/${encodeURIComponent(id)}/${action}`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new AlertsApiError(detail?.error?.message ?? '本地模拟告警处置失败', requestId)
+  }
+  const result = alertActionResponseSchema.safeParse(await response.json().catch(() => null))
+  if (!result.success) throw new AlertsApiError('本地模拟告警处置响应格式不符合接口约定', requestId)
+  return result.data
+}
+
+export function acknowledgeLocalAlert(id: string, payload: AlertAcknowledgeBody) { return performLocalAlertAction(id, 'acknowledge', payload) }
+export function closeLocalAlert(id: string, payload: AlertCloseBody) { return performLocalAlertAction(id, 'close', payload) }

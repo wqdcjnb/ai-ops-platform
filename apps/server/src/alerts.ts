@@ -21,6 +21,9 @@ export const alertsQuerySchema = z.object({
 })
 
 export const alertParamsSchema = z.object({ id: z.string().regex(/^alert-[a-z0-9-]+$/) })
+const alertActionBodySchema = z.object({ reason: z.string().trim().min(8).max(200), acknowledgeSimulation: z.literal(true) })
+export const alertAcknowledgeBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-ack-[a-z0-9-]{8,96}$/) })
+export const alertCloseBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-close-[a-z0-9-]{8,96}$/) })
 
 const subjectSchema = z.object({
   type: z.enum(['company', 'department', 'person', 'key', 'channel', 'upstream']),
@@ -77,9 +80,18 @@ export const alertDetailResponseSchema = z.object({
   timeline: z.array(z.object({ id: z.string(), type: z.enum(['detected', 'notification', 'acknowledged', 'closed']), occurredAt: z.string().datetime(), title: z.string(), description: z.string() })),
 })
 
+export const alertActionResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  item: alertEventSchema,
+  operation: z.object({ action: z.enum(['acknowledge', 'close']), idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export type AlertsQuery = z.infer<typeof alertsQuerySchema>
 export type AlertEvent = z.infer<typeof alertEventSchema>
 export type AlertRule = z.infer<typeof alertRuleSchema>
+export type AlertAcknowledgeBody = z.infer<typeof alertAcknowledgeBodySchema>
+export type AlertCloseBody = z.infer<typeof alertCloseBodySchema>
+export type AlertActionResponse = z.infer<typeof alertActionResponseSchema>
 
 const notificationConfig = {
   configured: false as const,
@@ -147,5 +159,5 @@ export function createDatabaseAlertDetail(database: PlatformDatabase, id: string
   ]
   if (item.acknowledgedAt) timeline.push({ id: `${id}-ack`, type: 'acknowledged', occurredAt: item.acknowledgedAt, title: '事件已确认', description: `${item.assignee?.name ?? '管理员'}已接手处理。` })
   if (item.closedAt) timeline.push({ id: `${id}-closed`, type: 'closed', occurredAt: item.closedAt, title: '事件已关闭', description: '指标已恢复或演示事件完成处置。' })
-  return { meta: meta(newApi, now, scope), item, analysis: { cause: item.summary, impact: item.environment === 'experiment' ? '影响限定在 CPA 实验组，不会跨组回退至生产路径。' : '可能影响对应生产范围；当前软额度告警不会阻断请求。', recommendation: item.source === 'balance' ? '核对供应商账单并安排充值，完成真实通知配置后再启用自动提醒。' : item.source === 'credential' ? '在凭证管理系统中续期并重新验证，不要在页面或日志中粘贴凭证。' : '按关联请求 ID 与渠道健康状态定位问题；确认、关闭和静默将在写接口与审计完成后开放。', rawUpstreamBodyAvailable: false as const }, timeline }
+  return { meta: meta(newApi, now, scope), item, analysis: { cause: item.summary, impact: item.environment === 'experiment' ? '影响限定在 CPA 实验组，不会跨组回退至生产路径。' : '可能影响对应生产范围；当前软额度告警不会阻断请求。', recommendation: item.source === 'balance' ? '核对供应商账单并安排充值，完成真实通知配置后再启用自动提醒。' : item.source === 'credential' ? '在凭证管理系统中续期并重新验证，不要在页面或日志中粘贴凭证。' : '可确认或关闭本地 SQLite 模拟事件并留下审计摘要；静默、外部通知和真实事件处置仍未开放。', rawUpstreamBodyAvailable: false as const }, timeline }
 }

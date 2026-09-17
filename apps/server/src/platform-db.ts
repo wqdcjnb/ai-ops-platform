@@ -431,6 +431,21 @@ export interface PlatformSyntheticChannelCheckResult extends PlatformSyntheticCh
   idempotent: boolean
 }
 
+export interface PlatformLocalAlertAction {
+  id: string
+  action: 'acknowledge' | 'close'
+  actorUserId: string
+}
+
+export interface PlatformLocalAlertActionResult {
+  id: string
+  status: 'acknowledged' | 'closed'
+  assigneeUserId: string | null
+  acknowledgedAt: string | null
+  closedAt: string | null
+  idempotent: boolean
+}
+
 export interface PlatformAuditEventSeed {
   id: string
   actorUserId?: string | null
@@ -975,18 +990,7 @@ export class PlatformDatabase {
       notification_state, notification_channel, notification_sent_at, silence_active, silence_until,
       related_request_ids_json
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      title = excluded.title, summary = excluded.summary, severity = excluded.severity, status = excluded.status,
-      environment = excluded.environment, source = excluded.source, subject_type = excluded.subject_type,
-      subject_id = excluded.subject_id, subject_name = excluded.subject_name, rule_id = excluded.rule_id,
-      rule_name = excluded.rule_name, rule_metric = excluded.rule_metric, threshold_label = excluded.threshold_label,
-      trigger_value_label = excluded.trigger_value_label, trigger_comparator = excluded.trigger_comparator,
-      first_occurred_at = excluded.first_occurred_at, last_occurred_at = excluded.last_occurred_at,
-      occurrences = excluded.occurrences, assignee_user_id = excluded.assignee_user_id,
-      acknowledged_at = excluded.acknowledged_at, closed_at = excluded.closed_at,
-      notification_state = excluded.notification_state, notification_channel = excluded.notification_channel,
-      notification_sent_at = excluded.notification_sent_at, silence_active = excluded.silence_active,
-      silence_until = excluded.silence_until, related_request_ids_json = excluded.related_request_ids_json`).run(
+    ON CONFLICT(id) DO NOTHING`).run(
       seed.id, seed.title, seed.summary, seed.severity, seed.status, seed.environment, seed.source,
       seed.subject.type, seed.subject.id, seed.subject.name, seed.rule.id, seed.rule.name, seed.rule.metric,
       seed.rule.thresholdLabel, seed.trigger.valueLabel, seed.trigger.comparator, seed.firstOccurredAt,
@@ -1388,6 +1392,46 @@ export class PlatformDatabase {
     const stored = current()
     if (!stored) throw new Error('CHANNEL_CHECK_NOT_FOUND')
     return { ...stored, idempotent: false }
+  }
+
+  applyLocalAlertAction(action: PlatformLocalAlertAction, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformLocalAlertActionResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listAlertEvents().find((item) => item.id === action.id) ?? null
+    if (previousOperation) {
+      const previousSummary = JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown }
+      if (previousOperation.resourceId !== auditEvent.resourceId || previousSummary.idempotencyFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = current()
+      if (!stored || (stored.status !== 'acknowledged' && stored.status !== 'closed')) throw new Error('ALERT_ACTION_NOT_FOUND')
+      return { id: stored.id, status: stored.status, assigneeUserId: stored.assigneeUserId, acknowledgedAt: stored.acknowledgedAt, closedAt: stored.closedAt, idempotent: true }
+    }
+    const existing = current()
+    if (!existing) return null
+    if (existing.status === 'closed') throw new Error('ALERT_ALREADY_CLOSED')
+    if (action.action === 'acknowledge' && existing.status === 'acknowledged') throw new Error('ALERT_ALREADY_ACKNOWLEDGED')
+
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      let changes: number | bigint = 0
+      if (action.action === 'acknowledge') {
+        changes = this.db.prepare(`UPDATE alert_events SET status = 'acknowledged', assignee_user_id = ?, acknowledged_at = ?
+          WHERE id = ? AND status = 'open'`).run(action.actorUserId, timestamp, action.id).changes
+      } else {
+        changes = this.db.prepare(`UPDATE alert_events SET status = 'closed', assignee_user_id = COALESCE(assignee_user_id, ?),
+          acknowledged_at = COALESCE(acknowledged_at, ?), closed_at = ? WHERE id = ? AND status IN ('open', 'acknowledged')`).run(
+          action.actorUserId, timestamp, timestamp, action.id,
+        ).changes
+      }
+      if (changes !== 1) throw new Error('ALERT_ACTION_CONFLICT')
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = current()
+    if (!stored || (stored.status !== 'acknowledged' && stored.status !== 'closed')) throw new Error('ALERT_ACTION_NOT_FOUND')
+    return { id: stored.id, status: stored.status, assigneeUserId: stored.assigneeUserId, acknowledgedAt: stored.acknowledgedAt, closedAt: stored.closedAt, idempotent: false }
   }
 
   listAuditEvents() {

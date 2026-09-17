@@ -126,6 +126,29 @@ describe('platform database migrations', () => {
     database.close()
   })
 
+  it('keeps locally acknowledged and closed simulated alerts when demo seeds run again', () => {
+    const now = new Date('2026-09-17T10:00:00.000Z')
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
+    seedDemoData(database, now)
+    const acknowledged = database.applyLocalAlertAction({ id: 'alert-error-global', action: 'acknowledge', actorUserId: 'user-super-admin' }, {
+      id: 'audit-alert-ack-persist-test', actorUserId: 'user-super-admin', action: 'acknowledge', resourceType: 'alert', resourceId: 'alert-error-global',
+      result: 'success', requestId: 'req-alert-ack-persist-test', summary: { idempotencyFingerprint: 'alert-ack-test-fingerprint', message: '本地模拟告警确认。' },
+    }, now)
+    expect(acknowledged).toMatchObject({ id: 'alert-error-global', status: 'acknowledged', assigneeUserId: 'user-super-admin', acknowledgedAt: now.toISOString(), idempotent: false })
+    const closed = database.applyLocalAlertAction({ id: 'alert-balance-low', action: 'close', actorUserId: 'user-super-admin' }, {
+      id: 'audit-alert-close-persist-test', actorUserId: 'user-super-admin', action: 'update', resourceType: 'alert', resourceId: 'alert-balance-low',
+      result: 'success', requestId: 'req-alert-close-persist-test', summary: { idempotencyFingerprint: 'alert-close-test-fingerprint', message: '本地模拟告警关闭。' },
+    }, now)
+    expect(closed).toMatchObject({ id: 'alert-balance-low', status: 'closed', assigneeUserId: 'user-super-admin', acknowledgedAt: now.toISOString(), closedAt: now.toISOString(), idempotent: false })
+    seedDemoData(database, now)
+    expect(database.listAlertEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'alert-error-global', status: 'acknowledged', assigneeUserId: 'user-super-admin' }),
+      expect.objectContaining({ id: 'alert-balance-low', status: 'closed', assigneeUserId: 'user-super-admin' }),
+    ]))
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 6 })
+    database.close()
+  })
+
   it('marks expired synthetic metadata and records a proof without storing conversation bodies', () => {
     const now = new Date('2026-09-17T10:00:00.000Z')
     const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
