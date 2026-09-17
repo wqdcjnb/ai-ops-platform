@@ -781,9 +781,18 @@ describe('BFF', () => {
     expect(body.items[0]).toMatchObject({ id: 'alert-cpa-upstream', severity: 'warning', status: 'open', environment: 'experiment' })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|rawUpstreamBody/i)
 
+    const related = await createApp().inject({ method: 'GET', url: '/api/alerts?subjectId=upstream-cpa-lab-2' })
+    expect(related.statusCode).toBe(200)
+    expect(related.json().items).toHaveLength(1)
+    expect(related.json().items[0]).toMatchObject({ id: 'alert-cpa-credential', subject: { id: 'upstream-cpa-lab-2' } })
+
     const invalid = await createApp().inject({ method: 'GET', url: '/api/alerts?severity=fatal' })
     expect(invalid.statusCode).toBe(400)
     expect(invalid.json().error.code).toBe('INVALID_REQUEST')
+
+    const invalidSubject = await createApp().inject({ method: 'GET', url: '/api/alerts?subjectId=upstream_cpa_lab_2' })
+    expect(invalidSubject.statusCode).toBe(400)
+    expect(invalidSubject.json().error.code).toBe('INVALID_REQUEST')
   })
 
   it('returns read-only alert rules and safe event details with stable missing errors', async () => {

@@ -4,8 +4,10 @@ import {
   IconAlertTriangle, IconBan, IconChevronRight, IconCircleCheck, IconClock, IconFilter,
   IconFlask, IconKey, IconLock, IconRefresh, IconSearch, IconServer2, IconShieldCheck, IconX,
 } from '@tabler/icons-vue'
+import { useRouter } from 'vue-router'
 import { fetchUpstreams, UpstreamsApiError, type UpstreamFilters, type UpstreamItem, type UpstreamsResponse } from '../upstreams-api'
 
+const router = useRouter()
 const upstreams = ref<UpstreamsResponse | null>(null)
 const selected = ref<UpstreamItem | null>(null)
 const search = ref('')
@@ -38,6 +40,11 @@ function dateText(value: string | null | undefined) { return value ? new Intl.Da
 function latencyText(value: number | null) { return value === null ? '—' : value >= 1_000 ? `${(value / 1_000).toFixed(1)}s` : `${value}ms` }
 function percentTone(value: number) { return value >= 90 ? 'danger' : value >= 75 ? 'warning' : 'healthy' }
 function openDetail(item: UpstreamItem) { selected.value = item }
+function canViewRelatedAlerts(item: UpstreamItem) { return item.status !== 'unconfigured' && Boolean(item.recentError) }
+function viewRelatedAlerts(item: UpstreamItem) {
+  selected.value = null
+  void router.push({ path: '/alerts', query: { subjectId: item.id } })
+}
 
 async function loadData() {
   request?.abort()
@@ -79,7 +86,7 @@ onBeforeUnmount(() => request?.abort())
         <form class="upstream-filters" @submit.prevent="loadData"><label class="upstream-search"><IconSearch :size="16" /><input v-model="search" maxlength="60" type="search" placeholder="搜索账号、供应商或模型" /></label><label><IconServer2 :size="15" /><select v-model="type" @change="loadData"><option value="all">全部类型</option><option value="official_api">官方 API</option><option value="cpa_oauth">CPA OAuth</option></select></label><label><IconFilter :size="15" /><select v-model="status" @change="loadData"><option value="all">全部状态</option><option value="healthy">健康</option><option value="degraded">需关注</option><option value="auth_required">认证异常</option><option value="offline">离线</option><option value="unconfigured">未配置</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
 
         <div v-if="upstreams.items.length" class="upstream-account-grid">
-          <button v-for="item in upstreams.items" :key="item.id" class="upstream-account-card" :class="{ experiment: item.environment === 'experiment' }" @click="openDetail(item)">
+          <button v-for="item in upstreams.items" :key="item.id" class="upstream-account-card" :class="{ experiment: item.environment === 'experiment' }" :aria-label="`查看 ${item.name} 账号详情`" @click="openDetail(item)">
             <div class="upstream-card-head"><span><IconFlask v-if="item.environment === 'experiment'" :size="19" /><IconServer2 v-else :size="19" /></span><div><strong>{{ item.name }}</strong><small>{{ item.provider }} · {{ item.models.join(' / ') }}</small></div><span class="route-status" :class="`status-${item.status}`"><i />{{ statusText[item.status] }}</span></div>
             <div class="upstream-card-facts"><span><small>凭据</small><strong>{{ item.credentialConfigured ? validationText[item.credentialValidation] : '未配置' }}</strong></span><span><small>{{ item.type === 'official_api' ? '余额' : '5 小时窗口' }}</small><strong>{{ item.type === 'official_api' ? item.balance.label : `${item.windows[0]?.usedPercent ?? 0}% 已用` }}</strong></span><span><small>成功率</small><strong>{{ item.health.successRate === null ? '—' : `${item.health.successRate}%` }}</strong></span><span><small>最近检查</small><strong>{{ timeText(item.health.checkedAt) }}</strong></span></div>
             <div v-if="item.type === 'cpa_oauth'" class="window-preview"><span><i :class="percentTone(item.windows[0]?.usedPercent ?? 0)" :style="{ width: `${item.windows[0]?.usedPercent ?? 0}%` }" /></span><small v-if="item.cooldown?.active">冷却至 {{ timeText(item.cooldown.until!) }}</small><small v-else>当前无冷却</small></div>
@@ -97,7 +104,7 @@ onBeforeUnmount(() => request?.abort())
       <section class="drawer-section"><h3>凭据与检查</h3><dl class="model-facts"><div><dt>凭据配置</dt><dd>{{ selected.credentialConfigured ? '已配置' : '未配置' }}</dd></div><div><dt>验证结果</dt><dd>{{ validationText[selected.credentialValidation] }}</dd></div><div><dt>最近检查</dt><dd>{{ timeText(selected.health.checkedAt) }}</dd></div><div><dt>可用模型</dt><dd>{{ selected.models.length }} 个</dd></div></dl></section>
       <section v-if="selected.type === 'official_api'" class="drawer-section"><h3>正式容量</h3><dl class="model-facts"><div><dt>RPM</dt><dd>{{ selected.capacity?.rpm.toLocaleString('zh-CN') ?? '等待配置' }}</dd></div><div><dt>TPM</dt><dd>{{ selected.capacity?.tpm.toLocaleString('zh-CN') ?? '等待配置' }}</dd></div><div><dt>余额</dt><dd>{{ selected.balance.label }}</dd></div><div><dt>余额更新</dt><dd>{{ dateText(selected.balance.updatedAt) }}</dd></div></dl></section>
       <section v-else class="drawer-section"><h3>CPA 认证与窗口</h3><dl class="model-facts"><div><dt>认证有效期</dt><dd>{{ dateText(selected.auth?.expiresAt) }}</dd></div><div><dt>最后刷新</dt><dd>{{ dateText(selected.auth?.lastRefreshedAt) }}</dd></div></dl><div class="account-window-list"><article v-for="window in selected.windows" :key="window.id"><div><strong>{{ window.label }}</strong><em>{{ window.usedPercent }}% 已用</em></div><span><i :class="percentTone(window.usedPercent)" :style="{ width: `${window.usedPercent}%` }" /></span><small>{{ timeText(window.resetsAt) }} 重置</small></article></div><div class="cooldown-state" :class="{ active: selected.cooldown?.active }"><IconClock :size="17" /><span><strong>{{ selected.cooldown?.active ? '账号处于冷却' : '当前无冷却' }}</strong><small v-if="selected.cooldown?.active">{{ selected.cooldown.reason }} · {{ timeText(selected.cooldown.until!) }} 结束</small><small v-else>可以承载隔离实验流量</small></span></div></section>
-      <section class="drawer-section"><h3>最近错误</h3><div v-if="selected.recentError" class="channel-error-detail"><IconAlertTriangle :size="18" /><div><strong>{{ errorText[selected.recentError.category] }}</strong><p>{{ selected.recentError.summary }}</p><small>首次 {{ timeText(selected.recentError.firstSeenAt) }} · 最近 {{ timeText(selected.recentError.lastSeenAt) }}</small></div></div><div v-else class="channel-clear"><IconCircleCheck :size="18" />最近检查未发现异常</div></section>
+      <section class="drawer-section"><h3>最近错误</h3><div v-if="selected.recentError" class="channel-error-detail"><IconAlertTriangle :size="18" /><div><strong>{{ errorText[selected.recentError.category] }}</strong><p>{{ selected.recentError.summary }}</p><small>首次 {{ timeText(selected.recentError.firstSeenAt) }} · 最近 {{ timeText(selected.recentError.lastSeenAt) }}</small></div></div><button v-if="canViewRelatedAlerts(selected)" class="text-button related-alert-link" type="button" :aria-label="`查看 ${selected.name} 的关联模拟告警`" @click="viewRelatedAlerts(selected)"><IconAlertTriangle :size="15" />查看关联模拟告警</button><div v-else-if="!selected.recentError" class="channel-clear"><IconCircleCheck :size="18" />最近检查未发现异常</div></section>
       <section class="safe-probe-note"><IconShieldCheck :size="18" /><span><strong>凭据安全边界</strong>页面只返回是否配置和验证结果；不返回完整密钥、可识别片段、OAuth Token 或上游响应正文。</span></section>
       <footer class="drawer-actions"><button class="btn btn-white" disabled><IconClock :size="16" />认证历史</button><button class="btn" disabled><IconRefresh :size="16" />验证连接</button></footer>
     </aside></div>

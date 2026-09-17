@@ -12,6 +12,7 @@ const notificationStateSchema = z.enum(['not_configured', 'not_sent', 'sent', 'f
 
 export const alertsQuerySchema = z.object({
   search: z.string().trim().max(80).default(''),
+  subjectId: z.string().trim().max(80).regex(/^[a-z0-9-]*$/).default(''),
   severity: z.union([z.literal('all'), severitySchema]).default('all'),
   status: z.union([z.literal('all'), statusSchema]).default('all'),
   source: z.union([z.literal('all'), sourceSchema]).default('all'),
@@ -140,9 +141,11 @@ export function createDatabaseAlertSummary(database: PlatformDatabase, newApi: N
 export function createDatabaseAlerts(database: PlatformDatabase, query: AlertsQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
   const events = databaseEvents(database, scope)
   const search = query.search.toLocaleLowerCase('zh-CN')
+  const subjectId = query.subjectId
   const filtered = events.filter((item) => {
     const matchesSearch = !search || [item.id, item.title, item.summary, item.subject.name, item.rule.name].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
-    return matchesSearch && (query.severity === 'all' || item.severity === query.severity) && (query.status === 'all' || item.status === query.status) && (query.source === 'all' || item.source === query.source) && (query.environment === 'all' || item.environment === query.environment)
+    const matchesSubject = !subjectId || item.subject.id === subjectId
+    return matchesSearch && matchesSubject && (query.severity === 'all' || item.severity === query.severity) && (query.status === 'all' || item.status === query.status) && (query.source === 'all' || item.source === query.source) && (query.environment === 'all' || item.environment === query.environment)
   })
   const start = (query.page - 1) * query.pageSize
   return { meta: meta(newApi, now, scope), options: { sources: [{ id: 'quota' as const, label: '额度' }, { id: 'traffic' as const, label: '流量' }, { id: 'error_rate' as const, label: '错误率' }, { id: 'balance' as const, label: '余额' }, { id: 'credential' as const, label: '凭证' }, { id: 'upstream' as const, label: '上游' }] }, items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) } }

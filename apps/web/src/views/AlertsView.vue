@@ -11,7 +11,9 @@ const alerts = ref<AlertsResponse | null>(null)
 const rules = ref<AlertRules | null>(null)
 const detail = ref<AlertDetail | null>(null)
 const activeTab = ref<'events' | 'rules'>('events')
-const search = ref(typeof window === 'undefined' ? '' : new URLSearchParams(window.location.search).get('search') ?? '')
+const initialQuery = typeof window === 'undefined' ? null : new URLSearchParams(window.location.search)
+const search = ref(initialQuery?.get('search') ?? '')
+const subjectId = ref((initialQuery?.get('subjectId') ?? '').match(/^[a-z0-9-]{1,80}$/) ? initialQuery!.get('subjectId')! : '')
 const severity = ref<AlertFilters['severity']>('all')
 const status = ref<AlertFilters['status']>('all')
 const source = ref<AlertFilters['source']>('all')
@@ -33,6 +35,7 @@ const statusText = { open: '待处理', acknowledged: '已确认', closed: '已�
 const sourceText = { quota: '额度', traffic: '流量', error_rate: '错误率', balance: '余额', credential: '凭证', upstream: '上游' }
 const environmentText = { production: '生产', experiment: '实验' }
 const updatedAt = computed(() => summary.value ? timeText(summary.value.meta.generatedAt) : '—')
+const hasSubjectFilter = computed(() => Boolean(subjectId.value))
 const summaryCards = computed(() => {
   const value = summary.value?.summary
   return [
@@ -44,10 +47,11 @@ const summaryCards = computed(() => {
   ]
 })
 
-function filters(): AlertFilters { return { search: search.value.trim(), severity: severity.value, status: status.value, source: source.value, environment: environment.value, page: page.value, pageSize } }
+function filters(): AlertFilters { return { search: search.value.trim(), subjectId: subjectId.value, severity: severity.value, status: status.value, source: source.value, environment: environment.value, page: page.value, pageSize } }
 function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) }
 function applyFilters() { page.value = 1; void loadEvents() }
-function clearFilters() { search.value = ''; severity.value = 'all'; status.value = 'all'; source.value = 'all'; environment.value = 'all'; applyFilters() }
+function clearFilters() { search.value = ''; subjectId.value = ''; severity.value = 'all'; status.value = 'all'; source.value = 'all'; environment.value = 'all'; applyFilters() }
+function clearSubjectFilter() { subjectId.value = ''; page.value = 1; void loadEvents() }
 function changePage(next: number) { if (!alerts.value || next < 1 || next > alerts.value.pagination.totalPages) return; page.value = next; void loadEvents() }
 
 async function loadEvents(signal?: AbortSignal) { alerts.value = await fetchAlerts(filters(), signal) }
@@ -124,6 +128,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 
         <template v-if="activeTab === 'events'">
           <form class="alert-filters" @submit.prevent="applyFilters"><label class="alert-search"><IconSearch :size="15" /><input v-model="search" aria-label="关键词" maxlength="80" type="search" placeholder="事件、对象、规则或告警 ID" /></label><label><IconAlertTriangle :size="14" /><select v-model="severity" aria-label="严重度" @change="applyFilters"><option value="all">全部严重度</option><option value="critical">严重</option><option value="warning">警告</option><option value="info">提示</option></select></label><label><IconCircleCheck :size="14" /><select v-model="status" aria-label="状态" @change="applyFilters"><option value="all">全部状态</option><option value="open">待处理</option><option value="acknowledged">已确认</option><option value="closed">已关闭</option></select></label><label><IconFilter :size="14" /><select v-model="source" aria-label="来源" @change="applyFilters"><option value="all">全部来源</option><option v-for="option in alerts.options.sources" :key="option.id" :value="option.id">{{ option.label }}</option></select></label><label><IconShieldCheck :size="14" /><select v-model="environment" aria-label="环境" @change="applyFilters"><option value="all">全部环境</option><option value="production">生产</option><option value="experiment">实验</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
+          <div v-if="hasSubjectFilter" class="alert-related-filter" role="status"><span><IconFilter :size="15" />正在显示关联对象的模拟告警</span><button class="text-button" type="button" @click="clearSubjectFilter">清除关联</button></div>
           <div v-if="alerts.items.length" class="alert-event-list"><article v-for="item in alerts.items" :key="item.id" class="alert-event" :class="`severity-${item.severity}`"><span class="alert-severity-icon"><IconAlertTriangle v-if="item.severity !== 'info'" :size="18" /><IconAlertCircle v-else :size="18" /></span><div class="alert-event-main"><div><span class="severity-chip" :class="item.severity">{{ severityText[item.severity] }}</span><span class="environment-tag" :class="item.environment">{{ environmentText[item.environment] }}</span><code>{{ item.id }}</code></div><strong>{{ item.title }}</strong><p>{{ item.summary }}</p><small>{{ item.subject.name }} · {{ sourceText[item.source] }} · {{ item.rule.name }}</small></div><div class="alert-trigger"><small>触发值 / 阈值</small><strong>{{ item.trigger.valueLabel }}</strong><span>{{ item.rule.thresholdLabel }}</span></div><div class="alert-history"><small>最近发生</small><strong>{{ timeText(item.lastOccurredAt) }}</strong><span>{{ item.occurrences }} 次 · {{ item.silence.active ? '静默中' : '未静默' }}</span></div><div class="alert-owner"><span class="alert-state" :class="item.status"><i />{{ statusText[item.status] }}</span><small>{{ item.assignee?.name ?? '未分派' }}</small><em>{{ item.notification.state === 'not_configured' ? '通知未配置' : '通知已处理' }}</em></div><button class="row-action enabled" :disabled="detailLoadingId === item.id" :aria-label="`查看 ${item.title} 详情`" @click="openDetail(item)"><IconRefresh v-if="detailLoadingId === item.id" :size="15" class="spinning" /><IconChevronRight v-else :size="17" /></button></article></div>
           <div v-else class="people-empty"><IconBellOff :size="25" /><strong>没有符合条件的告警事件</strong><span>调整严重度、状态、来源或环境筛选。</span><button class="text-button" @click="clearFilters">清除筛选</button></div>
           <footer class="usage-pagination"><span>共 {{ alerts.pagination.total }} 条 · 第 {{ alerts.pagination.page }}/{{ Math.max(alerts.pagination.totalPages, 1) }} 页</span><div><button :disabled="alerts.pagination.page <= 1" aria-label="上一页" @click="changePage(alerts.pagination.page - 1)"><IconArrowLeft :size="15" /></button><button :disabled="alerts.pagination.page >= alerts.pagination.totalPages" aria-label="下一页" @click="changePage(alerts.pagination.page + 1)"><IconArrowRight :size="15" /></button></div></footer>
