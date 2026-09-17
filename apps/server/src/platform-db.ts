@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
-import { createConversationAuditMetadataSeeds, type ConversationAuditMetadataSeed } from './conversation-audit-seeds.js'
+import { createConversationAuditMetadataSeeds, createConversationUsageLinkSeeds, type ConversationAuditMetadataSeed, type ConversationUsageLinkSeed } from './conversation-audit-seeds.js'
 
 const migrationSql = [
   `CREATE TABLE IF NOT EXISTS departments (
@@ -277,6 +277,12 @@ const migrationSql = [
     notice TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS conversation_audit_cleanup_runs_completed_idx ON conversation_audit_cleanup_runs(completed_at DESC);`,
+  `CREATE TABLE IF NOT EXISTS conversation_usage_links (
+    record_id TEXT PRIMARY KEY REFERENCES conversation_audit_records(id),
+    usage_request_id TEXT NOT NULL REFERENCES usage_requests(request_id),
+    link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed'))
+  );
+  CREATE INDEX IF NOT EXISTS conversation_usage_links_usage_idx ON conversation_usage_links(usage_request_id);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -490,6 +496,11 @@ export interface PlatformConversationAuditRecord {
 export interface ConversationAuditCleanupStatus {
   proofRecords: number
   lastRun: { triggeredBy: 'startup'; completedAt: string; expiredRecords: number; proofRecords: number } | null
+}
+
+export interface PlatformConversationUsageLink {
+  usageRequestId: string
+  linkSource: 'synthetic_seed'
 }
 
 export interface PlatformAuthSessionCreate {
@@ -837,6 +848,14 @@ export class PlatformDatabase {
       seed.policy.label, seed.policy.scope, seed.policy.expiresAt, seed.state, seed.redaction.status,
       seed.redaction.findings, seed.grouping.type, Number(seed.grouping.reliable), seed.grouping.label,
       seed.metrics.turns, seed.metrics.toolCalls, seed.metrics.totalTokens, Number(seed.contentAccessAvailable),
+    )
+  }
+
+  seedConversationUsageLink(seed: ConversationUsageLinkSeed) {
+    this.db.prepare(`INSERT INTO conversation_usage_links(record_id, usage_request_id, link_source)
+      VALUES (?, ?, ?)
+      ON CONFLICT(record_id) DO UPDATE SET usage_request_id = excluded.usage_request_id, link_source = excluded.link_source`).run(
+      seed.recordId, seed.usageRequestId, seed.linkSource,
     )
   }
 
@@ -1315,6 +1334,12 @@ export class PlatformDatabase {
       ORDER BY r.captured_at DESC, r.id DESC`).all() as unknown as PlatformConversationAuditRecord[]
   }
 
+  getConversationUsageLink(recordId: string): PlatformConversationUsageLink | null {
+    const row = this.db.prepare(`SELECT usage_request_id AS usageRequestId, link_source AS linkSource
+      FROM conversation_usage_links WHERE record_id = ?`).get(recordId) as PlatformConversationUsageLink | undefined
+    return row ?? null
+  }
+
   cleanupConversationAuditMetadata(triggeredBy: 'startup', now = this.now()) {
     const completedAt = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
@@ -1433,6 +1458,7 @@ export class PlatformDatabase {
       conversationAuditRecords: count('conversation_audit_records'),
       conversationAuditCleanupRuns: count('conversation_audit_cleanup_runs'),
       conversationAuditExpiryProofs: count('conversation_audit_expiry_proofs'),
+      conversationUsageLinks: count('conversation_usage_links'),
       businessRules: count('system_business_rules'),
       featureFlags: count('system_feature_flags'),
       roleDefinitions: count('system_role_definitions'),
@@ -1607,6 +1633,7 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
   for (const { minutes, ...request } of usageSeeds) database.seedUsageRequest({ ...request, occurredAt: new Date(now.getTime() - minutes * 60_000).toISOString() })
 
   for (const record of createConversationAuditMetadataSeeds(now)) database.seedConversationAuditRecord(record)
+  for (const link of createConversationUsageLinkSeeds()) database.seedConversationUsageLink(link)
 
   const at = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString()
   const later = (minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString()

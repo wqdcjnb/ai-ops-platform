@@ -519,7 +519,7 @@ export function buildApp(options: BuildAppOptions = {}) {
         ],
       },
     })
-    const result = createDatabaseConversationAccess(record, request.body, now, { id: accessEvent.id, persisted: true })
+    const result = createDatabaseConversationAccess(database, record, request.body, now, { id: accessEvent.id, persisted: true })
     if (result) return result
     return reply.status(404).send({ error: { code: 'CONVERSATION_CONTENT_UNAVAILABLE', message: '该记录没有可访问的对话内容', requestId: request.id } })
   })

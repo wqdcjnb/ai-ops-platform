@@ -14,6 +14,12 @@ export interface ConversationAuditMetadataSeed {
   contentAccessAvailable: boolean
 }
 
+export interface ConversationUsageLinkSeed {
+  recordId: string
+  usageRequestId: string
+  linkSource: 'synthetic_seed'
+}
+
 const ago = (now: Date, minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString()
 const after = (now: Date, minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString()
 
@@ -26,5 +32,17 @@ export function createConversationAuditMetadataSeeds(now: Date): ConversationAud
     { id: 'conv-audit-expired-05', requestId: 'req-260914-d702', capturedAt: ago(now, 1_460), personId: 'person-lin', key: { id: 'key-lin-1', masked: 'sk-ops••••••7F2A' }, purpose: { id: 'purpose-copy', label: '商品文案' }, model: { id: 'gpt-5.5', label: 'GPT-5.5' }, policy: { id: 'policy-key-lin-old', label: '历史测试窗口', scope: '指定 Key', expiresAt: after(now, -20) }, state: 'expired', redaction: { status: 'passed', findings: 1 }, grouping: { type: 'conversation', reliable: true, label: '会话 conv-demo-expired-05' }, metrics: { turns: 4, toolCalls: 1, totalTokens: 2_910 }, contentAccessAvailable: false },
     { id: 'conv-audit-research-06', requestId: 'req-260913-e420', capturedAt: ago(now, 2_780), personId: 'person-lin', key: { id: 'key-lin-3', masked: 'sk-ops••••••D410' }, purpose: { id: 'purpose-research', label: '资料整理' }, model: { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' }, policy: { id: 'policy-person-lin', label: '内容团队试点', scope: '指定人员', expiresAt: after(now, 5_760) }, state: 'captured', redaction: { status: 'passed', findings: 3 }, grouping: { type: 'conversation', reliable: true, label: '会话 conv-demo-research-06' }, metrics: { turns: 7, toolCalls: 3, totalTokens: 8_240 }, contentAccessAvailable: true },
     { id: 'conv-audit-metadata-07', requestId: 'req-260912-f815', capturedAt: ago(now, 4_310), personId: 'person-xu', key: { id: 'key-xu-3', masked: 'sk-ops••••••F055' }, purpose: { id: 'purpose-summary', label: '会议纪要' }, model: { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' }, policy: { id: 'policy-disabled', label: '默认关闭', scope: '未命中策略', expiresAt: after(now, 43_200) }, state: 'metadata_only', redaction: { status: 'not_applicable', findings: 0 }, grouping: { type: 'independent_call', reliable: false, label: '独立调用' }, metrics: { turns: 0, toolCalls: 0, totalTokens: 1_120 }, contentAccessAvailable: false },
+  ]
+}
+
+export function createConversationUsageLinkSeeds(): ConversationUsageLinkSeed[] {
+  return [
+    { recordId: 'conv-audit-copy-01', usageRequestId: 'req-demo-001', linkSource: 'synthetic_seed' },
+    { recordId: 'conv-audit-support-02', usageRequestId: 'req-demo-003', linkSource: 'synthetic_seed' },
+    { recordId: 'conv-audit-independent-03', usageRequestId: 'req-demo-002', linkSource: 'synthetic_seed' },
+    { recordId: 'conv-audit-metadata-04', usageRequestId: 'req-demo-010', linkSource: 'synthetic_seed' },
+    { recordId: 'conv-audit-expired-05', usageRequestId: 'req-demo-009', linkSource: 'synthetic_seed' },
+    { recordId: 'conv-audit-research-06', usageRequestId: 'req-demo-005', linkSource: 'synthetic_seed' },
+    { recordId: 'conv-audit-metadata-07', usageRequestId: 'req-demo-007', linkSource: 'synthetic_seed' },
   ]
 }
