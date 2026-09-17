@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 15, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
-    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'system_business_rules', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 16, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
+    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'system_business_rules', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(15)
+    expect(database.status().migrationVersion).toBe(16)
     database.close()
   })
 
@@ -15,7 +15,7 @@ describe('platform database migrations', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
     const first = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
     const second = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
-    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
+    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, conversationAuditCleanupRuns: 0, conversationAuditExpiryProofs: 0, businessRules: 5, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
@@ -71,7 +71,28 @@ describe('platform database migrations', () => {
       action: 'view_synthetic', reasonProvided: 1, reasonLength: 18, acknowledgedSensitiveScope: 1,
     })])
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
-    expect(database.status().migrationVersion).toBe(15)
+    expect(database.status().migrationVersion).toBe(16)
+    database.close()
+  })
+
+  it('marks expired synthetic metadata and records a proof without storing conversation bodies', () => {
+    const now = new Date('2026-09-17T10:00:00.000Z')
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
+    seedDemoData(database, now)
+    const internals = database as unknown as { db: { prepare: (sql: string) => { run: (...values: unknown[]) => unknown } } }
+    internals.db.prepare('UPDATE conversation_audit_records SET policy_expires_at = ? WHERE id = ?').run(now.toISOString(), 'conv-audit-copy-01')
+
+    expect(database.cleanupConversationAuditMetadata('startup', now)).toMatchObject({ triggeredBy: 'startup', completedAt: now.toISOString(), expiredRecords: 1, proofRecords: 2 })
+    expect(database.listConversationAuditRecords()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'conv-audit-copy-01', state: 'expired', contentAccessAvailable: 0 }),
+    ]))
+    expect(database.getConversationAuditCleanupStatus()).toMatchObject({
+      proofRecords: 2,
+      lastRun: { triggeredBy: 'startup', completedAt: now.toISOString(), expiredRecords: 1, proofRecords: 2 },
+    })
+    expect(database.cleanupConversationAuditMetadata('startup', now)).toMatchObject({ expiredRecords: 0, proofRecords: 0 })
+    expect(database.tableCounts()).toMatchObject({ conversationAuditCleanupRuns: 1, conversationAuditExpiryProofs: 2 })
+    expect(JSON.stringify(database.listConversationAuditRecords())).not.toMatch(/rawPrompt|rawResponse|reasonText|正文/i)
     database.close()
   })
 

@@ -261,6 +261,22 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS conversation_audit_records_captured_idx ON conversation_audit_records(captured_at DESC);
   CREATE INDEX IF NOT EXISTS conversation_audit_records_filter_idx ON conversation_audit_records(person_id, key_id, capture_state, redaction_status);`,
+  `CREATE TABLE IF NOT EXISTS conversation_audit_cleanup_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    triggered_by TEXT NOT NULL CHECK (triggered_by IN ('startup')),
+    completed_at TEXT NOT NULL,
+    expired_records INTEGER NOT NULL CHECK (expired_records >= 0),
+    proof_records INTEGER NOT NULL CHECK (proof_records >= 0),
+    content_storage_enabled INTEGER NOT NULL DEFAULT 0 CHECK (content_storage_enabled = 0)
+  );
+  CREATE TABLE IF NOT EXISTS conversation_audit_expiry_proofs (
+    record_id TEXT PRIMARY KEY REFERENCES conversation_audit_records(id),
+    cleanup_run_id INTEGER NOT NULL REFERENCES conversation_audit_cleanup_runs(id),
+    expired_at TEXT NOT NULL,
+    no_content_was_stored INTEGER NOT NULL CHECK (no_content_was_stored = 1),
+    notice TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS conversation_audit_cleanup_runs_completed_idx ON conversation_audit_cleanup_runs(completed_at DESC);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -469,6 +485,11 @@ export interface PlatformConversationAuditRecord {
   toolCalls: number
   totalTokens: number
   contentAccessAvailable: number
+}
+
+export interface ConversationAuditCleanupStatus {
+  proofRecords: number
+  lastRun: { triggeredBy: 'startup'; completedAt: string; expiredRecords: number; proofRecords: number } | null
 }
 
 export interface PlatformAuthSessionCreate {
@@ -1292,6 +1313,49 @@ export class PlatformDatabase {
       ORDER BY r.captured_at DESC, r.id DESC`).all() as unknown as PlatformConversationAuditRecord[]
   }
 
+  cleanupConversationAuditMetadata(triggeredBy: 'startup', now = this.now()) {
+    const completedAt = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const candidates = this.db.prepare(`SELECT id FROM conversation_audit_records r
+        WHERE policy_expires_at <= ? AND capture_state IN ('captured', 'expired')
+        AND NOT EXISTS (SELECT 1 FROM conversation_audit_expiry_proofs p WHERE p.record_id = r.id)
+        ORDER BY id`).all(completedAt) as Array<{ id: string }>
+      if (!candidates.length) {
+        this.db.exec('COMMIT')
+        return { triggeredBy, completedAt, expiredRecords: 0, proofRecords: 0 }
+      }
+      const run = this.db.prepare(`INSERT INTO conversation_audit_cleanup_runs(
+        triggered_by, completed_at, expired_records, proof_records, content_storage_enabled
+      ) VALUES (?, ?, ?, ?, 0)`).run(triggeredBy, completedAt, 0, candidates.length) as { lastInsertRowid: bigint }
+      let expiredRecords = 0
+      const expire = this.db.prepare(`UPDATE conversation_audit_records
+        SET capture_state = 'expired', content_access_available = 0
+        WHERE id = ? AND capture_state = 'captured'`)
+      const proof = this.db.prepare(`INSERT INTO conversation_audit_expiry_proofs(
+        record_id, cleanup_run_id, expired_at, no_content_was_stored, notice
+      ) VALUES (?, ?, ?, 1, ?)`)
+      for (const candidate of candidates) {
+        expiredRecords += Number(expire.run(candidate.id).changes)
+        proof.run(candidate.id, Number(run.lastInsertRowid), completedAt, '仅保存合成审计元数据；本地 SQLite 从未存储对话正文，因此没有正文删除操作。')
+      }
+      this.db.prepare('UPDATE conversation_audit_cleanup_runs SET expired_records = ? WHERE id = ?').run(expiredRecords, Number(run.lastInsertRowid))
+      this.db.exec('COMMIT')
+      return { triggeredBy, completedAt, expiredRecords, proofRecords: candidates.length }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getConversationAuditCleanupStatus(): ConversationAuditCleanupStatus {
+    const proofRecords = (this.db.prepare('SELECT COUNT(*) AS count FROM conversation_audit_expiry_proofs').get() as { count: number }).count
+    const lastRun = this.db.prepare(`SELECT triggered_by AS triggeredBy, completed_at AS completedAt,
+      expired_records AS expiredRecords, proof_records AS proofRecords
+      FROM conversation_audit_cleanup_runs ORDER BY id DESC LIMIT 1`).get() as ConversationAuditCleanupStatus['lastRun'] | undefined
+    return { proofRecords, lastRun: lastRun ?? null }
+  }
+
   createAuthSession(session: PlatformAuthSessionCreate, now = this.now()) {
     this.db.prepare(`INSERT INTO user_sessions(id, user_id, token_hash, csrf_token_hash, expires_at, created_at, revoked_at)
       VALUES (?, ?, ?, ?, ?, ?, NULL)`).run(
@@ -1365,6 +1429,8 @@ export class PlatformDatabase {
       alertEvents: count('alert_events'),
       conversationAccessEvents: count('conversation_access_events'),
       conversationAuditRecords: count('conversation_audit_records'),
+      conversationAuditCleanupRuns: count('conversation_audit_cleanup_runs'),
+      conversationAuditExpiryProofs: count('conversation_audit_expiry_proofs'),
       businessRules: count('system_business_rules'),
       featureFlags: count('system_feature_flags'),
       roleDefinitions: count('system_role_definitions'),

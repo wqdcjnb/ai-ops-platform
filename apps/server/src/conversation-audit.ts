@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { AppRole } from './auth.js'
-import type { PlatformConversationAuditRecord, PlatformDatabase } from './platform-db.js'
+import type { ConversationAuditCleanupStatus, PlatformConversationAuditRecord, PlatformDatabase } from './platform-db.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const captureStateSchema = z.enum(['captured', 'metadata_only', 'expired'])
@@ -47,7 +47,7 @@ export const conversationAuditResponseSchema = z.object({
   meta: metaSchema,
   accessControl: z.object({ currentRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), serverRbacVerified: z.literal(true), contentRequiresReason: z.literal(true), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), captured: z.number().int().nonnegative(), metadataOnly: z.number().int().nonnegative(), expiringSoon: z.number().int().nonnegative(), independentCalls: z.number().int().nonnegative(), reviewRequired: z.number().int().nonnegative() }),
-  scope: z.object({ defaultCaptureEnabled: z.literal(false), activePolicies: z.number().int().nonnegative(), nearestExpiryAt: z.string().datetime(), storageEncryptedVerified: z.literal(false), accessAuditPersisted: z.boolean(), notice: z.string() }),
+  scope: z.object({ defaultCaptureEnabled: z.literal(false), activePolicies: z.number().int().nonnegative(), nearestExpiryAt: z.string().datetime(), storageEncryptedVerified: z.literal(false), accessAuditPersisted: z.boolean(), retention: z.object({ mode: z.literal('metadata_only'), proofRecords: z.number().int().nonnegative(), lastRunAt: z.string().datetime().nullable(), notice: z.string() }), notice: z.string() }),
   options: z.object({ people: z.array(optionSchema), keys: z.array(optionSchema), purposes: z.array(optionSchema), models: z.array(optionSchema), policies: z.array(optionSchema) }),
   items: z.array(recordSchema),
   pagination: z.object({ page: z.number().int().positive(), pageSize: z.number().int().positive(), total: z.number().int().nonnegative(), totalPages: z.number().int().nonnegative() }),
@@ -120,7 +120,7 @@ function filterRecords(all: ConversationAuditRecord[], query: ConversationAuditQ
   })
 }
 
-function createConversationAuditResponse(all: ConversationAuditRecord[], query: ConversationAuditQuery, now: Date, currentRole: AppRole, source: 'demo' | 'database', accessAuditPersisted: boolean) {
+function createConversationAuditResponse(all: ConversationAuditRecord[], query: ConversationAuditQuery, now: Date, currentRole: AppRole, source: 'demo' | 'database', accessAuditPersisted: boolean, cleanupStatus: ConversationAuditCleanupStatus | null = null) {
   const filtered = filterRecords(all, query, now)
   const start = (query.page - 1) * query.pageSize
   const unique = <T extends { id: string; label: string }>(values: T[]) => [...new Map(values.map((item) => [item.id, item])).values()]
@@ -130,14 +130,31 @@ function createConversationAuditResponse(all: ConversationAuditRecord[], query: 
     meta: { source, generatedAt: now.toISOString(), period: query.period, notice: databaseMetadata ? 'SQLite 仅保存可筛选的合成审计元数据；不保存真实正文、原始提示词或查看原因。' : '独立审计存储尚未接入；列表为不含真实正文的安全演示数据' },
     accessControl: { currentRole, serverRbacVerified: true as const, contentRequiresReason: true as const, notice: '当前请求已通过服务端超级管理员 RBAC；查看脱敏内容仍要求填写原因。' },
     summary: { total: filtered.length, captured: filtered.filter((item) => item.state === 'captured').length, metadataOnly: filtered.filter((item) => item.state === 'metadata_only').length, expiringSoon: filtered.filter((item) => item.state === 'captured' && new Date(item.policy.expiresAt).getTime() - now.getTime() <= 1_440 * 60_000).length, independentCalls: filtered.filter((item) => item.grouping.type === 'independent_call').length, reviewRequired: filtered.filter((item) => item.redaction.status === 'review_required').length },
-    scope: { defaultCaptureEnabled: false as const, activePolicies: 3, nearestExpiryAt: expiry, storageEncryptedVerified: false as const, accessAuditPersisted, notice: databaseMetadata ? '默认关闭采集；SQLite 仅保存合成演示元数据。查看合成内容时，访问元数据与统一审计事件同时写入；原因原文、真实正文、加密存储和到期清理仍未验收。' : '默认关闭采集；演示页面不代表正文加密、访问审计或到期清理已经验收。' },
+    scope: {
+      defaultCaptureEnabled: false as const,
+      activePolicies: 3,
+      nearestExpiryAt: expiry,
+      storageEncryptedVerified: false as const,
+      accessAuditPersisted,
+      retention: {
+        mode: 'metadata_only' as const,
+        proofRecords: cleanupStatus?.proofRecords ?? 0,
+        lastRunAt: cleanupStatus?.lastRun?.completedAt ?? null,
+        notice: databaseMetadata
+          ? cleanupStatus?.proofRecords
+            ? '本地到期证明仅确认合成元数据已到期且 SQLite 从未存储正文；不构成真实正文删除证明。'
+            : '尚未发现需要生成本地到期证明的合成元数据；真实正文清理未接入。'
+          : '演示页面未执行数据库到期处理。',
+      },
+      notice: databaseMetadata ? '默认关闭采集；SQLite 仅保存合成演示元数据。查看合成内容时，访问元数据与统一审计事件同时写入；原因原文、真实正文和加密存储仍未验收。' : '默认关闭采集；演示页面不代表正文加密、访问审计或到期清理已经验收。',
+    },
     options: { people: unique(all.map((item) => ({ id: item.person.id, label: item.person.name }))), keys: unique(all.map((item) => ({ id: item.key.id, label: item.key.masked }))), purposes: unique(all.map((item) => item.purpose)), models: unique(all.map((item) => ({ id: item.model.id, label: item.model.label }))), policies: unique(all.map((item) => ({ id: item.policy.id, label: item.policy.label }))) },
     items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
   }
 }
 
 export function createDatabaseConversationAudits(database: PlatformDatabase, query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin') {
-  return createConversationAuditResponse(database.listConversationAuditRecords().map(recordFromDatabase), query, now, currentRole, 'database', true)
+  return createConversationAuditResponse(database.listConversationAuditRecords().map(recordFromDatabase), query, now, currentRole, 'database', true, database.getConversationAuditCleanupStatus())
 }
 
 export function getDatabaseConversationAuditRecord(database: PlatformDatabase, id: string) {
@@ -155,6 +172,7 @@ export function getDemoConversationAuditRecord(id: string, now = new Date()) {
 function createSyntheticConversationAccess(record: ConversationAuditRecord, now: Date, accessRecord: { id: string; persisted: boolean } | undefined, source: 'demo' | 'database') {
   const baseTime = new Date(record.capturedAt).getTime()
   const at = (seconds: number) => new Date(baseTime + seconds * 1_000).toISOString()
+  const expired = new Date(record.policy.expiresAt).getTime() <= now.getTime()
   return {
     meta: { source, generatedAt: now.toISOString(), notice: source === 'database' ? '以下为合成且预先脱敏的演示轮次；SQLite 仅保存元数据，未读取、解密或返回任何真实对话正文。' : '以下为合成且预先脱敏的演示轮次；未读取、解密或返回任何真实对话正文。' }, record,
     access: { accessRecordId: accessRecord?.id ?? `access-demo-${record.id.replace('conv-audit-', '')}`, reasonAccepted: true as const, persisted: accessRecord?.persisted ?? false, authorizedByServerRbac: true as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
@@ -163,7 +181,7 @@ function createSyntheticConversationAccess(record: ConversationAuditRecord, now:
       { id: 'msg-tool-1', role: 'tool' as const, label: '工具调用摘要', occurredAt: at(2), text: '读取公开商品目录，返回 3 条匹配记录。参数和原始输出未保留。', redacted: false, redactionLabels: [], tool: { name: 'catalog_search', summary: '按脱敏商品编号查询公开目录', argumentsAvailable: false as const, outputAvailable: false as const } },
       { id: 'msg-assistant-1', role: 'assistant' as const, label: '模型回答', occurredAt: at(5), text: '您好，已为您核对该商品信息。当前订单状态正常，预计将在承诺时段内完成处理；如状态变化，我们会通过原渠道通知您。', redacted: false, redactionLabels: [], tool: null },
     ] },
-    retention: { expiresAt: record.policy.expiresAt, cleanupState: 'scheduled' as const, deletionProofAvailable: false as const, notice: '到期清理与无正文删除证明尚未接入；本页面不提供删除操作。' },
+    retention: { expiresAt: record.policy.expiresAt, cleanupState: expired ? 'expired' as const : 'scheduled' as const, deletionProofAvailable: false as const, notice: expired ? '该合成元数据已到期；页面不提供恢复、正文删除或真实删除证明。' : '到期时仅生成合成元数据的无正文证明；本页面不提供删除操作。' },
     linkedUsage: { requestId: record.requestId, metadataEndpoint: `/api/usage/${record.requestId}`, requestIdVerified: false as const },
   }
 }
