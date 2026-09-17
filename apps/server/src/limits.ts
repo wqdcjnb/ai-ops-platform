@@ -8,6 +8,17 @@ export const limitsQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
 })
 
+export const limitIdParamsSchema = z.object({
+  id: z.string().regex(/^(company|department|person|purpose|key)-[a-z0-9-]+$/),
+})
+
+export const quotaUpdateBodySchema = z.object({
+  targetPoints: z.coerce.number().int().min(1).max(1_000_000),
+  idempotencyKey: z.string().regex(/^quota-update-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+
 const periodUsageSchema = z.object({
   id: z.enum(['hour', 'day', 'week', 'month']),
   label: z.string(),
@@ -58,9 +69,24 @@ export const limitsResponseSchema = z.object({
   total: z.number().int().nonnegative(),
 })
 
+export const quotaUpdateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  policy: z.object({
+    id: z.string(), nodeId: z.string(), level: z.enum(['company', 'department', 'person', 'purpose', 'key']),
+    targetPoints: z.number().int().positive(), mode: z.literal('soft'),
+  }),
+  impact: z.object({
+    previousTargetPoints: z.number().int().positive(), used: z.number().int().nonnegative(), reserved: z.number().int().nonnegative(),
+    projectedPercent: z.number().min(0),
+  }),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export type LimitsQuery = z.infer<typeof limitsQuerySchema>
 export type LimitsResponse = z.infer<typeof limitsResponseSchema>
-type LimitNode = z.infer<typeof limitNodeSchema>
+export type LimitNode = z.infer<typeof limitNodeSchema>
+export type QuotaUpdateBody = z.infer<typeof quotaUpdateBodySchema>
+export type QuotaUpdateResponse = z.infer<typeof quotaUpdateResponseSchema>
 
 interface NodeSeed {
   id: string
@@ -155,7 +181,7 @@ export function createDemoLimits(query: LimitsQuery, newApi: NewApiStatus, now =
   }
 }
 
-function policySubject(node: LimitNode) {
+export function quotaPolicySubject(node: LimitNode) {
   if (node.level === 'company') return node.id
   if (node.level === 'department') return node.id.replace(/^department-/, '')
   if (node.level === 'person') return node.id
@@ -197,7 +223,7 @@ export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQu
   const demo = createDemoLimits({ level: 'all', search: '' }, newApi, now)
   const policies = database.listQuotaPolicies()
   const all = demo.items.map((node) => {
-    const policy = policies.find((item) => item.level === node.level && item.subjectId === policySubject(node) && item.period === 'month')
+    const policy = policies.find((item) => item.level === node.level && item.subjectId === quotaPolicySubject(node) && item.period === 'month')
     if (!policy) return node
     const periods = node.periods.map((period) => period.id === 'month'
       ? { ...period, limit: policy.targetPoints, percent: Number(((period.used + period.reserved) / policy.targetPoints * 100).toFixed(1)) }

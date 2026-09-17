@@ -364,6 +364,23 @@ export interface PlatformQuotaPolicySeed {
   mode?: 'soft' | 'hard'
 }
 
+export interface PlatformMonthlySoftQuotaPolicyUpdate {
+  id: string
+  level: 'company' | 'department' | 'person' | 'purpose' | 'key'
+  subjectId: string
+  targetPoints: number
+}
+
+export interface PlatformMonthlySoftQuotaPolicyUpdateResult {
+  id: string
+  level: PlatformMonthlySoftQuotaPolicyUpdate['level']
+  subjectId: string
+  targetPoints: number
+  mode: 'soft'
+  previousTargetPoints: number
+  idempotent: boolean
+}
+
 export interface PlatformAuditEventSeed {
   id: string
   actorUserId?: string | null
@@ -786,8 +803,7 @@ export class PlatformDatabase {
     const timestamp = now.toISOString()
     this.db.prepare(`INSERT INTO quota_policies(id, level, subject_id, period, target_points, mode, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET level = excluded.level, subject_id = excluded.subject_id,
-      period = excluded.period, target_points = excluded.target_points, mode = excluded.mode, updated_at = excluded.updated_at`).run(
+      ON CONFLICT(id) DO NOTHING`).run(
       seed.id, seed.level, seed.subjectId, seed.period, seed.targetPoints, seed.mode ?? 'soft', timestamp, timestamp,
     )
   }
@@ -1213,6 +1229,44 @@ export class PlatformDatabase {
         createdAt: string
       updatedAt: string
       }>
+  }
+
+  updateMonthlySoftQuotaPolicy(policy: PlatformMonthlySoftQuotaPolicyUpdate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformMonthlySoftQuotaPolicyUpdateResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listQuotaPolicies().find((item) => item.id === policy.id) ?? null
+    const summary = auditEvent.summary
+    const fallbackPreviousTarget = typeof summary.previousTargetPoints === 'number' && Number.isInteger(summary.previousTargetPoints) && summary.previousTargetPoints > 0
+      ? summary.previousTargetPoints
+      : policy.targetPoints
+    if (previousOperation) {
+      const previousSummary = JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown; previousTargetPoints?: unknown }
+      if (previousOperation.resourceId !== auditEvent.resourceId || previousSummary.idempotencyFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = current()
+      if (!stored || stored.period !== 'month' || stored.mode !== 'soft') return null
+      const previousTargetPoints = typeof previousSummary.previousTargetPoints === 'number' && Number.isInteger(previousSummary.previousTargetPoints) && previousSummary.previousTargetPoints > 0
+        ? previousSummary.previousTargetPoints
+        : fallbackPreviousTarget
+      return { id: stored.id, level: stored.level, subjectId: stored.subjectId, targetPoints: stored.targetPoints, mode: 'soft', previousTargetPoints, idempotent: true }
+    }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO quota_policies(id, level, subject_id, period, target_points, mode, created_at, updated_at)
+        VALUES (?, ?, ?, 'month', ?, 'soft', ?, ?)
+        ON CONFLICT(id) DO UPDATE SET level = excluded.level, subject_id = excluded.subject_id,
+        period = 'month', target_points = excluded.target_points, mode = 'soft', updated_at = excluded.updated_at`).run(
+        policy.id, policy.level, policy.subjectId, policy.targetPoints, timestamp, timestamp,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = current()
+    return stored && stored.period === 'month' && stored.mode === 'soft'
+      ? { id: stored.id, level: stored.level, subjectId: stored.subjectId, targetPoints: stored.targetPoints, mode: 'soft', previousTargetPoints: fallbackPreviousTarget, idempotent: false }
+      : null
   }
 
   listAuditEvents() {

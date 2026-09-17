@@ -11,7 +11,7 @@ import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, t
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
 import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
-import { createDatabaseLimits, createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
+import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
@@ -60,7 +60,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.register(helmet, { contentSecurityPolicy: false })
   app.register(cors, {
     origin: ['http://127.0.0.1:4174', 'http://localhost:4174'],
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'PATCH'],
   })
   app.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
@@ -102,6 +102,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     if (path.startsWith('/api/audit-events') || path.startsWith('/api/settings') || path.startsWith('/api/upstreams') || path.startsWith('/api/routes')) return ['super_admin', 'admin']
     if (path.startsWith('/api/people') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/keys') && method !== 'GET') return ['super_admin', 'admin']
+    if (path.startsWith('/api/limits') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/people') || path.startsWith('/api/keys') || path.startsWith('/api/models') || path.startsWith('/api/channels')) return ['super_admin', 'admin', 'department_lead']
     return ['super_admin', 'admin', 'department_lead', 'finance']
   }
@@ -475,6 +476,44 @@ export function buildApp(options: BuildAppOptions = {}) {
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
     return createDatabaseLimits(database, request.query, newApi, new Date(), dataScopeFor(request.authUser))
+  })
+
+  app.patch('/api/limits/:id', {
+    schema: { params: limitIdParamsSchema, body: quotaUpdateBodySchema, response: { 200: quotaUpdateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visible = createDatabaseLimits(database, { level: 'all', search: '' }, newApi, new Date(), dataScopeFor(request.authUser)).items.find((item) => item.id === request.params.id)
+    if (!visible) return reply.status(404).send({ error: { code: 'LIMIT_SCOPE_NOT_FOUND', message: '未找到可调整的额度范围', requestId: request.id } })
+    const month = visible.periods.find((period) => period.id === 'month')
+    if (!month) return reply.status(404).send({ error: { code: 'LIMIT_SCOPE_NOT_FOUND', message: '该额度范围缺少月度软目标', requestId: request.id } })
+    const subjectId = quotaPolicySubject(visible)
+    const existing = database.listQuotaPolicies().find((item) => item.level === visible.level && item.subjectId === subjectId && item.period === 'month')
+    const policyId = existing?.id ?? `quota-override-${visible.level}-${subjectId}-month`
+    const previousTargetPoints = existing?.targetPoints ?? month.limit
+    const idempotencyFingerprint = createHash('sha256').update(`${visible.id}:${request.body.targetPoints}`).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.updateMonthlySoftQuotaPolicy({ id: policyId, level: visible.level, subjectId, targetPoints: request.body.targetPoints }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'quota', resourceId: policyId,
+        result: 'success', requestId: request.id,
+        summary: {
+          message: '已调整本地 SQLite 月度软目标；未开启硬额度，未调用 New API，也未记录调整原因原文。', resourceName: `${visible.name} · 月度软目标`,
+          reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint, previousTargetPoints,
+          changes: [{ field: 'targetPoints', label: '月度软目标', before: `${previousTargetPoints.toLocaleString('zh-CN')} 点`, after: `${request.body.targetPoints.toLocaleString('zh-CN')} 点`, sensitive: false }],
+        },
+      })
+      if (!result) return reply.status(404).send({ error: { code: 'LIMIT_SCOPE_NOT_FOUND', message: '该额度范围已不可用，请刷新后重试', requestId: request.id } })
+      const projectedPercent = Number(((month.used + month.reserved) / result.targetPoints * 100).toFixed(1))
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已更新本地 SQLite 月度软目标；该目标仅用于演示提示，不会阻断请求或调用 New API。' },
+        policy: { id: result.id, nodeId: visible.id, level: result.level, targetPoints: result.targetPoints, mode: 'soft' as const },
+        impact: { previousTargetPoints: result.previousTargetPoints, used: month.used, reserved: month.reserved, projectedPercent },
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他额度调整或不同目标值', requestId: request.id } })
+      throw error
+    }
   })
 
   app.get('/api/routes', {

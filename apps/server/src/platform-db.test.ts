@@ -81,6 +81,21 @@ describe('platform database migrations', () => {
     database.close()
   })
 
+  it('keeps a locally adjusted monthly soft target when demo seeds run again', () => {
+    const now = new Date('2026-09-17T10:00:00.000Z')
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => now })
+    seedDemoData(database, now)
+    const updated = database.updateMonthlySoftQuotaPolicy({ id: 'quota-content-month', level: 'department', subjectId: 'content', targetPoints: 3000 }, {
+      id: 'audit-quota-update-persist-test', actorUserId: 'user-super-admin', action: 'update', resourceType: 'quota', resourceId: 'quota-content-month',
+      result: 'success', requestId: 'req-quota-persist-test', summary: { idempotencyFingerprint: 'test-fingerprint', previousTargetPoints: 2600, message: '本地软目标测试调整。' },
+    }, now)
+    expect(updated).toMatchObject({ targetPoints: 3000, previousTargetPoints: 2600, idempotent: false })
+    seedDemoData(database, now)
+    expect(database.listQuotaPolicies().find((item) => item.id === 'quota-content-month')).toMatchObject({ targetPoints: 3000, mode: 'soft' })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 5 })
+    database.close()
+  })
+
   it('marks expired synthetic metadata and records a proof without storing conversation bodies', () => {
     const now = new Date('2026-09-17T10:00:00.000Z')
     const database = createPlatformDatabase({ filename: ':memory:', now: () => now })

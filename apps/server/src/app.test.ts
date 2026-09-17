@@ -543,6 +543,48 @@ describe('BFF', () => {
     expect(invalid.json().error.code).toBe('INVALID_REQUEST')
   })
 
+  it('adjusts only a local monthly soft quota with CSRF, idempotency, and a safe audit summary', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { targetPoints: 3000, idempotencyKey: 'quota-update-1a2b3c4d', reason: '本地演示大促活动需要提高月度提示阈值', acknowledgeImpact: true }
+    const updated = await app.inject({ method: 'PATCH', url: '/api/limits/department-content', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(updated.statusCode).toBe(200)
+    expect(updated.json()).toMatchObject({
+      meta: { source: 'database' }, policy: { id: 'quota-content-month', nodeId: 'department-content', level: 'department', targetPoints: 3000, mode: 'soft' },
+      impact: { previousTargetPoints: 2600, used: 2540, reserved: 170, projectedPercent: 90.3 },
+      operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-quota-update-1a2b3c4d' },
+    })
+
+    const listed = await app.inject({ method: 'GET', url: '/api/limits', headers: { cookie } })
+    expect(listed.statusCode).toBe(200)
+    expect(listed.json().items.find((item: { id: string }) => item.id === 'department-content').periods.find((period: { id: string }) => period.id === 'month')).toMatchObject({ limit: 3000, percent: 90.3 })
+    expect(listed.json().hardMode).toMatchObject({ enabled: false, blocking: false })
+
+    const replay = await app.inject({ method: 'PATCH', url: '/api/limits/department-content', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({ impact: { previousTargetPoints: 2600, projectedPercent: 90.3 }, operation: { idempotent: true } })
+    const changedTarget = await app.inject({ method: 'PATCH', url: '/api/limits/department-content', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, targetPoints: 3100 } })
+    expect(changedTarget.statusCode).toBe(409)
+    expect(changedTarget.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+    const reused = await app.inject({ method: 'PATCH', url: '/api/limits/department-ads', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reused.statusCode).toBe(409)
+    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=update&resource=quota', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'update', resource: expect.objectContaining({ id: 'quota-content-month', name: '内容运营 · 月度软目标' }), changes: [expect.objectContaining({ field: 'targetPoints', before: '2,600 点', after: '3,000 点', sensitive: false })] })]))
+    expect(JSON.stringify({ updated: updated.json(), audit: audit.json() })).not.toContain(body.reason)
+
+    const withoutCsrf = await app.inject({ method: 'PATCH', url: '/api/limits/department-ads', headers: { cookie }, payload: { ...body, idempotencyKey: 'quota-update-5e6f7g8h' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeWrite = await app.inject({ method: 'PATCH', url: '/api/limits/department-content', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...body, idempotencyKey: 'quota-update-9i0j1k2l' } })
+    expect(employeeWrite.statusCode).toBe(403)
+  })
+
   it('returns isolated purpose routes without credential material', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/routes' })
     const body = response.json()

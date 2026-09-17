@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { limitFiltersSchema, limitsResponseSchema } from './limits-api'
+import { limitFiltersSchema, limitsResponseSchema, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits-api'
 
 const rate = { limit: 60, current: 12, hits: 1 }
 const periods = [
@@ -28,5 +28,18 @@ describe('limits API contracts', () => {
     expect(limitsResponseSchema.safeParse(value).success).toBe(true)
     expect(limitsResponseSchema.safeParse({ ...value, hardMode: { ...value.hardMode, blocking: true } }).success).toBe(false)
     expect(limitsResponseSchema.safeParse({ ...value, meta: { ...value.meta, source: 'database' } }).success).toBe(true)
+  })
+
+  it('accepts only confirmed, idempotent local monthly soft target adjustments', () => {
+    const body = { targetPoints: 3000, idempotencyKey: 'quota-update-1a2b3c4d', reason: '本地演示大促活动需要提高月度提示阈值', acknowledgeImpact: true }
+    expect(quotaUpdateBodySchema.safeParse(body).success).toBe(true)
+    expect(quotaUpdateBodySchema.safeParse({ ...body, acknowledgeImpact: false }).success).toBe(false)
+    expect(quotaUpdateBodySchema.safeParse({ ...body, idempotencyKey: 'key-update-1a2b3c4d' }).success).toBe(false)
+    expect(quotaUpdateResponseSchema.safeParse({
+      meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '已更新本地 SQLite 月度软目标。' },
+      policy: { id: 'quota-content-month', nodeId: 'department-content', level: 'department', targetPoints: 3000, mode: 'soft' },
+      impact: { previousTargetPoints: 2600, used: 2540, reserved: 170, projectedPercent: 90.3 },
+      operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-quota-update-1a2b3c4d' },
+    }).success).toBe(true)
   })
 })

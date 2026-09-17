@@ -599,3 +599,7 @@ button { cursor: pointer; }
 .disable-person-dialog .create-person-form textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #d9e1e5; border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 9px/1.55 inherit; }
 .disable-person-dialog .create-person-form textarea:focus { border-color: #d77d7d; box-shadow: 0 0 0 2px rgba(189,59,59,.08); }
 .disable-person-dialog .access-ack { width: 100%; margin-top: 0; }
+.quota-adjust-dialog .create-key-form textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #d9e1e5; border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 9px/1.55 inherit; }
+.quota-adjust-dialog .create-key-form textarea:focus { border-color: #19808a; box-shadow: 0 0 0 2px rgba(25,128,138,.08); }
+.quota-adjust-dialog .access-ack { width: 100%; margin-top: 0; }
+.quota-adjust-impact { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px 12px; padding: 11px; border: 1px solid #d9e8e9; border-radius: 7px; color: #6c7d87; background: #f3f9f9; font-size: 8px; }.quota-adjust-impact strong { justify-self: end; color: #36535d; font-size: 9px; }.quota-adjust-warning { display: flex; align-items: flex-start; gap: 7px; margin: 0; padding: 9px 10px; border-radius: 6px; color: #956313; background: #fff4dc; font-size: 8px; line-height: 1.45; }.quota-adjust-warning svg { flex: 0 0 auto; }
