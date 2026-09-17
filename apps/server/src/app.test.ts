@@ -108,6 +108,15 @@ describe('BFF', () => {
     expect(JSON.stringify(response.json())).not.toContain('token')
   })
 
+  it('protects the New API management adapter and exposes only capability state', async () => {
+    const app = buildApp({ authMode: 'disabled', probeNewApi: reachableNewApi, probeNewApiManagement: async () => ({ state: 'not_configured', authConfigured: false, checkedAt: '2026-09-15T10:00:00.000Z', capabilities: { models: 'unavailable', channels: 'unavailable' }, notice: '未配置' }) })
+    apps.push(app)
+    const response = await app.inject({ method: 'GET', url: '/api/integrations/new-api/management' })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ state: 'not_configured', authConfigured: false, capabilities: { models: 'unavailable', channels: 'unavailable' } })
+    expect(JSON.stringify(response.json())).not.toMatch(/Bearer|accessToken|management-secret/i)
+  })
+
   it('returns the live platform service matrix for the unified entry page', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/platform/status' })
     const body = response.json()

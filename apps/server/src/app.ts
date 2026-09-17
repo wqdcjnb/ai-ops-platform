@@ -7,6 +7,7 @@ import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fas
 import { z } from 'zod'
 import { createDemoOverview, overviewResponseSchema, periodSchema } from './overview.js'
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
+import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
 import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyIdParamsSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
@@ -38,6 +39,7 @@ export interface BuildAppOptions {
   database?: PlatformDatabase
   databasePath?: string
   probeNewApi?: () => Promise<NewApiStatus>
+  probeNewApiManagement?: () => Promise<NewApiManagementResponse>
   probeCpa?: () => Promise<PlatformProbeResult>
   probeDocs?: () => Promise<PlatformProbeResult>
 }
@@ -69,6 +71,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   const requiredRoles = (path: string, method: string): readonly AppRole[] => {
     if (path.startsWith('/api/me')) return ['employee']
     if (path.startsWith('/api/conversation-audits')) return ['super_admin']
+    if (path.startsWith('/api/integrations/new-api/management')) return ['super_admin', 'admin']
     if (path.startsWith('/api/audit-events') || path.startsWith('/api/settings') || path.startsWith('/api/upstreams') || path.startsWith('/api/routes')) return ['super_admin', 'admin']
     if (path.startsWith('/api/people') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/keys') && method !== 'GET') return ['super_admin', 'admin']
@@ -154,6 +157,10 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/integrations/new-api/status', {
     schema: { response: { 200: newApiStatusSchema } },
   }, async () => (options.probeNewApi ?? probeNewApiFromEnvironment)())
+
+  app.get('/api/integrations/new-api/management', {
+    schema: { response: { 200: newApiManagementResponseSchema } },
+  }, async () => (options.probeNewApiManagement ?? probeNewApiManagementFromEnvironment)())
 
   app.get('/api/platform/status', {
     schema: { response: { 200: platformStatusSchema } },
