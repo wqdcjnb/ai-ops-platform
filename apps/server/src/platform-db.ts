@@ -312,6 +312,20 @@ export class PlatformDatabase {
     return this.listApiKeys().find((item) => item.id === key.id) ?? null
   }
 
+  listQuotaPolicies() {
+    return this.db.prepare(`SELECT id, level, subject_id AS subjectId, period, target_points AS targetPoints, mode,
+      created_at AS createdAt, updated_at AS updatedAt FROM quota_policies ORDER BY level, subject_id, period`).all() as Array<{
+        id: string
+        level: 'company' | 'department' | 'person' | 'purpose' | 'key'
+        subjectId: string
+        period: 'hour' | 'day' | 'week' | 'month'
+        targetPoints: number
+        mode: 'soft' | 'hard'
+        createdAt: string
+        updatedAt: string
+      }>
+  }
+
   tableCounts() {
     const count = (table: string) => (this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count
     return {

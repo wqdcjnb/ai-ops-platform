@@ -27,5 +27,6 @@ describe('limits API contracts', () => {
     }
     expect(limitsResponseSchema.safeParse(value).success).toBe(true)
     expect(limitsResponseSchema.safeParse({ ...value, hardMode: { ...value.hardMode, blocking: true } }).success).toBe(false)
+    expect(limitsResponseSchema.safeParse({ ...value, meta: { ...value.meta, source: 'database' } }).success).toBe(true)
   })
 })

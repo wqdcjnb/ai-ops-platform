@@ -10,7 +10,7 @@ import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } fro
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
 import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyIdParamsSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
-import { createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
+import { createDatabaseLimits, createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
@@ -303,7 +303,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     schema: { querystring: limitsQuerySchema, response: { 200: limitsResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
     const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
-    return createDemoLimits(request.query, newApi)
+    return createDatabaseLimits(database, request.query, newApi)
   })
 
   app.get('/api/routes', {

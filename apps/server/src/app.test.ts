@@ -234,10 +234,11 @@ describe('BFF', () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/limits' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta.source).toBe('demo')
+    expect(body.meta.source).toBe('database')
     expect(new Set(body.items.map((item: { level: string }) => item.level))).toEqual(new Set(['company', 'department', 'person', 'purpose', 'key']))
     expect(body.items.every((item: { mode: string; periods: unknown[] }) => item.mode === 'soft' && item.periods.length === 4)).toBe(true)
     expect(body.hardMode).toMatchObject({ enabled: false, blocking: false })
+    expect(body.items.find((item: { id: string }) => item.id === 'department-content').periods.find((period: { id: string }) => period.id === 'month').limit).toBe(2600)
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey/i)
   })
 

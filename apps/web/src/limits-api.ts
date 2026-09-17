@@ -22,7 +22,7 @@ export const limitNodeSchema = z.object({
 })
 
 export const limitsResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   summary: z.object({ monthlyLimit: z.number().int().positive(), used: z.number().int().nonnegative(), reserved: z.number().int().nonnegative(), percent: z.number().min(0), alertedScopes: z.number().int().nonnegative(), hitCount: z.number().int().nonnegative() }),
   hardMode: z.object({ enabled: z.literal(false), blocking: z.literal(false), requirements: z.array(z.object({ label: z.string(), state: z.literal('pending'), detail: z.string() })) }),
   options: z.object({ levels: z.array(z.object({ id: z.enum(['company', 'department', 'person', 'purpose', 'key']), label: z.string() })) }),

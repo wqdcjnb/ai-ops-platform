@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const limitsQuerySchema = z.object({
   level: z.enum(['all', 'company', 'department', 'person', 'purpose', 'key']).default('all'),
@@ -37,7 +38,7 @@ export const limitNodeSchema = z.object({
 })
 
 export const limitsResponseSchema = z.object({
-  meta: z.object({ source: z.literal('demo'), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   summary: z.object({
     monthlyLimit: z.number().int().positive(),
     used: z.number().int().nonnegative(),
@@ -151,4 +152,39 @@ export function createDemoLimits(query: LimitsQuery, newApi: NewApiStatus, now =
     options: { levels: [{ id: 'company', label: '公司' }, { id: 'department', label: '部门' }, { id: 'person', label: '人员' }, { id: 'purpose', label: '用途' }, { id: 'key', label: 'Key' }] },
     items, total: items.length,
   }
+}
+
+function policySubject(node: LimitNode) {
+  if (node.level === 'company') return node.id
+  if (node.level === 'department') return node.id.replace(/^department-/, '')
+  if (node.level === 'person') return node.id
+  if (node.level === 'purpose') return node.id === 'purpose-copy' ? 'ecommerce-copy' : node.id === 'purpose-analysis' ? 'ecommerce-analysis' : 'ecommerce-copy'
+  return node.id
+}
+
+function quotaNotice(newApi: NewApiStatus) {
+  if (newApi.state === 'ready') return '软额度目标已从平台 SQLite 读取；用量账本和硬额度仍待接入'
+  if (newApi.state === 'reachable') return '软额度目标来自平台 SQLite；New API 服务可达但尚未配置管理认证'
+  if (newApi.state === 'auth_required') return '软额度目标来自平台 SQLite；New API 管理认证未通过'
+  return '软额度目标来自平台 SQLite；New API 当前离线'
+}
+
+export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQuery, newApi: NewApiStatus, now = new Date()): LimitsResponse {
+  const demo = createDemoLimits({ level: 'all', search: '' }, newApi, now)
+  const policies = database.listQuotaPolicies()
+  const all = demo.items.map((node) => {
+    const policy = policies.find((item) => item.level === node.level && item.subjectId === policySubject(node) && item.period === 'month')
+    if (!policy) return node
+    const periods = node.periods.map((period) => period.id === 'month'
+      ? { ...period, limit: policy.targetPoints, percent: Number(((period.used + period.reserved) / policy.targetPoints * 100).toFixed(1)) }
+      : period)
+    const month = periods.find((period) => period.id === 'month')!
+    const state = (month.used + month.reserved) / month.limit >= 1 ? 'reached' : (month.used + month.reserved) / month.limit >= 0.8 ? 'near' : 'normal'
+    return { ...node, mode: 'soft' as const, state: state as LimitNode['state'], periods }
+  })
+  const search = query.search.toLocaleLowerCase('zh-CN')
+  const items = all.filter((node) => (query.level === 'all' || node.level === query.level) && (!search || [node.name, node.descriptor, node.inheritedFrom ?? ''].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))))
+  const company = all[0]!
+  const month = company.periods.find((period) => period.id === 'month')!
+  return { ...demo, meta: { ...demo.meta, source: 'database', notice: quotaNotice(newApi) }, summary: { monthlyLimit: month.limit, used: month.used, reserved: month.reserved, percent: month.percent, alertedScopes: all.filter((node) => node.state !== 'normal').length, hitCount: company.rates.rpm.hits }, items, total: items.length }
 }
