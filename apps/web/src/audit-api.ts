@@ -5,7 +5,7 @@ const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'd
 const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'export', 'settings', 'alert'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
-const integritySchema = z.object({ deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), hashChainVerified: z.boolean(), algorithm: z.enum(['sha256', 'not_configured']), checkedAt: z.string().datetime().nullable(), eventCount: z.number().int().nonnegative(), firstInvalidEventId: z.string().nullable(), notice: z.string() })
+const integritySchema = z.object({ deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), verified: z.boolean(), hashChainVerified: z.boolean(), checkpointVerified: z.boolean(), algorithm: z.enum(['sha256', 'not_configured']), checkedAt: z.string().datetime().nullable(), checkpointUpdatedAt: z.string().datetime().nullable(), eventCount: z.number().int().nonnegative(), firstInvalidEventId: z.string().nullable(), notice: z.string() })
 
 export const auditFiltersSchema = z.object({ period: periodSchema, search: z.string().max(80), actor: z.string(), action: z.union([z.literal('all'), actionSchema]), resource: z.union([z.literal('all'), resourceTypeSchema]), result: z.union([z.literal('all'), resultStatusSchema]), source: z.union([z.literal('all'), sourceTypeSchema]), page: z.number().int().positive(), pageSize: z.number().int().min(5).max(50) })
 

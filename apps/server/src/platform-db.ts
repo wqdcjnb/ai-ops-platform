@@ -224,6 +224,13 @@ const migrationSql = [
   CREATE INDEX IF NOT EXISTS session_cleanup_runs_completed_idx ON session_cleanup_runs(completed_at DESC);`,
   `ALTER TABLE audit_events ADD COLUMN previous_hash TEXT;
   ALTER TABLE audit_events ADD COLUMN event_hash TEXT;`,
+  `CREATE TABLE IF NOT EXISTS audit_chain_checkpoints (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    event_count INTEGER NOT NULL CHECK (event_count >= 0),
+    head_event_id TEXT,
+    head_hash TEXT,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -244,7 +251,10 @@ export const databaseStatusSchema = z.object({
   auditChain: z.object({
     algorithm: z.literal('sha256'),
     verified: z.boolean(),
+    hashChainVerified: z.boolean(),
+    checkpointVerified: z.boolean(),
     checkedAt: z.string().datetime(),
+    checkpointUpdatedAt: z.string().datetime().nullable(),
     eventCount: z.number().int().nonnegative(),
     firstInvalidEventId: z.string().nullable(),
   }),
@@ -423,7 +433,10 @@ export interface SessionCleanupResult {
 export interface AuditChainVerification {
   algorithm: 'sha256'
   verified: boolean
+  hashChainVerified: boolean
+  checkpointVerified: boolean
   checkedAt: string
+  checkpointUpdatedAt: string | null
   eventCount: number
   firstInvalidEventId: string | null
 }
@@ -441,6 +454,13 @@ interface AuditChainRow {
   occurredAt: string
   previousHash: string | null
   eventHash: string | null
+}
+
+interface AuditChainCheckpoint {
+  eventCount: number
+  headEventId: string | null
+  headHash: string | null
+  updatedAt: string
 }
 
 function auditEventHash(row: Omit<AuditChainRow, 'sequence' | 'previousHash' | 'eventHash'>, previousHash: string | null) {
@@ -533,6 +553,7 @@ export class PlatformDatabase {
       try {
         this.db.exec(sql)
         if (version === 13) this.rebuildAuditChain()
+        if (version === 14) this.rebuildAuditCheckpoint()
         this.db.prepare('INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)').run(version, `platform_core_${version}`, this.now().toISOString())
         this.db.exec('COMMIT')
       } catch (error) {
@@ -572,17 +593,46 @@ export class PlatformDatabase {
     }
   }
 
+  private auditChainCheckpoint() {
+    return this.db.prepare(`SELECT event_count AS eventCount, head_event_id AS headEventId,
+      head_hash AS headHash, updated_at AS updatedAt FROM audit_chain_checkpoints WHERE id = 1`).get() as AuditChainCheckpoint | undefined
+  }
+
+  private writeAuditChainCheckpoint(eventCount: number, headEventId: string | null, headHash: string | null, updatedAt: string) {
+    this.db.prepare(`INSERT INTO audit_chain_checkpoints(id, event_count, head_event_id, head_hash, updated_at)
+      VALUES (1, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET event_count = excluded.event_count, head_event_id = excluded.head_event_id,
+      head_hash = excluded.head_hash, updated_at = excluded.updated_at`).run(eventCount, headEventId, headHash, updatedAt)
+  }
+
+  private rebuildAuditCheckpoint(now = this.now()) {
+    const rows = this.auditChainRows()
+    const head = rows.at(-1)
+    this.writeAuditChainCheckpoint(rows.length, head?.id ?? null, head?.eventHash ?? null, now.toISOString())
+  }
+
   verifyAuditChain(now = this.now()): AuditChainVerification {
     let previousHash: string | null = null
     const rows = this.auditChainRows()
     for (const row of rows) {
       const expectedHash = auditEventHash(row, previousHash)
       if (row.previousHash !== previousHash || row.eventHash !== expectedHash) {
-        return { algorithm: 'sha256', verified: false, checkedAt: now.toISOString(), eventCount: rows.length, firstInvalidEventId: row.id }
+        const checkpoint = this.auditChainCheckpoint()
+        return { algorithm: 'sha256', verified: false, hashChainVerified: false, checkpointVerified: Boolean(checkpoint), checkedAt: now.toISOString(), checkpointUpdatedAt: checkpoint?.updatedAt ?? null, eventCount: rows.length, firstInvalidEventId: row.id }
       }
       previousHash = row.eventHash
     }
-    return { algorithm: 'sha256', verified: true, checkedAt: now.toISOString(), eventCount: rows.length, firstInvalidEventId: null }
+    const checkpoint = this.auditChainCheckpoint()
+    const head = rows.at(-1)
+    const checkpointVerified = Boolean(checkpoint
+      && checkpoint.eventCount === rows.length
+      && checkpoint.headEventId === (head?.id ?? null)
+      && checkpoint.headHash === (head?.eventHash ?? null))
+    return {
+      algorithm: 'sha256', verified: checkpointVerified, hashChainVerified: true, checkpointVerified,
+      checkedAt: now.toISOString(), checkpointUpdatedAt: checkpoint?.updatedAt ?? null, eventCount: rows.length,
+      firstInvalidEventId: checkpointVerified ? null : checkpoint?.headEventId ?? head?.id ?? null,
+    }
   }
 
   seedUser(seed: PlatformUserSeed, now = this.now()) {
@@ -641,11 +691,20 @@ export class PlatformDatabase {
       summaryJson: JSON.stringify(seed.summary), occurredAt: now.toISOString(),
     }
     const eventHash = auditEventHash(row, previousHash?.eventHash ?? null)
-    this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at, previous_hash, event_hash)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      row.id, row.actorUserId, row.action, row.resourceType, row.resourceId, row.result,
-      row.requestId, row.summaryJson, row.occurredAt, previousHash?.eventHash ?? null, eventHash,
-    )
+    this.db.exec('SAVEPOINT audit_append')
+    try {
+      this.db.prepare(`INSERT INTO audit_events(id, actor_user_id, action, resource_type, resource_id, result, request_id, summary_json, occurred_at, previous_hash, event_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        row.id, row.actorUserId, row.action, row.resourceType, row.resourceId, row.result,
+        row.requestId, row.summaryJson, row.occurredAt, previousHash?.eventHash ?? null, eventHash,
+      )
+      this.writeAuditChainCheckpoint(integrity.eventCount + 1, row.id, eventHash, row.occurredAt)
+      this.db.exec('RELEASE SAVEPOINT audit_append')
+    } catch (error) {
+      this.db.exec('ROLLBACK TO SAVEPOINT audit_append')
+      this.db.exec('RELEASE SAVEPOINT audit_append')
+      throw error
+    }
   }
 
   seedUsageRequest(seed: PlatformUsageRequestSeed) {

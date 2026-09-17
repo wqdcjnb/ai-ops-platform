@@ -3,7 +3,7 @@ import { auditDetailResponseSchema, auditFiltersSchema, auditResponseSchema } fr
 
 const event = { id: 'audit-test', occurredAt: '2026-09-15T10:00:00.000Z', actor: { id: 'admin-1', name: '管理员', role: 'admin' }, action: 'rotate', actionLabel: '轮换 Key', resource: { type: 'key', id: 'key-1', name: 'sk-ops••••••1234' }, result: { status: 'success', code: 'KEY_ROTATED' }, source: { type: 'api', label: '管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }, requestId: 'req-audit-test', summary: '仅记录变化摘要', changes: [{ field: 'secret', label: '密钥内容', before: '已变化', after: '已变化', sensitive: true }], contentAvailable: false, credentialValueAvailable: false }
 const meta = { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', period: '7d', notice: '演示' }
-const demoIntegrity = { deletionAllowed: false, appendOnlyVerified: false, hashChainVerified: false, algorithm: 'not_configured', checkedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '待验证' }
+const demoIntegrity = { deletionAllowed: false, appendOnlyVerified: false, verified: false, hashChainVerified: false, checkpointVerified: false, algorithm: 'not_configured', checkedAt: null, checkpointUpdatedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '待验证' }
 
 describe('audit API contracts', () => {
   it('validates filters and metadata-only audit events', () => {
@@ -28,7 +28,7 @@ describe('audit API contracts', () => {
       summary: '未建立有效本地会话的访问被拒绝；不记录 Cookie、令牌、查询参数或请求正文。',
       changes: [],
     }
-    const integrity = { deletionAllowed: false, appendOnlyVerified: false, hashChainVerified: true, algorithm: 'sha256', checkedAt: '2026-09-15T10:00:00.000Z', eventCount: 1, firstInvalidEventId: null, notice: '本地校验' }
+    const integrity = { deletionAllowed: false, appendOnlyVerified: false, verified: true, hashChainVerified: true, checkpointVerified: true, algorithm: 'sha256', checkedAt: '2026-09-15T10:00:00.000Z', checkpointUpdatedAt: '2026-09-15T10:00:00.000Z', eventCount: 1, firstInvalidEventId: null, notice: '本地校验' }
     expect(auditResponseSchema.safeParse({ meta, summary: { total: 1, success: 0, failed: 0, denied: 1, sensitiveChanges: 0 }, options: { actors: [{ id: 'anonymous', label: '未识别身份' }] }, items: [securityEvent], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 }, retention: { mode: 'database', deletionAllowed: false, appendOnlyVerified: false, notice: '待验证' }, integrity }).success).toBe(true)
   })
 
@@ -37,6 +37,6 @@ describe('audit API contracts', () => {
     expect(auditDetailResponseSchema.safeParse(detail).success).toBe(true)
     expect(auditDetailResponseSchema.safeParse({ ...detail, meta: { ...detail.meta, source: 'database' }, request: { ...detail.request, traceState: 'database_unverified' } }).success).toBe(true)
     expect(auditDetailResponseSchema.safeParse({ ...detail, event: { ...event, contentAvailable: true } }).success).toBe(false)
-    expect(auditDetailResponseSchema.safeParse({ ...detail, integrity: { ...detail.integrity, hashChainVerified: true, algorithm: 'sha256', checkedAt: '2026-09-15T10:00:00.000Z', eventCount: 1 } }).success).toBe(true)
+    expect(auditDetailResponseSchema.safeParse({ ...detail, integrity: { ...detail.integrity, verified: true, hashChainVerified: true, checkpointVerified: true, algorithm: 'sha256', checkedAt: '2026-09-15T10:00:00.000Z', checkpointUpdatedAt: '2026-09-15T10:00:00.000Z', eventCount: 1 } }).success).toBe(true)
   })
 })
