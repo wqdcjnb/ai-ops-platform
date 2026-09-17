@@ -178,6 +178,16 @@ const migrationSql = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS system_retention_policies (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    retention_days INTEGER NOT NULL CHECK (retention_days >= 0),
+    applies_to TEXT NOT NULL,
+    cleanup_state TEXT NOT NULL CHECK (cleanup_state IN ('not_configured', 'unverified')),
+    minimum_necessary INTEGER NOT NULL CHECK (minimum_necessary IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -359,6 +369,15 @@ export interface PlatformRoleDefinitionSeed {
   dataScope: string
   permissionSummary: string
   highPrivilege: boolean
+}
+
+export interface PlatformRetentionPolicySeed {
+  id: string
+  label: string
+  days: number
+  appliesTo: string
+  cleanupState: 'not_configured' | 'unverified'
+  minimumNecessary: boolean
 }
 
 export function hashPlatformPassword(value: string) {
@@ -572,6 +591,18 @@ export class PlatformDatabase {
     permission_summary = excluded.permission_summary, high_privilege = excluded.high_privilege,
     updated_at = excluded.updated_at`).run(
       seed.id, seed.name, seed.dataScope, seed.permissionSummary, Number(seed.highPrivilege), timestamp, timestamp,
+    )
+  }
+
+  seedRetentionPolicy(seed: PlatformRetentionPolicySeed, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO system_retention_policies(
+      id, label, retention_days, applies_to, cleanup_state, minimum_necessary, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET label = excluded.label, retention_days = excluded.retention_days,
+    applies_to = excluded.applies_to, cleanup_state = excluded.cleanup_state,
+    minimum_necessary = excluded.minimum_necessary, updated_at = excluded.updated_at`).run(
+      seed.id, seed.label, seed.days, seed.appliesTo, seed.cleanupState, Number(seed.minimumNecessary), timestamp, timestamp,
     )
   }
 
@@ -805,6 +836,19 @@ export class PlatformDatabase {
     }
   }
 
+  listRetentionPolicies() {
+    return this.db.prepare(`SELECT id, label, retention_days AS days, applies_to AS appliesTo,
+      cleanup_state AS cleanupState, minimum_necessary AS minimumNecessary
+      FROM system_retention_policies ORDER BY id`).all() as Array<{
+        id: string
+        label: string
+        days: number
+        appliesTo: string
+        cleanupState: 'not_configured' | 'unverified'
+        minimumNecessary: number
+      }>
+  }
+
   recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now()) {
     const occurredAt = now.toISOString()
     this.db.prepare(`INSERT INTO conversation_access_events(
@@ -842,6 +886,7 @@ export class PlatformDatabase {
       businessRules: count('system_business_rules'),
       featureFlags: count('system_feature_flags'),
       roleDefinitions: count('system_role_definitions'),
+      retentionPolicies: count('system_retention_policies'),
     }
   }
 
@@ -963,6 +1008,14 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { id: 'employee-portal', label: '员工自助入口', enabled: false, reason: '本人数据范围与接入说明尚未完成', risk: 'medium' },
   ]
   for (const feature of featureFlags) database.seedFeatureFlag(feature)
+
+  const retentionPolicies: PlatformRetentionPolicySeed[] = [
+    { id: 'usage-metadata', label: '调用元数据', days: 180, appliesTo: '请求 ID、Token、耗时、成本与状态', cleanupState: 'unverified', minimumNecessary: true },
+    { id: 'conversation-content', label: '对话审计正文', days: 7, appliesTo: '仅限获准策略采集的脱敏内容', cleanupState: 'not_configured', minimumNecessary: true },
+    { id: 'operation-audit', label: '操作审计', days: 365, appliesTo: '管理员操作与访问原因证明', cleanupState: 'unverified', minimumNecessary: true },
+    { id: 'export-files', label: '导出文件', days: 7, appliesTo: '异步生成的受控下载文件', cleanupState: 'not_configured', minimumNecessary: true },
+  ]
+  for (const policy of retentionPolicies) database.seedRetentionPolicy(policy)
 
   const auditEvents: PlatformAuditEventSeed[] = [
     { id: 'audit-login-success', actorUserId: 'user-super-admin', action: 'login', resourceType: 'session', resourceId: 'session-demo-01', result: 'success', requestId: 'req-audit-login-01', summary: { message: '超级管理员通过本机演示身份进入管理控制台。' } },

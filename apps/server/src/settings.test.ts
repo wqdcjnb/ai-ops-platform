@@ -20,6 +20,10 @@ describe('settings contract', () => {
     expect(value.businessRules).toMatchObject({ source: 'database', version: 'draft-v0.1' })
     expect(value.features.source).toBe('database')
     expect(value.features.items.every((item) => item.enabled === false && item.editable === false)).toBe(true)
+    expect(value.retention).toMatchObject({ source: 'database', cleanupJobVerified: false })
+    expect(value.retention.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'operation-audit', days: 365, minimumNecessary: true }),
+    ]))
     expect(value.backup).toMatchObject({ configured: false, browserDownloadAllowed: false })
     database.close()
   })

@@ -14,7 +14,7 @@ export const settingsResponseSchema = z.object({
   organization: z.object({ source: z.literal('database'), company: z.string(), departments: z.number().int().nonnegative(), people: z.number().int().nonnegative(), roles: z.array(z.object({ id: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), name: z.string(), memberCount: z.number().int().nonnegative(), dataScope: z.string(), permissionSummary: z.string(), highPrivilege: z.boolean() })) }),
   businessRules: z.object({ source: z.literal('database'), version: z.string(), verified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), value: z.string(), impact: z.string(), status: z.enum(['fixed', 'unverified']) })) }),
   connections: z.object({ source: z.literal('live'), items: z.array(z.object({ id: z.enum(['bff', 'new-api', 'cpa', 'docs']), name: z.string(), category: z.string(), url: z.string().url(), state: serviceStateSchema, credentialConfigured: z.boolean(), credentialValueAvailable: z.literal(false), checkedAt: z.string().datetime(), detail: z.string() })).length(4) }),
-  retention: z.object({ source: sourceStateSchema, cleanupJobVerified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), days: z.number().int().nonnegative(), appliesTo: z.string(), cleanupState: z.enum(['not_configured', 'unverified']), minimumNecessary: z.boolean() })) }),
+  retention: z.object({ source: z.literal('database'), cleanupJobVerified: z.literal(false), items: z.array(z.object({ id: z.string(), label: z.string(), days: z.number().int().nonnegative(), appliesTo: z.string(), cleanupState: z.enum(['not_configured', 'unverified']), minimumNecessary: z.boolean() })) }),
   features: z.object({ source: z.literal('database'), items: z.array(z.object({ id: z.string(), label: z.string(), enabled: z.boolean(), editable: z.literal(false), reason: z.string(), risk: z.enum(['low', 'medium', 'high']) })) }),
   backup: z.object({ source: sourceStateSchema, configured: z.literal(false), storageTargetConfigured: z.literal(false), lastBackupAt: z.null(), lastVerifiedAt: z.null(), lastRestoreDrillAt: z.null(), browserDownloadAllowed: z.literal(false), notice: z.string() }),
 })
@@ -38,6 +38,7 @@ export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, d
   const organization = database.getOrganizationSummary()
   const businessRuleItems = database.listBusinessRules()
   const featureItems = database.listFeatureFlags().map((item) => ({ ...item, enabled: item.enabled === 1, editable: false as const }))
+  const retentionItems = database.listRetentionPolicies().map((item) => ({ ...item, minimumNecessary: item.minimumNecessary === 1 }))
   const businessRuleVersion = businessRuleItems[0]?.version ?? 'unavailable'
   const connections = [
     { id: 'bff' as const, name: '运营控制台 BFF', category: '本机服务', url: 'http://127.0.0.1:4175', state: 'ready' as const, credentialConfigured: false, credentialValueAvailable: false as const, checkedAt: now.toISOString(), detail: '当前页面由 BFF 提供并已通过请求 ID 与禁用缓存检查。' },
@@ -46,18 +47,13 @@ export function createSettings(newApi: NewApiStatus, cpa: PlatformProbeResult, d
     { id: 'docs' as const, name: '项目文档', category: 'VitePress', url: safeHttpUrl(process.env.DOCS_BASE_URL, 'http://127.0.0.1:4173'), state: probeState(docs.state), credentialConfigured: false, credentialValueAvailable: false as const, checkedAt: docs.checkedAt, detail: docs.state === 'reachable' ? '文档中心可达。' : '文档中心当前不可达。' },
   ]
   return {
-    meta: { source: 'partial' as const, generatedAt: now.toISOString(), notice: '服务连通状态为实时探测；组织与角色、业务口径和功能开关读取 SQLite 模拟配置；留存和备份仍明确标注为演示或未验证。' },
+    meta: { source: 'partial' as const, generatedAt: now.toISOString(), notice: '服务连通状态为实时探测；组织与角色、业务口径、功能开关和留存策略读取 SQLite 模拟配置；备份仍明确标注为未验证。' },
     access: { currentRole, serverRbacVerified: true as const, writeAllowed: false as const, notice: '当前会话已通过服务端 RBAC 校验；设置写操作、二次确认与变更审计仍未接入。' },
     summary: { sections: 6 as const, roles: organization.roles.length, servicesOnline: connections.filter((item) => item.state !== 'offline').length, servicesTotal: connections.length, enabledFeatures: featureItems.filter((item) => item.enabled).length, backupsVerified: 0 as const },
     organization: { source: 'database' as const, ...organization },
     businessRules: { source: 'database' as const, version: businessRuleVersion, verified: false as const, items: businessRuleItems },
     connections: { source: 'live' as const, items: connections },
-    retention: { source: 'demo' as const, cleanupJobVerified: false as const, items: [
-      { id: 'usage-metadata', label: '调用元数据', days: 180, appliesTo: '请求 ID、Token、耗时、成本与状态', cleanupState: 'unverified' as const, minimumNecessary: true },
-      { id: 'conversation-content', label: '对话审计正文', days: 7, appliesTo: '仅限获准策略采集的脱敏内容', cleanupState: 'not_configured' as const, minimumNecessary: true },
-      { id: 'operation-audit', label: '操作审计', days: 365, appliesTo: '管理员操作与访问原因证明', cleanupState: 'unverified' as const, minimumNecessary: true },
-      { id: 'export-files', label: '导出文件', days: 7, appliesTo: '异步生成的受控下载文件', cleanupState: 'not_configured' as const, minimumNecessary: true },
-    ] },
+    retention: { source: 'database' as const, cleanupJobVerified: false as const, items: retentionItems },
     features: { source: 'database' as const, items: featureItems },
     backup: { source: 'unverified' as const, configured: false as const, storageTargetConfigured: false as const, lastBackupAt: null, lastVerifiedAt: null, lastRestoreDrillAt: null, browserDownloadAllowed: false as const, notice: '尚未配置平台数据库备份作业；页面不允许直接下载数据库、密钥或认证文件。' },
   }
