@@ -7,10 +7,11 @@ const demoIntegrity = { deletionAllowed: false, appendOnlyVerified: false, verif
 
 describe('audit API contracts', () => {
   it('validates filters and metadata-only audit events', () => {
-    expect(auditFiltersSchema.safeParse({ period: '7d', search: '', actor: 'all', action: 'rotate', resource: 'key', result: 'success', source: 'api', page: 1, pageSize: 10 }).success).toBe(true)
+    expect(auditFiltersSchema.safeParse({ period: '7d', search: '', eventId: 'audit-alert-ack-1a2b3c4d', actor: 'all', action: 'rotate', resource: 'key', result: 'success', source: 'api', page: 1, pageSize: 10 }).success).toBe(true)
     expect(auditFiltersSchema.safeParse({ period: '7d', search: '', actor: 'all', action: 'access', resource: 'authorization', result: 'denied', source: 'web', page: 1, pageSize: 10 }).success).toBe(true)
     expect(auditFiltersSchema.safeParse({ period: '7d', search: '', actor: 'all', action: 'view', resource: 'conversation', result: 'success', source: 'web', page: 1, pageSize: 10 }).success).toBe(true)
     expect(auditFiltersSchema.safeParse({ period: '90d', search: '', actor: 'all', action: 'delete', resource: 'key', result: 'success', source: 'api', page: 0, pageSize: 10 }).success).toBe(false)
+    expect(auditFiltersSchema.safeParse({ period: '7d', search: '', eventId: 'alert-not-an-audit-event', actor: 'all', action: 'rotate', resource: 'key', result: 'success', source: 'api', page: 1, pageSize: 10 }).success).toBe(false)
     const response = { meta, summary: { total: 1, success: 1, failed: 0, denied: 0, sensitiveChanges: 1 }, options: { actors: [] }, items: [event], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 }, retention: { mode: 'demo', deletionAllowed: false, appendOnlyVerified: false, notice: '待验证' }, integrity: demoIntegrity }
     expect(auditResponseSchema.safeParse(response).success).toBe(true)
     expect(auditResponseSchema.safeParse({ ...response, meta: { ...response.meta, source: 'database' }, retention: { ...response.retention, mode: 'database' } }).success).toBe(true)

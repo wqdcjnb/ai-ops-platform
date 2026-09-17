@@ -8,8 +8,17 @@ import { AuditApiError, fetchAuditDetail, fetchAuditEvents, type AuditDetail, ty
 
 const audit = ref<AuditResponse | null>(null)
 const detail = ref<AuditDetail | null>(null)
+const initialQuery = typeof window === 'undefined' ? null : new URLSearchParams(window.location.search)
+function linkedAuditEventFromLocation() {
+  const value = initialQuery?.get('eventId')?.trim() ?? ''
+  return /^audit-[a-z0-9-]{1,80}$/.test(value) ? value : ''
+}
+type LinkedAuditOrigin = 'alert_action' | 'direct'
+function linkedAuditOriginFromLocation(): LinkedAuditOrigin { return initialQuery?.get('origin') === 'alert_action' ? 'alert_action' : 'direct' }
 const period = ref<AuditFilters['period']>('7d')
 const search = ref('')
+const eventId = ref(linkedAuditEventFromLocation())
+const linkedAuditOrigin = ref<LinkedAuditOrigin>(linkedAuditOriginFromLocation())
 const actor = ref('all')
 const action = ref<AuditFilters['action']>('all')
 const resource = ref<AuditFilters['resource']>('all')
@@ -29,6 +38,8 @@ const roleText = { super_admin: '超级管理员', admin: '管理员', departmen
 const updatedAt = computed(() => audit.value ? timeText(audit.value.meta.generatedAt) : '—')
 const sourceLabel = computed(() => audit.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '演示数据')
 const detailSourceLabel = computed(() => detail.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '演示数据')
+const hasLinkedAuditEvent = computed(() => Boolean(eventId.value))
+const linkedAuditMessage = computed(() => linkedAuditOrigin.value === 'alert_action' ? '正在显示本次告警处置的审计记录' : '正在显示关联审计记录')
 const summaryCards = computed(() => {
   const value = audit.value?.summary
   return [
@@ -40,10 +51,17 @@ const summaryCards = computed(() => {
   ]
 })
 
-function currentFilters(): AuditFilters { return { period: period.value, search: search.value.trim(), actor: actor.value, action: action.value, resource: resource.value, result: result.value, source: source.value, page: page.value, pageSize } }
+function currentFilters(): AuditFilters { return { period: period.value, search: search.value.trim(), eventId: eventId.value, actor: actor.value, action: action.value, resource: resource.value, result: result.value, source: source.value, page: page.value, pageSize } }
 function timeText(value: string) { return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value)) }
 function applyFilters() { page.value = 1; void loadData() }
-function clearFilters() { period.value = '7d'; search.value = ''; actor.value = 'all'; action.value = 'all'; resource.value = 'all'; result.value = 'all'; source.value = 'all'; applyFilters() }
+function removeLinkedAuditQuery() {
+  if (typeof window === 'undefined') return
+  const params = new URLSearchParams(window.location.search)
+  params.delete('eventId'); params.delete('origin')
+  window.history.replaceState({}, '', `${window.location.pathname}${params.size ? `?${params}` : ''}${window.location.hash}`)
+}
+function clearLinkedAuditFilter() { eventId.value = ''; linkedAuditOrigin.value = 'direct'; removeLinkedAuditQuery(); applyFilters() }
+function clearFilters() { period.value = '7d'; search.value = ''; eventId.value = ''; linkedAuditOrigin.value = 'direct'; actor.value = 'all'; action.value = 'all'; resource.value = 'all'; result.value = 'all'; source.value = 'all'; removeLinkedAuditQuery(); applyFilters() }
 function changePage(next: number) { if (!audit.value || next < 1 || next > audit.value.pagination.totalPages) return; page.value = next; void loadData() }
 
 async function loadData() {
@@ -72,6 +90,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
   <div class="dashboard audit-dashboard">
     <section class="page-heading"><div><div class="eyebrow">AUDIT TRAIL</div><h1>审计日志</h1><p>按请求 ID 复核管理员操作、配置变化、权限拒绝与执行结果。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="异步导出、授权和导出审计完成后开放"><IconDownload :size="16" />导出审计</button></div></section>
     <div v-if="audit" class="source-banner"><span>{{ sourceLabel }}</span>{{ audit.meta.notice }}</div>
+    <div v-if="hasLinkedAuditEvent" class="audit-related-filter" role="status"><span><IconFingerprint :size="15" />{{ linkedAuditMessage }}</span><button class="text-button" type="button" aria-label="清除告警处置审计关联" @click="clearLinkedAuditFilter">清除关联</button></div>
     <section class="audit-summary-grid" aria-label="审计汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
     <div v-if="!audit && !errorMessage" class="panel data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取审计事件</strong><p>正在加载操作者、资源、请求链路与字段变化摘要…</p></div></div>

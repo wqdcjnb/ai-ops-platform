@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, type App } from 'vue'
+import { createApp, nextTick, type App } from 'vue'
 import AlertsView from './views/AlertsView.vue'
-import { fetchAlertDetail, fetchAlertRules, fetchAlerts, fetchAlertSummary, type AlertDetail, type AlertRules, type AlertsResponse, type AlertSummary } from './alerts-api'
+import { acknowledgeLocalAlert, fetchAlertDetail, fetchAlertRules, fetchAlerts, fetchAlertSummary, type AlertActionResponse, type AlertDetail, type AlertRules, type AlertsResponse, type AlertSummary } from './alerts-api'
 
-vi.mock('./alerts-api', async (importOriginal) => ({ ...await importOriginal<typeof import('./alerts-api')>(), fetchAlertDetail: vi.fn(), fetchAlertRules: vi.fn(), fetchAlerts: vi.fn(), fetchAlertSummary: vi.fn() }))
+vi.mock('./alerts-api', async (importOriginal) => ({ ...await importOriginal<typeof import('./alerts-api')>(), acknowledgeLocalAlert: vi.fn(), fetchAlertDetail: vi.fn(), fetchAlertRules: vi.fn(), fetchAlerts: vi.fn(), fetchAlertSummary: vi.fn() }))
 
 const meta = { source: 'database' as const, simulated: true as const, generatedAt: '2026-09-17T10:00:00.000Z', notice: '当前读取 SQLite 可重复模拟告警。' }
 const notificationConfig = { configured: false as const, channels: [{ type: 'wecom' as const, state: 'not_configured' as const }, { type: 'dingtalk' as const, state: 'not_configured' as const }], notice: '不会向外发送消息。' }
@@ -18,6 +18,8 @@ function summary(): AlertSummary { return { meta, summary: { open: 1, critical: 
 function alerts(): AlertsResponse { return { meta, options: { sources: [{ id: 'error_rate', label: '错误率' }] }, items: [event], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 } } }
 function rules(): AlertRules { return { meta, notificationConfig, items: [{ id: 'rule-error', name: '错误率严重告警', category: 'error_rate', severity: 'critical', enabled: true, environment: 'production', scope: '官方生产渠道', condition: '5xx ≥ 5%', window: '5 分钟', cooldownMinutes: 15, notification: { configured: false, channel: 'none' }, lastTriggeredAt: '2026-09-17T10:00:00.000Z', triggerCount7d: 2, description: '仅安全摘要。' }] } }
 function detail(): AlertDetail { return { meta, item: event, analysis: { cause: '仅安全摘要。', impact: '可能影响生产范围。', recommendation: '按请求 ID 排查。', rawUpstreamBodyAvailable: false }, timeline: [{ id: 'alert-error-global-detected', type: 'detected', occurredAt: '2026-09-17T09:00:00.000Z', title: '检测到事件', description: '安全说明。' }] } }
+function acknowledgedDetail(): AlertDetail { return { ...detail(), item: { ...event, status: 'acknowledged', assignee: { id: 'admin-demo', name: '超级管理员' }, acknowledgedAt: '2026-09-17T10:01:00.000Z' } } }
+function acknowledgement(): AlertActionResponse { return { meta: { source: 'database', completedAt: '2026-09-17T10:01:00.000Z', notice: '仅本地模拟。' }, item: acknowledgedDetail().item, operation: { action: 'acknowledge', idempotencyKey: 'alert-ack-1a2b3c4d', idempotent: false, auditEventId: 'audit-alert-ack-1a2b3c4d' } } }
 
 let host: HTMLDivElement
 let app: App
@@ -28,6 +30,7 @@ beforeEach(() => {
   vi.mocked(fetchAlerts).mockResolvedValue(alerts())
   vi.mocked(fetchAlertRules).mockResolvedValue(rules())
   vi.mocked(fetchAlertDetail).mockResolvedValue(detail())
+  vi.mocked(acknowledgeLocalAlert).mockResolvedValue(acknowledgement())
 })
 afterEach(() => { app?.unmount(); host.remove() })
 
@@ -43,5 +46,24 @@ describe('alerts view database simulation', () => {
     await vi.waitFor(() => expect(host.querySelector('[role="dialog"]')).not.toBeNull())
     expect(host.querySelector('[role="dialog"]')!.textContent).toContain('不保留上游完整正文')
     expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 req-demo-001 关联调用"]')?.getAttribute('href')).toBe('/usage?requestId=req-demo-001&origin=alert')
+  })
+
+  it('links a completed local acknowledgement to its exact safe audit event', async () => {
+    app = createApp(AlertsView); app.mount(host)
+    await vi.waitFor(() => expect(host.querySelector<HTMLButtonElement>('[aria-label="查看 官方全球组错误率持续升高 详情"]')).not.toBeNull())
+    host.querySelector<HTMLButtonElement>('[aria-label="查看 官方全球组错误率持续升高 详情"]')!.click()
+    await vi.waitFor(() => expect(host.textContent).toContain('确认告警'))
+    ;[...host.querySelectorAll<HTMLButtonElement>('button')].find((node) => node.textContent?.trim() === '确认告警')!.click()
+    await vi.waitFor(() => expect(host.querySelector('textarea')).not.toBeNull())
+    const reason = host.querySelector<HTMLTextAreaElement>('textarea')!
+    reason.value = '已完成本地模拟事件复核并由管理员接手处理'
+    reason.dispatchEvent(new Event('input'))
+    await nextTick()
+    const submit = [...host.querySelectorAll<HTMLButtonElement>('button')].find((node) => node.textContent?.trim() === '确认本地告警')!
+    expect(submit.disabled).toBe(false)
+    submit.click()
+    await vi.waitFor(() => expect(acknowledgeLocalAlert).toHaveBeenCalledWith('alert-error-global', expect.objectContaining({ acknowledgeSimulation: true })))
+    await vi.waitFor(() => expect(host.textContent).toContain('处置摘要已写入 SQLite 审计记录'))
+    expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 audit-alert-ack-1a2b3c4d 操作审计"]')?.getAttribute('href')).toBe('/audit?eventId=audit-alert-ack-1a2b3c4d&origin=alert_action')
   })
 })

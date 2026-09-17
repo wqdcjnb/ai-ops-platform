@@ -27,6 +27,7 @@ const action = ref<'acknowledge' | 'close' | null>(null)
 const actionError = ref('')
 const isActing = ref(false)
 const actionForm = ref<AlertAcknowledgeBody | AlertCloseBody>({ idempotencyKey: '', reason: '', acknowledgeSimulation: true })
+const actionReceipt = ref<{ action: 'acknowledge' | 'close'; auditEventId: string } | null>(null)
 let request: AbortController | undefined
 let detailRequest: AbortController | undefined
 
@@ -76,7 +77,7 @@ async function openDetail(item: AlertEvent) {
   const next = new AbortController()
   detailRequest = next
   detailLoadingId.value = item.id
-  try { detail.value = await fetchAlertDetail(item.id, next.signal) }
+  try { detail.value = await fetchAlertDetail(item.id, next.signal); actionReceipt.value = null }
   catch (error) { if (!next.signal.aborted) errorMessage.value = error instanceof Error ? error.message : '告警详情暂时无法加载' }
   finally { if (detailRequest === next) detailLoadingId.value = '' }
 }
@@ -100,6 +101,7 @@ async function submitAction() {
       : await closeLocalAlert(detail.value.item.id, actionForm.value as AlertCloseBody)
     detail.value = await fetchAlertDetail(result.item.id)
     await loadData()
+    actionReceipt.value = { action: result.operation.action, auditEventId: result.operation.auditEventId }
     action.value = null
   } catch (error) {
     const requestId = error instanceof AlertsApiError ? error.requestId : undefined
@@ -144,6 +146,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 
     <div v-if="detail" class="drawer-backdrop" @click.self="detail = null"><aside class="model-drawer alert-drawer" role="dialog" aria-modal="true" aria-label="告警事件详情"><header><div><span class="source-tag live">SQLite</span><h2>告警详情</h2></div><button class="icon-button" aria-label="关闭详情" @click="detail = null"><IconX :size="20" /></button></header>
       <section class="alert-drawer-hero" :class="detail.item.severity"><span><IconAlertTriangle :size="21" /></span><div><div><span class="severity-chip" :class="detail.item.severity">{{ severityText[detail.item.severity] }}</span><span class="environment-tag" :class="detail.item.environment">{{ environmentText[detail.item.environment] }}</span></div><strong>{{ detail.item.title }}</strong><code>{{ detail.item.id }}</code></div><span class="alert-state" :class="detail.item.status"><i />{{ statusText[detail.item.status] }}</span></section>
+      <section v-if="actionReceipt" class="alert-action-success" role="status"><div><IconCircleCheck :size="18" /><div><strong>已{{ actionReceipt.action === 'acknowledge' ? '确认' : '关闭' }}本地模拟告警</strong><p>处置摘要已写入 SQLite 审计记录，不保存说明原文。</p></div></div><a :href="`/audit?eventId=${encodeURIComponent(actionReceipt.auditEventId)}&origin=alert_action`" :aria-label="`查看 ${actionReceipt.auditEventId} 操作审计`">查看操作审计<IconChevronRight :size="15" /></a></section>
       <section class="drawer-section"><h3>事件概况</h3><dl class="model-facts"><div><dt>告警对象</dt><dd>{{ detail.item.subject.name }}</dd></div><div><dt>来源</dt><dd>{{ sourceText[detail.item.source] }}</dd></div><div><dt>规则</dt><dd>{{ detail.item.rule.name }}</dd></div><div><dt>触发值</dt><dd>{{ detail.item.trigger.valueLabel }}</dd></div><div><dt>阈值</dt><dd>{{ detail.item.rule.thresholdLabel }}</dd></div><div><dt>发生次数</dt><dd>{{ detail.item.occurrences }} 次</dd></div><div><dt>首次发生</dt><dd>{{ timeText(detail.item.firstOccurredAt) }}</dd></div><div><dt>最近发生</dt><dd>{{ timeText(detail.item.lastOccurredAt) }}</dd></div></dl></section>
       <section class="drawer-section"><h3>安全分析</h3><div class="alert-analysis"><article><small>原因摘要</small><p>{{ detail.analysis.cause }}</p></article><article><small>影响范围</small><p>{{ detail.analysis.impact }}</p></article><article><small>建议动作</small><p>{{ detail.analysis.recommendation }}</p></article></div><div class="usage-content-boundary"><IconShieldCheck :size="19" /><div><strong>不保留上游完整正文</strong><p>详情仅展示可审计的脱敏摘要和请求 ID。</p></div></div></section>
       <section class="drawer-section"><h3>处理记录</h3><div class="alert-timeline"><article v-for="entry in detail.timeline" :key="entry.id"><i /><div><strong>{{ entry.title }}</strong><p>{{ entry.description }}</p><small>{{ timeText(entry.occurredAt) }}</small></div></article></div></section>
@@ -173,4 +176,5 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 .alert-action-ack input { margin: 2px 0 0; accent-color: var(--brand); }
 .alert-action-error { margin: -3px 0 0; padding: 9px 10px; border-radius: 6px; color: #a33232; background: #fff1f1; font-size: 12px; line-height: 1.5; }
 .alert-action-form footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.alert-action-success { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 13px 18px 0; padding: 10px 11px; border: 1px solid #b9dfc0; border-radius: 7px; color: #2f6240; background: #f1faf2; }.alert-action-success > div { display: flex; align-items: flex-start; gap: 8px; }.alert-action-success > div > div { display: grid; gap: 2px; }.alert-action-success svg { flex: 0 0 auto; }.alert-action-success strong { font-size: 12px; }.alert-action-success p { margin: 0; color: #5d7a67; font-size: 11px; line-height: 1.45; }.alert-action-success a { display: inline-flex; align-items: center; gap: 1px; color: #286c45; font-size: 11px; font-weight: 700; text-decoration: none; white-space: nowrap; }.alert-action-success a:hover { color: #165832; text-decoration: underline; }.alert-action-success a:focus-visible { outline: 2px solid #62a877; outline-offset: 2px; }
 </style>

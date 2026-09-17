@@ -15,6 +15,7 @@ const integritySchema = z.object({
 export const auditQuerySchema = z.object({
   period: periodSchema.default('7d'),
   search: z.string().trim().max(80).default(''),
+  eventId: z.union([z.literal(''), z.string().regex(/^audit-[a-z0-9-]{1,80}$/)]).default(''),
   actor: z.string().trim().max(40).default('all'),
   action: z.union([z.literal('all'), actionSchema]).default('all'),
   resource: z.union([z.literal('all'), resourceTypeSchema]).default('all'),
@@ -90,7 +91,7 @@ export function createDemoAudit(query: AuditQuery, now = new Date()) {
   const search = query.search.toLocaleLowerCase('zh-CN')
   const filtered = all.filter((item) => {
     const matchesSearch = !search || [item.id, item.requestId, item.actor.name, item.actionLabel, item.resource.name, item.summary].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
-    return new Date(item.occurredAt).getTime() >= cutoff && matchesSearch && (query.actor === 'all' || item.actor.id === query.actor) && (query.action === 'all' || item.action === query.action) && (query.resource === 'all' || item.resource.type === query.resource) && (query.result === 'all' || item.result.status === query.result) && (query.source === 'all' || item.source.type === query.source)
+    return new Date(item.occurredAt).getTime() >= cutoff && matchesSearch && (!query.eventId || item.id === query.eventId) && (query.actor === 'all' || item.actor.id === query.actor) && (query.action === 'all' || item.action === query.action) && (query.resource === 'all' || item.resource.type === query.resource) && (query.result === 'all' || item.result.status === query.result) && (query.source === 'all' || item.source.type === query.source)
   })
   const start = (query.page - 1) * query.pageSize
   return {
@@ -200,7 +201,7 @@ function filterAuditEvents(all: AuditEvent[], query: AuditQuery, now: Date) {
   const search = query.search.toLocaleLowerCase('zh-CN')
   return all.filter((item) => {
     const matchesSearch = !search || [item.id, item.requestId, item.actor.name, item.actionLabel, item.resource.name, item.summary].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
-    return new Date(item.occurredAt).getTime() >= cutoff && matchesSearch && (query.actor === 'all' || item.actor.id === query.actor) && (query.action === 'all' || item.action === query.action) && (query.resource === 'all' || item.resource.type === query.resource) && (query.result === 'all' || item.result.status === query.result) && (query.source === 'all' || item.source.type === query.source)
+    return new Date(item.occurredAt).getTime() >= cutoff && matchesSearch && (!query.eventId || item.id === query.eventId) && (query.actor === 'all' || item.actor.id === query.actor) && (query.action === 'all' || item.action === query.action) && (query.resource === 'all' || item.resource.type === query.resource) && (query.result === 'all' || item.result.status === query.result) && (query.source === 'all' || item.source.type === query.source)
   })
 }
 

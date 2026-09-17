@@ -7,7 +7,7 @@ const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
 const integritySchema = z.object({ deletionAllowed: z.literal(false), appendOnlyVerified: z.literal(false), verified: z.boolean(), hashChainVerified: z.boolean(), checkpointVerified: z.boolean(), algorithm: z.enum(['sha256', 'not_configured']), checkedAt: z.string().datetime().nullable(), checkpointUpdatedAt: z.string().datetime().nullable(), eventCount: z.number().int().nonnegative(), firstInvalidEventId: z.string().nullable(), notice: z.string() })
 
-export const auditFiltersSchema = z.object({ period: periodSchema, search: z.string().max(80), actor: z.string(), action: z.union([z.literal('all'), actionSchema]), resource: z.union([z.literal('all'), resourceTypeSchema]), result: z.union([z.literal('all'), resultStatusSchema]), source: z.union([z.literal('all'), sourceTypeSchema]), page: z.number().int().positive(), pageSize: z.number().int().min(5).max(50) })
+export const auditFiltersSchema = z.object({ period: periodSchema, search: z.string().max(80), eventId: z.union([z.literal(''), z.string().regex(/^audit-[a-z0-9-]{1,80}$/)]).default(''), actor: z.string(), action: z.union([z.literal('all'), actionSchema]), resource: z.union([z.literal('all'), resourceTypeSchema]), result: z.union([z.literal('all'), resultStatusSchema]), source: z.union([z.literal('all'), sourceTypeSchema]), page: z.number().int().positive(), pageSize: z.number().int().min(5).max(50) })
 
 const changeSchema = z.object({ field: z.string(), label: z.string(), before: z.string().nullable(), after: z.string().nullable(), sensitive: z.boolean() })
 export const auditEventSchema = z.object({
