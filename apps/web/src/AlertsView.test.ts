@@ -42,5 +42,6 @@ describe('alerts view database simulation', () => {
     await vi.waitFor(() => expect(fetchAlertDetail).toHaveBeenCalledWith('alert-error-global', expect.any(AbortSignal)))
     await vi.waitFor(() => expect(host.querySelector('[role="dialog"]')).not.toBeNull())
     expect(host.querySelector('[role="dialog"]')!.textContent).toContain('不保留上游完整正文')
+    expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 req-demo-001 关联调用"]')?.getAttribute('href')).toBe('/usage?requestId=req-demo-001&origin=alert')
   })
 })

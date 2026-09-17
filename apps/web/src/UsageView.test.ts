@@ -69,12 +69,21 @@ describe('usage view database simulation', () => {
   })
 
   it('accepts a safe synthetic request ID from conversation audit and allows clearing it', async () => {
-    mount('/usage?requestId=req-demo-001')
+    mount('/usage?requestId=req-demo-001&origin=conversation_audit')
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledWith(expect.objectContaining({ search: 'req-demo-001', page: 1 }), expect.any(AbortSignal)))
     expect(host.textContent).toContain('来自对话审计的模拟用量关联')
     expect(host.textContent).toContain('不代表真实网关请求链路')
     button('清除对话审计关联筛选').click()
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenLastCalledWith(expect.objectContaining({ search: '', page: 1 }), expect.any(AbortSignal)))
     expect(window.location.search).toBe('')
+  })
+
+  it('labels a safe alert-to-usage handoff without treating it as a real upstream request', async () => {
+    mount('/usage?requestId=req-demo-001&origin=alert')
+    await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledWith(expect.objectContaining({ search: 'req-demo-001', page: 1 }), expect.any(AbortSignal)))
+    expect(host.textContent).toContain('来自告警事件的模拟调用关联')
+    expect(host.textContent).toContain('不代表真实上游请求链路')
+    button('清除告警关联筛选').click()
+    await vi.waitFor(() => expect(window.location.search).toBe(''))
   })
 })

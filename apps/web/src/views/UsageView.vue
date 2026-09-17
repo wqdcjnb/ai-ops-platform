@@ -17,7 +17,13 @@ function linkedUsageRequestFromLocation() {
   const value = new URLSearchParams(window.location.search).get('requestId')?.trim() ?? ''
   return /^req-[A-Za-z0-9-]{1,80}$/.test(value) ? value : ''
 }
+type LinkedUsageOrigin = 'conversation_audit' | 'alert'
+function linkedUsageOriginFromLocation(): LinkedUsageOrigin {
+  if (typeof window === 'undefined') return 'conversation_audit'
+  return new URLSearchParams(window.location.search).get('origin') === 'alert' ? 'alert' : 'conversation_audit'
+}
 const linkedUsageRequestId = ref(linkedUsageRequestFromLocation())
+const linkedUsageOrigin = ref(linkedUsageOriginFromLocation())
 const search = ref(linkedUsageRequestId.value)
 const person = ref('all')
 const department = ref('all')
@@ -38,6 +44,9 @@ const costTone = { official_actual: 'actual', platform_estimate: 'platform', cpa
 
 const updatedAt = computed(() => usage.value ? timeText(usage.value.meta.generatedAt) : '—')
 const sourceLabel = computed(() => usage.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '正在读取')
+const linkedUsageTitle = computed(() => linkedUsageOrigin.value === 'alert' ? '来自告警事件的模拟调用关联' : '来自对话审计的模拟用量关联')
+const linkedUsageNotice = computed(() => linkedUsageOrigin.value === 'alert' ? '当前仅筛选告警明确关联的 SQLite 模拟调用，不代表真实上游请求链路。' : '当前仅筛选 SQLite 合成映射的模拟记录，不代表真实网关请求链路。')
+const clearLinkedUsageLabel = computed(() => linkedUsageOrigin.value === 'alert' ? '清除告警关联筛选' : '清除对话审计关联筛选')
 const summaryCards = computed(() => {
   const value = usage.value?.summary
   return [
@@ -61,6 +70,7 @@ function clearLinkedUsageFilter() {
   if (typeof window !== 'undefined') {
     const url = new URL(window.location.href)
     url.searchParams.delete('requestId')
+    url.searchParams.delete('origin')
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
   }
   clearFilters()
@@ -95,7 +105,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 <template>
   <div class="dashboard usage-dashboard">
     <section class="page-heading"><div><div class="eyebrow">USAGE &amp; REQUEST LOGS</div><h1>用量与日志</h1><p>按请求 ID 核对调用归属、Token、点数、延迟、渠道和安全错误摘要。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="异步导出、权限过滤和审计完成后开放"><IconFileAnalytics :size="16" />导出</button></div></section>
-    <div v-if="linkedUsageRequestId" class="usage-linked-notice"><div><strong>来自对话审计的模拟用量关联</strong><p>当前仅筛选 SQLite 合成映射的模拟记录，不代表真实网关请求链路。</p></div><code>{{ linkedUsageRequestId }}</code><button class="text-button" type="button" aria-label="清除对话审计关联筛选" @click="clearLinkedUsageFilter">清除关联</button></div>
+    <div v-if="linkedUsageRequestId" class="usage-linked-notice"><div><strong>{{ linkedUsageTitle }}</strong><p>{{ linkedUsageNotice }}</p></div><code>{{ linkedUsageRequestId }}</code><button class="text-button" type="button" :aria-label="clearLinkedUsageLabel" @click="clearLinkedUsageFilter">清除关联</button></div>
     <div v-if="usage" class="source-banner"><span>{{ sourceLabel }}</span>{{ usage.meta.notice }}</div>
     <section class="usage-summary-grid" aria-label="调用汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
