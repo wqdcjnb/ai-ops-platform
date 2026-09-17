@@ -453,6 +453,12 @@ export interface PlatformApiKeyCreate {
   models: string[]
 }
 
+export interface PlatformApiKeyDisableResult {
+  state: 'disabled' | 'already_disabled'
+  idempotent: boolean
+  key: ReturnType<PlatformDatabase['listApiKeys']>[number]
+}
+
 export interface PlatformConversationAccessCreate {
   id: string
   actorUserId: string
@@ -1094,6 +1100,30 @@ export class PlatformDatabase {
       throw error
     }
     return this.listApiKeys().find((item) => item.id === key.id) ?? null
+  }
+
+  disableApiKey(keyId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyDisableResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null } | undefined
+    const current = () => this.listApiKeys().find((item) => item.id === keyId) ?? null
+    if (previousOperation) {
+      if (previousOperation.resourceId !== keyId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const key = current()
+      return key ? { state: 'disabled', idempotent: true, key } : null
+    }
+    const before = current()
+    if (!before) return null
+    if (before.status === 'revoked') return { state: 'already_disabled', idempotent: false, key: before }
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ?").run(now.toISOString(), keyId)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const key = current()
+    return key ? { state: 'disabled', idempotent: false, key } : null
   }
 
   listQuotaPolicies() {

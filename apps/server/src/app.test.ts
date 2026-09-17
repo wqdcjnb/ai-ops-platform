@@ -401,6 +401,36 @@ describe('BFF', () => {
     expect(employeeCreate.statusCode).toBe(403)
   })
 
+  it('disables only a local demo Key with CSRF, idempotency, and a safe audit summary', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { idempotencyKey: 'key-disable-1a2b3c4d', reason: '复核疑似泄露的本地演示设备', acknowledgeImpact: true }
+    const disabled = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(disabled.statusCode).toBe(200)
+    expect(disabled.json()).toMatchObject({ meta: { source: 'database' }, key: { id: 'key-lin-1', masked: 'sk-ops••••••7F2A', status: 'disabled' }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-key-disable-1a2b3c4d' } })
+
+    const replay = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json().operation.idempotent).toBe(true)
+    const reused = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reused.statusCode).toBe(409)
+    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+
+    const listed = await app.inject({ method: 'GET', url: '/api/keys?status=disabled', headers: { cookie } })
+    expect(listed.statusCode).toBe(200)
+    expect(listed.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'key-lin-1', status: 'disabled' })]))
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=disable&resource=key', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'disable', resource: expect.objectContaining({ id: 'key-lin-1', name: 'sk-ops••••••7F2A' }), changes: [expect.objectContaining({ field: 'status', before: '启用', after: '停用' })] })]))
+    expect(JSON.stringify({ disabled: disabled.json(), audit: audit.json() })).not.toContain(body.reason)
+
+    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/disable', headers: { cookie }, payload: { ...body, idempotencyKey: 'key-disable-5e6f7g8h' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+  })
+
   it('returns safe Key detail configuration and stable not-found errors', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/keys/key-lin-1' })
     const body = response.json()

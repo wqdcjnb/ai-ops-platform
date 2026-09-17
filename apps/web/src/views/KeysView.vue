@@ -5,7 +5,7 @@ import {
   IconAlertTriangle, IconBan, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconDeviceDesktop,
   IconFilter, IconKey, IconKeyOff, IconRefresh, IconRotate, IconSearch, IconShieldCheck, IconSparkles, IconUser, IconX,
 } from '@tabler/icons-vue'
-import { createKey, fetchKeyDetail, fetchKeys, KeysApiError, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyFilters, type KeyListItem, type KeysResponse } from '../keys-api'
+import { createKey, disableKey, fetchKeyDetail, fetchKeys, KeysApiError, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyDisableBody, type KeyFilters, type KeyListItem, type KeysResponse } from '../keys-api'
 
 const route = useRoute()
 const keys = ref<KeysResponse | null>(null)
@@ -26,6 +26,11 @@ const showCreate = ref(false)
 const createError = ref('')
 const isCreating = ref(false)
 const createdKey = ref<KeyCreateResponse | null>(null)
+const showDisable = ref(false)
+const disableError = ref('')
+const disableSuccess = ref('')
+const isDisabling = ref(false)
+const disableForm = ref<KeyDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
 const createForm = ref<KeyCreateBody>({ ownerId: '', purpose: '', models: ['ecommerce-general'], expiresInDays: 90, deviceNote: '本地演示设备' })
 const modelInput = ref('ecommerce-general')
 let listRequest: AbortController | null = null
@@ -122,6 +127,27 @@ async function openDetail(id: string) {
 
 function closeDetail() { detailRequest?.abort(); selected.value = null; detailError.value = ''; isDetailLoading.value = false }
 async function copyValue(label: string, value: string) { try { await navigator.clipboard.writeText(value); copied.value = label } catch { copied.value = '复制失败' } }
+function newDisableIdempotencyKey() { return `key-disable-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function openDisable() {
+  if (!selected.value || selected.value.key.status === 'disabled') return
+  disableError.value = ''; disableSuccess.value = ''
+  disableForm.value = { idempotencyKey: newDisableIdempotencyKey(), reason: '', acknowledgeImpact: true }
+  showDisable.value = true
+}
+function closeDisable() { if (!isDisabling.value) { showDisable.value = false; disableError.value = ''; disableSuccess.value = '' } }
+async function submitDisable() {
+  if (!selected.value) return
+  isDisabling.value = true; disableError.value = ''
+  try {
+    const result = await disableKey(selected.value.key.id, disableForm.value)
+    disableSuccess.value = `${result.key.masked} 已停用；${result.meta.notice}`
+    await loadKeys()
+    selected.value = await fetchKeyDetail(selected.value.key.id)
+  } catch (error) {
+    const requestId = error instanceof KeysApiError ? error.requestId : undefined
+    disableError.value = `${error instanceof Error ? error.message : '停用 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isDisabling.value = false }
+}
 
 onMounted(() => void loadKeys())
 onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
@@ -157,7 +183,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
     </section>
 
     <section v-if="keys" class="panel connection-panel"><div class="connection-icon"><IconDeviceDesktop :size="22" /></div><div><h2>客户端连接规范</h2><p>{{ keys.connection.note }}</p><code>{{ keys.connection.baseUrl }}</code></div><button class="btn btn-white" @click="copyValue('Base URL', keys.connection.baseUrl)"><IconCheck v-if="copied === 'Base URL'" :size="16" /><IconCopy v-else :size="16" />{{ copied === 'Base URL' ? '已复制' : '复制 Base URL' }}</button></section>
-    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · 新建 Key 已开放（本地 SQLite）· 停用与轮换仍待接入</footer>
+    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · 新建与停用 Key 仅作用于本地 SQLite 演示数据 · 轮换仍待接入</footer>
 
     <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
       <aside class="create-key-dialog" role="dialog" aria-modal="true" aria-label="创建 Key">
@@ -188,8 +214,16 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
           <dl class="drawer-facts"><div><dt>所属人员</dt><dd><RouterLink :to="`/people/${selected.key.owner.id}`">{{ selected.key.owner.name }}</RouterLink></dd></div><div><dt>所属部门</dt><dd>{{ selected.key.owner.department }}</dd></div><div><dt>用途</dt><dd>{{ selected.key.purpose }}</dd></div><div><dt>设备备注</dt><dd>{{ selected.key.deviceNote }}</dd></div><div><dt>创建时间</dt><dd>{{ dateText(selected.key.createdAt) }}</dd></div><div><dt>到期时间</dt><dd>{{ dateText(selected.key.expiresAt) }}</dd></div><div><dt>来源限制</dt><dd>{{ selected.key.allowedIps.join('、') }}</dd></div><div><dt>限流</dt><dd>{{ selected.key.limits.rpm }} RPM · {{ (selected.key.limits.tpm / 1000).toFixed(0) }}K TPM · {{ selected.key.limits.concurrent }} 并发</dd></div></dl>
           <section class="drawer-section"><h3>允许模型</h3><div class="drawer-models"><span v-for="entry in selected.key.models" :key="entry">{{ entry }}</span></div></section>
           <section class="drawer-section"><h3>连接说明</h3><div class="drawer-copy-row"><code>{{ selected.connection.baseUrl }}</code><button @click="copyValue('drawer-url', selected.connection.baseUrl)"><IconCheck v-if="copied === 'drawer-url'" :size="14" /><IconCopy v-else :size="14" /></button></div><ol><li v-for="instruction in selected.connection.instructions" :key="instruction">{{ instruction }}</li></ol></section>
-          <footer class="drawer-actions"><button class="btn btn-white" disabled><IconRotate :size="16" />轮换 Key</button><button class="btn danger-outline" disabled><IconBan :size="16" />停用 Key</button></footer>
+          <footer class="drawer-actions"><button class="btn btn-white" disabled><IconRotate :size="16" />轮换 Key</button><button class="btn danger-outline" :disabled="selected.key.status === 'disabled'" @click="openDisable"><IconBan :size="16" />{{ selected.key.status === 'disabled' ? '已停用' : '停用 Key' }}</button></footer>
         </template>
+      </aside>
+    </div>
+
+    <div v-if="showDisable && selected" class="drawer-backdrop" @click.self="closeDisable">
+      <aside class="create-key-dialog disable-key-dialog" role="dialog" aria-modal="true" aria-label="停用 Key">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>停用本地演示 Key</h2></div><button class="icon-button" aria-label="关闭停用 Key" :disabled="isDisabling" @click="closeDisable"><IconX :size="20" /></button></header>
+        <template v-if="disableSuccess"><section class="created-key-success"><IconCheck :size="22" /><strong>Key 已停用</strong><p>{{ disableSuccess }}</p></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
+        <form v-else class="create-key-form" @submit.prevent="submitDisable"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 将只在本地 SQLite 中标为停用。不会调用 New API、不会撤销真实凭据，当前页面也不提供恢复操作。</p><label><span>停用原因 <em>至少 8 个字符</em></span><textarea v-model="disableForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：复核疑似泄露的本地演示设备" /></label><label class="access-ack"><input v-model="disableForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该操作会立即改变本地演示 Key 状态，并写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="disableError" class="create-person-error"><IconAlertTriangle :size="16" />{{ disableError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDisabling" @click="closeDisable">取消</button><button class="btn danger-outline" type="submit" :disabled="isDisabling || disableForm.reason.trim().length < 8 || !disableForm.acknowledgeImpact">{{ isDisabling ? '停用中…' : '确认停用' }}</button></footer></form>
       </aside>
     </div>
   </div>

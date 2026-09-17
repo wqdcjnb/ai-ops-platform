@@ -73,11 +73,25 @@ export const keyCreateResponseSchema = z.object({
   secret: z.string().min(20),
 })
 
+export const keyDisableBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^key-disable-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+
+export const keyDisableResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  key: z.object({ id: z.string(), masked: z.string(), status: z.literal('disabled') }),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export type KeysQuery = z.infer<typeof keysQuerySchema>
 export type KeysResponse = z.infer<typeof keysResponseSchema>
 export type KeyDetailResponse = z.infer<typeof keyDetailResponseSchema>
 export type KeyCreateBody = z.infer<typeof keyCreateBodySchema>
 export type KeyCreateResponse = z.infer<typeof keyCreateResponseSchema>
+export type KeyDisableBody = z.infer<typeof keyDisableBodySchema>
+export type KeyDisableResponse = z.infer<typeof keyDisableResponseSchema>
 
 interface KeySeed {
   id: string

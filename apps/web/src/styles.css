@@ -592,3 +592,6 @@ button { cursor: pointer; }
 .usage-conversation-link strong { font-size: 8px; }
 .usage-conversation-link p { margin: 3px 0 0; color: #66858a; font-size: 6.8px; line-height: 1.45; }
 .usage-conversation-link .btn { min-height: 28px; padding: 0 9px; font-size: 7px; white-space: nowrap; }
+.disable-key-dialog .create-key-form textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #d9e1e5; border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 9px/1.55 inherit; }
+.disable-key-dialog .create-key-form textarea:focus { border-color: #d77d7d; box-shadow: 0 0 0 2px rgba(189,59,59,.08); }
+.disable-key-dialog .access-ack { width: 100%; margin-top: 0; }

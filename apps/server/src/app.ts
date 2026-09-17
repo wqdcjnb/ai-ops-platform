@@ -10,7 +10,7 @@ import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } fro
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
 import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
-import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyIdParamsSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
+import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitsQuerySchema, limitsResponseSchema } from './limits.js'
 import { createDemoRoutes, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelsQuerySchema, channelsResponseSchema, createDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
@@ -371,6 +371,31 @@ export function buildApp(options: BuildAppOptions = {}) {
     const result = createDatabaseKeyDetail(database, request.params.id, new Date(), dataScopeFor(request.authUser))
     if (result) return result
     return reply.status(404).send({ error: { code: 'KEY_NOT_FOUND', message: '未找到指定 Key', requestId: request.id } })
+  })
+
+  app.post('/api/keys/:id/disable', {
+    schema: { params: keyIdParamsSchema, body: keyDisableBodySchema, response: { 200: keyDisableResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const visible = createDatabaseKeyDetail(database, request.params.id, new Date(), dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'KEY_NOT_FOUND', message: '未找到指定 Key', requestId: request.id } })
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.disableApiKey(request.params.id, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'disable', resourceType: 'key', resourceId: request.params.id,
+        result: 'success', requestId: request.id,
+        summary: {
+          message: '已停用本地 SQLite 演示 Key；未调用 New API，未记录完整 Key 或停用原因原文。', resourceName: visible.key.masked,
+          reasonProvided: true, reasonLength: request.body.reason.length,
+          changes: [{ field: 'status', label: 'Key 状态', before: '启用', after: '停用', sensitive: false }],
+        },
+      })
+      if (!result) return reply.status(404).send({ error: { code: 'KEY_NOT_FOUND', message: '未找到指定 Key', requestId: request.id } })
+      if (result.state === 'already_disabled') return reply.status(409).send({ error: { code: 'KEY_ALREADY_DISABLED', message: '该 Key 已停用，请勿重复提交新的操作', requestId: request.id } })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已停用本地 SQLite 演示 Key；未调用 New API 或修改真实凭据。' }, key: { id: result.key.id, masked: result.key.maskedValue, status: 'disabled' as const }, operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一条 Key', requestId: request.id } })
+      throw error
+    }
   })
 
   app.get('/api/limits', {
