@@ -78,7 +78,7 @@ npm.cmd run dev:web
 
 访问 <http://127.0.0.1:4174>。前端通过开发代理访问 BFF，不在浏览器中保存管理凭据。
 
-New API 默认探测 `http://127.0.0.1:3000`。如需验证管理连接，参照 `apps/server/.env.example` 在启动 BFF 的服务端环境中设置 `NEW_API_ACCESS_TOKEN`；旧版 New API 如需用户标识头，可同时设置 `NEW_API_USER_ID`。状态接口只返回连接状态，不返回凭据或上游响应正文。
+New API 默认探测 `http://127.0.0.1:3000`。本地连接配置可参照 `apps/server/.env.example`，只将所需的 `NEW_API_BASE_URL`、`NEW_API_ACCESS_TOKEN` 写入 `apps/server/.env.local`；此文件已被 Git 忽略。`npm.cmd run dev:server` 和服务端 `npm.cmd run start` 会自动加载该文件，已有进程环境变量优先，修改后需要重启 BFF。请勿直接复制示例中的账号密码配置，以免影响本地演示账号。旧版 New API 如需用户标识头，可同时设置 `NEW_API_USER_ID`。状态接口只返回连接状态，不返回凭据或上游响应正文。
 
 ## 安全边界
 
