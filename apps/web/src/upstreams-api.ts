@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 export const upstreamFiltersSchema = z.object({ search: z.string().max(60), type: z.enum(['all', 'official_api', 'cpa_oauth']), status: z.enum(['all', 'healthy', 'degraded', 'auth_required', 'offline', 'unconfigured']) })
 
@@ -24,6 +25,21 @@ export type UpstreamFilters = z.infer<typeof upstreamFiltersSchema>
 export type UpstreamsResponse = z.infer<typeof upstreamsResponseSchema>
 export type UpstreamItem = z.infer<typeof upstreamItemSchema>
 
+export const upstreamCheckBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^upstream-check-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeSynthetic: z.literal(true),
+})
+
+export const upstreamCheckResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  upstream: upstreamItemSchema,
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
+export type UpstreamCheckBody = z.infer<typeof upstreamCheckBodySchema>
+export type UpstreamCheckResponse = z.infer<typeof upstreamCheckResponseSchema>
+
 export class UpstreamsApiError extends Error { constructor(message: string, readonly requestId?: string) { super(message) } }
 
 export async function fetchUpstreams(filters: UpstreamFilters, signal?: AbortSignal): Promise<UpstreamsResponse> {
@@ -33,5 +49,20 @@ export async function fetchUpstreams(filters: UpstreamFilters, signal?: AbortSig
   if (!response.ok) throw new UpstreamsApiError('上游账号暂时无法加载', requestId)
   const parsed = upstreamsResponseSchema.safeParse(await response.json())
   if (!parsed.success) throw new UpstreamsApiError('上游账号格式不符合接口约定', requestId)
+  return parsed.data
+}
+
+export async function checkUpstream(id: string, payload: UpstreamCheckBody): Promise<UpstreamCheckResponse> {
+  const body = upstreamCheckBodySchema.parse(payload)
+  const response = await fetch(`/api/upstreams/${encodeURIComponent(id)}/check`, {
+    method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body),
+  })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new UpstreamsApiError(detail?.error?.message ?? '验证上游账号失败', requestId)
+  }
+  const parsed = upstreamCheckResponseSchema.safeParse(await response.json())
+  if (!parsed.success) throw new UpstreamsApiError('上游验证响应格式不符合接口约定', requestId)
   return parsed.data
 }

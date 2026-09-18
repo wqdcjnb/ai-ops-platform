@@ -1463,6 +1463,16 @@ export class PlatformDatabase {
     })
   }
 
+  listSyntheticUpstreamChecks() {
+    const rows = this.db.prepare(`SELECT resource_id AS upstreamId, occurred_at AS checkedAt
+      FROM audit_events
+      WHERE resource_type = 'upstream' AND action = 'verify' AND result = 'success' AND resource_id IS NOT NULL
+      ORDER BY occurred_at DESC, rowid DESC`).all() as Array<{ upstreamId: string; checkedAt: string }>
+    const latest = new Map<string, string>()
+    for (const row of rows) if (!latest.has(row.upstreamId)) latest.set(row.upstreamId, row.checkedAt)
+    return latest
+  }
+
   listUsageRequests(ownerUserId?: string) {
     return this.db.prepare(`SELECT r.request_id AS requestId, r.occurred_at AS occurredAt,
       u.id AS personId, u.display_name AS personName, d.id AS departmentId, d.name AS departmentName,

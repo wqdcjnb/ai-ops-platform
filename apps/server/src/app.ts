@@ -15,7 +15,7 @@ import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuer
 import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelCheckBodySchema, channelCheckResponseSchema, channelIdParamsSchema, channelsQuerySchema, channelsResponseSchema, createDatabaseDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
-import { createDemoUpstreams, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
+import { createDemoUpstreams, upstreamCheckBodySchema, upstreamCheckResponseSchema, upstreamIdParamsSchema, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
@@ -673,6 +673,79 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
   })
 
+  app.post('/api/upstreams/:id/check', {
+    schema: { params: upstreamIdParamsSchema, body: upstreamCheckBodySchema, response: { 200: upstreamCheckResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const now = new Date()
+    const demo = createDemoUpstreams(
+      { search: '', type: 'all', status: 'all' },
+      { state: 'offline', authConfigured: false, checkedAt: now.toISOString() },
+      { state: 'offline', checkedAt: now.toISOString() },
+      now,
+      database.listSyntheticUpstreamChecks(),
+    )
+    const visible = demo.items.find((item) => item.id === request.params.id)
+    if (!visible) return reply.status(404).send({ error: { code: 'UPSTREAM_NOT_FOUND', message: '未找到可验证的模拟上游账号', requestId: request.id } })
+    if (!visible.credentialConfigured) return reply.status(400).send({ error: { code: 'UPSTREAM_CHECK_UNAVAILABLE', message: '该上游账号尚未配置模拟凭据，无法执行验证', requestId: request.id } })
+
+    const idempotencyFingerprint = createHash('sha256').update(visible.id).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    const previous = database.listAuditEvents().find((event) => event.id === auditEventId)
+    if (previous) {
+      if (previous.resourceId !== visible.id || previous.summary.idempotencyFingerprint !== idempotencyFingerprint) {
+        return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他上游账号验证', requestId: request.id } })
+      }
+      const upstream = createDemoUpstreams(
+        { search: '', type: 'all', status: 'all' },
+        { state: 'offline', authConfigured: false, checkedAt: now.toISOString() },
+        { state: 'offline', checkedAt: now.toISOString() },
+        now,
+        new Map([[visible.id, previous.occurredAt]]),
+      ).items.find((item) => item.id === visible.id)
+      if (!upstream) return reply.status(404).send({ error: { code: 'UPSTREAM_NOT_FOUND', message: '上游账号状态已变化，请刷新后重试', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, completedAt: previous.occurredAt, notice: '已读取本地 SQLite 模拟验证记录；未访问真实上游、未读取或修改任何凭据。' },
+        upstream,
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: true, auditEventId },
+      }
+    }
+
+    database.appendAuditEvent({
+      id: auditEventId,
+      actorUserId: request.authUser?.id ?? null,
+      action: 'verify',
+      resourceType: 'upstream',
+      resourceId: visible.id,
+      result: 'success',
+      requestId: request.id,
+      summary: {
+        code: 'SYNTHETIC_UPSTREAM_CHECK_COMPLETED',
+        message: '已完成本地 SQLite 模拟上游验证；未访问真实上游、未读取或修改任何凭据，也未记录验证原因原文。',
+        resourceName: visible.name,
+        reasonProvided: true,
+        reasonLength: request.body.reason.length,
+        idempotencyFingerprint,
+        changes: [
+          { field: 'checkedAt', label: '模拟验证时间', before: visible.health.checkedAt, after: '已更新 SQLite 验证记录', sensitive: false },
+          { field: 'credentialValidation', label: '凭据验证结果', before: visible.credentialValidation, after: visible.credentialValidation, sensitive: false },
+        ],
+      },
+    }, now)
+    const upstream = createDemoUpstreams(
+      { search: '', type: 'all', status: 'all' },
+      { state: 'offline', authConfigured: false, checkedAt: now.toISOString() },
+      { state: 'offline', checkedAt: now.toISOString() },
+      now,
+      new Map([[visible.id, now.toISOString()]]),
+    ).items.find((item) => item.id === visible.id)
+    if (!upstream) return reply.status(404).send({ error: { code: 'UPSTREAM_NOT_FOUND', message: '上游账号状态已变化，请刷新后重试', requestId: request.id } })
+    return {
+      meta: { source: 'database' as const, completedAt: now.toISOString(), notice: '已更新本地 SQLite 模拟验证记录；未访问真实上游、未读取或修改任何凭据。' },
+      upstream,
+      operation: { idempotencyKey: request.body.idempotencyKey, idempotent: false, auditEventId },
+    }
+  })
+
   app.get('/api/upstreams', {
     schema: { querystring: upstreamsQuerySchema, response: { 200: upstreamsResponseSchema, 400: errorResponseSchema } },
   }, async (request) => {
@@ -681,7 +754,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       (options.probeNewApi ?? probeNewApiFromEnvironment)(),
       (options.probeCpa ?? (() => probeHttpService(cpaUrl)))(),
     ])
-    return createDemoUpstreams(request.query, newApi, cpa)
+    return createDemoUpstreams(request.query, newApi, cpa, new Date(), database.listSyntheticUpstreamChecks())
   })
 
   app.get('/api/usage', {

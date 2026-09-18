@@ -5,7 +5,7 @@ import {
   IconFlask, IconKey, IconLock, IconRefresh, IconSearch, IconServer2, IconShieldCheck, IconX,
 } from '@tabler/icons-vue'
 import { useRouter } from 'vue-router'
-import { fetchUpstreams, UpstreamsApiError, type UpstreamFilters, type UpstreamItem, type UpstreamsResponse } from '../upstreams-api'
+import { checkUpstream, fetchUpstreams, UpstreamsApiError, type UpstreamCheckResponse, type UpstreamFilters, type UpstreamItem, type UpstreamsResponse } from '../upstreams-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const router = useRouter()
@@ -16,6 +16,11 @@ const type = ref<UpstreamFilters['type']>('all')
 const status = ref<UpstreamFilters['status']>('all')
 const isLoading = ref(false)
 const errorMessage = ref('')
+const showCheck = ref(false)
+const isChecking = ref(false)
+const checkError = ref('')
+const checkResult = ref<UpstreamCheckResponse | null>(null)
+const checkForm = ref({ reason: '', acknowledgeSynthetic: false })
 let request: AbortController | undefined
 
 const statusText = { healthy: '健康', degraded: '需关注', auth_required: '认证异常', offline: '离线', unconfigured: '未配置' }
@@ -46,6 +51,33 @@ function canViewRelatedAlerts(item: UpstreamItem) { return item.status !== 'unco
 function viewRelatedAlerts(item: UpstreamItem) {
   selected.value = null
   void router.push({ path: '/alerts', query: { subjectId: item.id } })
+}
+
+function newCheckIdempotencyKey() { return `upstream-check-${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}` }
+function openCheck() {
+  if (!selected.value?.credentialConfigured) return
+  checkError.value = ''
+  checkResult.value = null
+  checkForm.value = { reason: '', acknowledgeSynthetic: false }
+  showCheck.value = true
+}
+function closeCheck() {
+  if (isChecking.value) return
+  showCheck.value = false
+  checkResult.value = null
+}
+async function submitCheck() {
+  if (!selected.value || !checkForm.value.acknowledgeSynthetic || checkForm.value.reason.trim().length < 8) return
+  isChecking.value = true
+  checkError.value = ''
+  try {
+    const result = await checkUpstream(selected.value.id, { idempotencyKey: newCheckIdempotencyKey(), reason: checkForm.value.reason, acknowledgeSynthetic: true })
+    checkResult.value = result
+    selected.value = result.upstream
+    await loadData()
+  } catch (error) {
+    checkError.value = `${error instanceof Error ? error.message : '验证上游账号失败'}${error instanceof UpstreamsApiError && error.requestId ? ` · 请求 ID ${error.requestId}` : ''}`
+  } finally { isChecking.value = false }
 }
 
 async function loadData() {
@@ -110,7 +142,21 @@ onBeforeUnmount(() => request?.abort())
       <section v-else class="drawer-section"><h3>CPA 认证与窗口</h3><dl class="model-facts"><div><dt>认证有效期</dt><dd>{{ dateText(selected.auth?.expiresAt) }}</dd></div><div><dt>最后刷新</dt><dd>{{ dateText(selected.auth?.lastRefreshedAt) }}</dd></div></dl><div class="account-window-list"><article v-for="window in selected.windows" :key="window.id"><div><strong>{{ window.label }}</strong><em>{{ window.usedPercent }}% 已用</em></div><span><i :class="percentTone(window.usedPercent)" :style="{ width: `${window.usedPercent}%` }" /></span><small>{{ timeText(window.resetsAt) }} 重置</small></article></div><div class="cooldown-state" :class="{ active: selected.cooldown?.active }"><IconClock :size="17" /><span><strong>{{ selected.cooldown?.active ? '账号处于冷却' : '当前无冷却' }}</strong><small v-if="selected.cooldown?.active">{{ selected.cooldown.reason }} · {{ timeText(selected.cooldown.until!) }} 结束</small><small v-else>可以承载隔离实验流量</small></span></div></section>
       <section class="drawer-section"><h3>最近错误</h3><div v-if="selected.recentError" class="channel-error-detail"><IconAlertTriangle :size="18" /><div><strong>{{ errorText[selected.recentError.category] }}</strong><p>{{ selected.recentError.summary }}</p><small>首次 {{ timeText(selected.recentError.firstSeenAt) }} · 最近 {{ timeText(selected.recentError.lastSeenAt) }}</small></div></div><button v-if="canViewRelatedAlerts(selected)" class="text-button related-alert-link" type="button" :aria-label="`查看 ${selected.name} 的关联模拟告警`" @click="viewRelatedAlerts(selected)"><IconAlertTriangle :size="15" />查看关联模拟告警</button><div v-else-if="!selected.recentError" class="channel-clear"><IconCircleCheck :size="18" />最近检查未发现异常</div></section>
       <section class="safe-probe-note"><IconShieldCheck :size="18" /><span><strong>凭据安全边界</strong>页面只返回是否配置和验证结果；不返回完整密钥、可识别片段、OAuth Token 或上游响应正文。</span></section>
-      <footer class="drawer-actions"><button class="btn btn-white" disabled><IconClock :size="16" />认证历史</button><button class="btn" disabled><IconRefresh :size="16" />验证连接</button></footer>
+      <footer class="drawer-actions"><button class="btn btn-white" disabled><IconClock :size="16" />认证历史</button><button class="btn" :disabled="!selected.credentialConfigured" :title="selected.credentialConfigured ? '更新本地模拟验证记录' : '尚未配置模拟凭据'" @click="openCheck"><IconRefresh :size="16" />验证连接</button></footer>
+    </aside></div>
+
+    <div v-if="showCheck && selected" class="drawer-backdrop" @click.self="closeCheck"><aside class="model-drawer channel-check-dialog" role="dialog" aria-modal="true" aria-label="本地模拟上游验证"><header><div><span class="source-tag demo">本地模拟</span><h2>{{ checkResult ? '验证记录已更新' : '验证上游账号' }}</h2></div><button class="icon-button" aria-label="关闭上游验证" :disabled="isChecking" @click="closeCheck"><IconX :size="20" /></button></header>
+      <template v-if="checkResult"><div class="data-state success"><div class="state-icon"><IconCircleCheck :size="22" /></div><div><strong>{{ selected.name }} 已完成本地模拟验证</strong><p>{{ checkResult.meta.notice }}</p></div></div><section class="quota-adjust-impact"><span>验证时间</span><strong>{{ timeText(checkResult.meta.completedAt) }}</strong><span>凭据结果</span><strong>{{ validationText[selected.credentialValidation] }}</strong></section><footer class="drawer-actions"><button class="btn" @click="closeCheck">完成</button></footer></template>
+      <form v-else class="create-key-form" @submit.prevent="submitCheck"><p class="create-person-note"><strong>{{ selected.name }}</strong> 的验证只会写入本地 SQLite 模拟记录，用于更新最近检查时间；不会访问真实上游、读取或修改 API Key、OAuth Token 或管理密钥。</p><label><span>验证说明 <em>至少 8 个字符</em></span><textarea v-model="checkForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：确认本地演示账号状态展示与异常提示" /></label><label class="access-ack"><input v-model="checkForm.acknowledgeSynthetic" type="checkbox" /><span>我已确认：这是本地模拟验证，不会触发真实网络探测或修改外部账号。</span></label><div v-if="checkError" class="create-person-error"><IconAlertTriangle :size="16" />{{ checkError }}</div><footer><button class="btn btn-white" type="button" :disabled="isChecking" @click="closeCheck">取消</button><button class="btn" type="submit" :disabled="isChecking || checkForm.reason.trim().length < 8 || !checkForm.acknowledgeSynthetic"><IconRefresh :size="16" />{{ isChecking ? '验证中…' : '更新模拟验证记录' }}</button></footer></form>
     </aside></div>
   </div>
 </template>
+
+<style scoped>
+.channel-check-dialog { width: min(500px, 100vw); }
+.channel-check-dialog .create-key-form textarea { width: 100%; min-height: 82px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 13px/1.5 inherit; }
+.channel-check-dialog .create-key-form textarea:focus { border-color: var(--brand); box-shadow: 0 0 0 2px rgba(20, 108, 112, .08); }
+.channel-check-dialog .create-key-form footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.channel-check-dialog .data-state { min-height: 150px; justify-content: flex-start; padding: 22px 18px 10px; }
+.channel-check-dialog .data-state.success .state-icon { color: #2f9e44; background: #eef9ef; }
+</style>

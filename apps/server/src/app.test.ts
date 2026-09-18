@@ -725,6 +725,42 @@ describe('BFF', () => {
     expect(invalid.json().error.code).toBe('INVALID_REQUEST')
   })
 
+  it('records only a local synthetic upstream check with CSRF, idempotency, and a safe audit summary', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { idempotencyKey: 'upstream-check-1a2b3c4d', reason: '确认本地演示上游账号状态与最近检查时间', acknowledgeSynthetic: true }
+    const checked = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-cn-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(checked.statusCode).toBe(200)
+    expect(checked.json()).toMatchObject({ meta: { source: 'database' }, upstream: { id: 'upstream-official-cn-1', credentialConfigured: true }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-upstream-check-1a2b3c4d' } })
+    const checkedAt = checked.json().upstream.health.checkedAt
+
+    const listed = await app.inject({ method: 'GET', url: '/api/upstreams', headers: { cookie } })
+    expect(listed.json().items.find((item: { id: string }) => item.id === 'upstream-official-cn-1')).toMatchObject({ health: { checkedAt } })
+    const replay = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-cn-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json().operation.idempotent).toBe(true)
+    const reused = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-cpa-lab-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reused.statusCode).toBe(409)
+    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+
+    const unconfigured = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-standby/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, idempotencyKey: 'upstream-check-5e6f7g8h' } })
+    expect(unconfigured.statusCode).toBe(400)
+    expect(unconfigured.json().error.code).toBe('UPSTREAM_CHECK_UNAVAILABLE')
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=verify&resource=upstream', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ resource: expect.objectContaining({ id: 'upstream-official-cn-1', name: 'Official CN · 主账号' }), result: { status: 'success', code: 'SYNTHETIC_UPSTREAM_CHECK_COMPLETED' } })]))
+    expect(JSON.stringify({ checked: checked.json(), audit: audit.json() })).not.toContain(body.reason)
+
+    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-cpa-lab-1/check', headers: { cookie }, payload: { ...body, idempotencyKey: 'upstream-check-9i0j1k2l' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeWrite = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-cpa-lab-1/check', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...body, idempotencyKey: 'upstream-check-2l3m4n5o' } })
+    expect(employeeWrite.statusCode).toBe(403)
+  })
+
   it('returns filterable usage metadata with separate cost bases', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/usage?period=7d&status=failed&pageSize=10' })
     const body = response.json()

@@ -70,9 +70,27 @@ export const upstreamsResponseSchema = z.object({
   total: z.number().int().nonnegative(),
 })
 
+export const upstreamIdParamsSchema = z.object({
+  id: z.string().regex(/^upstream-[a-z0-9-]+$/),
+})
+
+export const upstreamCheckBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^upstream-check-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeSynthetic: z.literal(true),
+})
+
+export const upstreamCheckResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  upstream: upstreamItemSchema,
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export type UpstreamsQuery = z.infer<typeof upstreamsQuerySchema>
 export type UpstreamsResponse = z.infer<typeof upstreamsResponseSchema>
 type UpstreamItem = z.infer<typeof upstreamItemSchema>
+export type UpstreamCheckBody = z.infer<typeof upstreamCheckBodySchema>
+export type UpstreamCheckResponse = z.infer<typeof upstreamCheckResponseSchema>
 
 function offset(now: Date, minutes: number) { return new Date(now.getTime() + minutes * 60_000).toISOString() }
 
@@ -106,8 +124,11 @@ function createUpstreamItems(now: Date): UpstreamItem[] {
   ]
 }
 
-export function createDemoUpstreams(query: UpstreamsQuery, newApi: NewApiStatus, cpa: PlatformProbeResult, now = new Date()): UpstreamsResponse {
-  const all = createUpstreamItems(now)
+export function createDemoUpstreams(query: UpstreamsQuery, newApi: NewApiStatus, cpa: PlatformProbeResult, now = new Date(), lastChecks?: ReadonlyMap<string, string>): UpstreamsResponse {
+  const all = createUpstreamItems(now).map((item) => {
+    const checkedAt = lastChecks?.get(item.id)
+    return checkedAt ? { ...item, health: { ...item.health, checkedAt } } : item
+  })
   const search = query.search.toLocaleLowerCase('zh-CN')
   const items = all.filter((item) => {
     const matchesSearch = !search || [item.name, item.provider, ...item.models].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
