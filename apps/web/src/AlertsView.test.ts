@@ -2,9 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import AlertsView from './views/AlertsView.vue'
-import { acknowledgeLocalAlert, fetchAlertDetail, fetchAlertRules, fetchAlerts, fetchAlertSummary, type AlertActionResponse, type AlertDetail, type AlertRules, type AlertsResponse, type AlertSummary } from './alerts-api'
+import { acknowledgeLocalAlert, fetchAlertDetail, fetchAlertRules, fetchAlerts, fetchAlertSummary, updateLocalAlertRule, type AlertActionResponse, type AlertDetail, type AlertRuleUpdateResponse, type AlertRules, type AlertsResponse, type AlertSummary } from './alerts-api'
 
-vi.mock('./alerts-api', async (importOriginal) => ({ ...await importOriginal<typeof import('./alerts-api')>(), acknowledgeLocalAlert: vi.fn(), fetchAlertDetail: vi.fn(), fetchAlertRules: vi.fn(), fetchAlerts: vi.fn(), fetchAlertSummary: vi.fn() }))
+vi.mock('./alerts-api', async (importOriginal) => ({ ...await importOriginal<typeof import('./alerts-api')>(), acknowledgeLocalAlert: vi.fn(), fetchAlertDetail: vi.fn(), fetchAlertRules: vi.fn(), fetchAlerts: vi.fn(), fetchAlertSummary: vi.fn(), updateLocalAlertRule: vi.fn() }))
 
 const meta = { source: 'database' as const, simulated: true as const, generatedAt: '2026-09-17T10:00:00.000Z', notice: '当前读取 SQLite 可重复模拟告警。' }
 const notificationConfig = { configured: false as const, channels: [{ type: 'wecom' as const, state: 'not_configured' as const }, { type: 'dingtalk' as const, state: 'not_configured' as const }], notice: '不会向外发送消息。' }
@@ -20,6 +20,7 @@ function rules(): AlertRules { return { meta, notificationConfig, items: [{ id: 
 function detail(): AlertDetail { return { meta, item: event, analysis: { cause: '仅安全摘要。', impact: '可能影响生产范围。', recommendation: '按请求 ID 排查。', rawUpstreamBodyAvailable: false }, timeline: [{ id: 'alert-error-global-detected', type: 'detected', occurredAt: '2026-09-17T09:00:00.000Z', title: '检测到事件', description: '安全说明。' }] } }
 function acknowledgedDetail(): AlertDetail { return { ...detail(), item: { ...event, status: 'acknowledged', assignee: { id: 'admin-demo', name: '超级管理员' }, acknowledgedAt: '2026-09-17T10:01:00.000Z' } } }
 function acknowledgement(): AlertActionResponse { return { meta: { source: 'database', completedAt: '2026-09-17T10:01:00.000Z', notice: '仅本地模拟。' }, item: acknowledgedDetail().item, operation: { action: 'acknowledge', idempotencyKey: 'alert-ack-1a2b3c4d', idempotent: false, auditEventId: 'audit-alert-ack-1a2b3c4d' } } }
+function ruleUpdate(): AlertRuleUpdateResponse { return { meta: { source: 'database', completedAt: '2026-09-17T10:01:00.000Z', notice: '仅本地模拟。' }, rule: { ...rules().items[0]!, severity: 'warning', enabled: false, condition: '5xx ≥ 8%', window: '10 分钟', cooldownMinutes: 45 }, operation: { action: 'update', idempotencyKey: 'alert-rule-1a2b3c4d', idempotent: false, auditEventId: 'audit-alert-rule-1a2b3c4d' } } }
 
 let host: HTMLDivElement
 let app: App
@@ -32,6 +33,7 @@ beforeEach(() => {
   vi.mocked(fetchAlertRules).mockResolvedValue(rules())
   vi.mocked(fetchAlertDetail).mockResolvedValue(detail())
   vi.mocked(acknowledgeLocalAlert).mockResolvedValue(acknowledgement())
+  vi.mocked(updateLocalAlertRule).mockResolvedValue(ruleUpdate())
 })
 afterEach(() => { app?.unmount(); window.history.replaceState({}, '', '/'); host.remove() })
 
@@ -75,5 +77,22 @@ describe('alerts view database simulation', () => {
     host.querySelector<HTMLButtonElement>('[aria-label="清除关联告警筛选"]')!.click()
     await vi.waitFor(() => expect(fetchAlerts).toHaveBeenLastCalledWith(expect.objectContaining({ alertId: '', subjectId: '', page: 1 }), expect.any(AbortSignal)))
     expect(window.location.search).toBe('')
+  })
+
+  it('edits a local alert rule and links the result to its exact audit event', async () => {
+    app = createApp(AlertsView); app.mount(host)
+    await vi.waitFor(() => expect([...host.querySelectorAll('[role="tab"]')].some((node) => node.textContent?.includes('规则'))).toBe(true))
+    ;[...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((node) => node.textContent?.includes('规则'))!.click()
+    await vi.waitFor(() => expect([...host.querySelectorAll<HTMLButtonElement>('button')].some((node) => node.textContent?.trim() === '编辑规则')).toBe(true))
+    ;[...host.querySelectorAll<HTMLButtonElement>('button')].find((node) => node.textContent?.trim() === '编辑规则')!.click()
+    await vi.waitFor(() => expect(host.querySelector('[aria-label="编辑本地告警规则"]')).not.toBeNull())
+    const reason = host.querySelector<HTMLTextAreaElement>('[aria-label="编辑本地告警规则"] textarea')!
+    reason.value = '本地规则复核后暂时放宽阈值'
+    reason.dispatchEvent(new Event('input'))
+    await nextTick()
+    host.querySelector<HTMLButtonElement>('[aria-label="编辑本地告警规则"] button[type="submit"]')!.click()
+    await vi.waitFor(() => expect(updateLocalAlertRule).toHaveBeenCalledWith('rule-error', expect.objectContaining({ enabled: true, reason: '本地规则复核后暂时放宽阈值' })))
+    await vi.waitFor(() => expect(host.textContent).toContain('已更新本地告警规则'))
+    expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 audit-alert-rule-1a2b3c4d 规则编辑审计"]')?.getAttribute('href')).toBe('/audit?eventId=audit-alert-rule-1a2b3c4d&origin=mutation')
   })
 })

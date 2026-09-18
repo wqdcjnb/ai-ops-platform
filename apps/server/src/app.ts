@@ -17,7 +17,7 @@ import { channelCheckBodySchema, channelCheckResponseSchema, channelIdParamsSche
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
 import { createDatabaseUpstreamHistory, createDemoUpstreams, upstreamCheckBodySchema, upstreamCheckResponseSchema, upstreamHistoryResponseSchema, upstreamIdParamsSchema, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
-import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
+import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRuleParamsSchema, alertRuleUpdateBodySchema, alertRuleUpdateResponseSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditExportQuerySchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createAuditCsv, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessHistoryResponseSchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDatabaseConversationAccess, createDatabaseConversationAccessHistory, createDatabaseConversationAudits, getDatabaseConversationAuditRecord } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
@@ -100,6 +100,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     if (path.startsWith('/api/me')) return ['employee']
     if (path.startsWith('/api/conversation-audits')) return ['super_admin']
     if (path.startsWith('/api/integrations/new-api/management')) return ['super_admin', 'admin']
+    if (path.startsWith('/api/alert-rules') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/audit-events') || path.startsWith('/api/settings') || path.startsWith('/api/upstreams') || path.startsWith('/api/routes')) return ['super_admin', 'admin']
     if (path.startsWith('/api/people') && method !== 'GET') return ['super_admin', 'admin']
     if (path.startsWith('/api/keys') && method !== 'GET') return ['super_admin', 'admin']
@@ -867,6 +868,54 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/alert-rules', {
     schema: { response: { 200: alertRulesResponseSchema } },
   }, async (request) => createDatabaseAlertRules(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser)))
+
+  app.patch('/api/alert-rules/:id', {
+    schema: { params: alertRuleParamsSchema, body: alertRuleUpdateBodySchema, response: { 200: alertRuleUpdateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const now = new Date()
+    const current = database.listAlertRules().find((rule) => rule.id === request.params.id)
+    if (!current) return reply.status(404).send({ error: { code: 'ALERT_RULE_NOT_FOUND', message: '未找到可编辑的本地告警规则', requestId: request.id } })
+    const idempotencyFingerprint = createHash('sha256').update(JSON.stringify({ id: current.id, severity: request.body.severity, enabled: request.body.enabled, condition: request.body.condition, window: request.body.window, cooldownMinutes: request.body.cooldownMinutes })).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.updateAlertRule({ id: current.id, severity: request.body.severity, enabled: request.body.enabled, condition: request.body.condition, window: request.body.window, cooldownMinutes: request.body.cooldownMinutes }, {
+        id: auditEventId,
+        actorUserId: request.authUser?.id ?? null,
+        action: 'update',
+        resourceType: 'alert',
+        resourceId: current.id,
+        result: 'success',
+        requestId: request.id,
+        summary: {
+          code: 'ALERT_RULE_UPDATED',
+          message: '已更新本地 SQLite 告警规则；未启用外部通知、未调用 New API，也未记录编辑说明原文。',
+          resourceName: current.name,
+          reasonProvided: true,
+          reasonLength: request.body.reason.length,
+          idempotencyFingerprint,
+          previousSeverity: current.severity,
+          previousEnabled: Boolean(current.enabled),
+          previousCondition: current.condition,
+          previousWindow: current.window,
+          previousCooldownMinutes: current.cooldownMinutes,
+          changes: [
+            { field: 'enabled', label: '规则状态', before: current.enabled ? '已启用' : '已停用', after: request.body.enabled ? '已启用' : '已停用', sensitive: false },
+            { field: 'severity', label: '严重度', before: current.severity, after: request.body.severity, sensitive: false },
+            { field: 'condition', label: '触发条件', before: current.condition, after: request.body.condition, sensitive: false },
+            { field: 'window', label: '统计窗口', before: current.window, after: request.body.window, sensitive: false },
+            { field: 'cooldownMinutes', label: '冷却时间', before: `${current.cooldownMinutes} 分钟`, after: `${request.body.cooldownMinutes} 分钟`, sensitive: false },
+          ],
+        },
+      }, now)
+      const updated = createDatabaseAlertRules(database, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), now, dataScopeFor(request.authUser)).items.find((rule) => rule.id === current.id)
+      if (!updated) return reply.status(404).send({ error: { code: 'ALERT_RULE_NOT_FOUND', message: '规则更新后无法读取本地规则', requestId: request.id } })
+      return { meta: { source: 'database' as const, completedAt: now.toISOString(), notice: result.idempotent ? '已读取本地 SQLite 告警规则编辑结果；未发送通知或调用 New API。' : '已更新本地 SQLite 告警规则；未发送通知或调用 New API。' }, rule: updated, operation: { action: 'update' as const, idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他告警规则编辑', requestId: request.id } })
+      if (error instanceof Error && error.message === 'ALERT_RULE_NOT_FOUND') return reply.status(404).send({ error: { code: 'ALERT_RULE_NOT_FOUND', message: '未找到可编辑的本地告警规则', requestId: request.id } })
+      throw error
+    }
+  })
 
   app.get('/api/alerts/:id', {
     schema: { params: alertParamsSchema, response: { 200: alertDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },

@@ -501,6 +501,25 @@ export interface PlatformAlertRuleSeed {
   description: string
 }
 
+export interface PlatformAlertRuleUpdate {
+  id: string
+  severity: PlatformAlertRuleSeed['severity']
+  enabled: boolean
+  condition: string
+  window: string
+  cooldownMinutes: number
+}
+
+export interface PlatformAlertRuleUpdateResult {
+  id: string
+  previousSeverity: PlatformAlertRuleSeed['severity']
+  previousEnabled: boolean
+  previousCondition: string
+  previousWindow: string
+  previousCooldownMinutes: number
+  idempotent: boolean
+}
+
 export interface PlatformAlertEventSeed {
   id: string
   title: string
@@ -1004,6 +1023,50 @@ export class PlatformDatabase {
       seed.notification?.sentAt ?? null, Number(seed.silence?.active ?? false), seed.silence?.until ?? null,
       JSON.stringify(seed.relatedRequestIds ?? []),
     )
+  }
+
+  updateAlertRule(rule: PlatformAlertRuleUpdate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformAlertRuleUpdateResult {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listAlertRules().find((item) => item.id === rule.id) ?? null
+    const fingerprint = auditEvent.summary.idempotencyFingerprint
+    if (previousOperation) {
+      const previousSummary = JSON.parse(previousOperation.summaryJson) as Partial<PlatformAlertRuleUpdateResult> & { idempotencyFingerprint?: unknown }
+      if (previousOperation.resourceId !== rule.id || previousSummary.idempotencyFingerprint !== fingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = current()
+      if (!stored) throw new Error('ALERT_RULE_NOT_FOUND')
+      return {
+        id: stored.id,
+        previousSeverity: previousSummary.previousSeverity ?? stored.severity,
+        previousEnabled: previousSummary.previousEnabled ?? Boolean(stored.enabled),
+        previousCondition: previousSummary.previousCondition ?? stored.condition,
+        previousWindow: previousSummary.previousWindow ?? stored.window,
+        previousCooldownMinutes: previousSummary.previousCooldownMinutes ?? stored.cooldownMinutes,
+        idempotent: true,
+      }
+    }
+    const before = current()
+    if (!before) throw new Error('ALERT_RULE_NOT_FOUND')
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE alert_rules SET severity = ?, enabled = ?, condition_label = ?, window_label = ?, cooldown_minutes = ? WHERE id = ?`).run(
+        rule.severity, Number(rule.enabled), rule.condition, rule.window, rule.cooldownMinutes, rule.id,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return {
+      id: rule.id,
+      previousSeverity: before.severity,
+      previousEnabled: Boolean(before.enabled),
+      previousCondition: before.condition,
+      previousWindow: before.window,
+      previousCooldownMinutes: before.cooldownMinutes,
+      idempotent: false,
+    }
   }
 
   seedBusinessRule(seed: PlatformBusinessRuleSeed, now = this.now()) {

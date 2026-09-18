@@ -904,6 +904,36 @@ describe('BFF', () => {
     expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
   })
 
+  it('edits only local alert-rule policy with CSRF, idempotency, and safe audit summaries', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { severity: 'warning', enabled: false, condition: '5xx 错误率 ≥ 8%', window: '10 分钟', cooldownMinutes: 45, reason: '本地演示规则复核后暂时放宽阈值', acknowledgeSimulation: true, idempotencyKey: 'alert-rule-1a2b3c4d' }
+    const missingCsrf = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie }, payload: body })
+    expect(missingCsrf.statusCode).toBe(403)
+    expect(missingCsrf.json().error.code).toBe('CSRF_INVALID')
+
+    const updated = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(updated.statusCode).toBe(200)
+    expect(updated.json()).toMatchObject({ rule: { id: 'rule-error-critical', severity: 'warning', enabled: false, condition: '5xx 错误率 ≥ 8%', window: '10 分钟', cooldownMinutes: 45 }, operation: { action: 'update', idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-alert-rule-1a2b3c4d' } })
+    const replay = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json().operation.idempotent).toBe(true)
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&eventId=audit-alert-rule-1a2b3c4d', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual([expect.objectContaining({ action: 'update', resource: expect.objectContaining({ type: 'alert', id: 'rule-error-critical', name: '错误率严重告警' }), result: { status: 'success', code: 'ALERT_RULE_UPDATED' } })])
+    expect(JSON.stringify({ updated: updated.json(), audit: audit.json() })).not.toContain(body.reason)
+
+    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeWrite = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...body, idempotencyKey: 'alert-rule-5e6f7g8h' } })
+    expect(employeeWrite.statusCode).toBe(403)
+    const invalid = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, cooldownMinutes: 1441, idempotencyKey: 'alert-rule-9i0j1k2l' } })
+    expect(invalid.statusCode).toBe(400)
+  })
+
   it('acknowledges and closes only local simulated alerts with CSRF, idempotency, and safe audit summaries', async () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)

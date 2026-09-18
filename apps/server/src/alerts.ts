@@ -23,9 +23,20 @@ export const alertsQuerySchema = z.object({
 })
 
 export const alertParamsSchema = z.object({ id: z.string().regex(/^alert-[a-z0-9-]+$/) })
+export const alertRuleParamsSchema = z.object({ id: z.string().regex(/^rule-[a-z0-9-]+$/) })
 const alertActionBodySchema = z.object({ reason: z.string().trim().min(8).max(200), acknowledgeSimulation: z.literal(true) })
 export const alertAcknowledgeBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-ack-[a-z0-9-]{8,96}$/) })
 export const alertCloseBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-close-[a-z0-9-]{8,96}$/) })
+export const alertRuleUpdateBodySchema = z.object({
+  severity: severitySchema,
+  enabled: z.boolean(),
+  condition: z.string().trim().min(1).max(120),
+  window: z.string().trim().min(1).max(60),
+  cooldownMinutes: z.coerce.number().int().min(0).max(1_440),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeSimulation: z.literal(true),
+  idempotencyKey: z.string().regex(/^alert-rule-[a-z0-9-]{8,96}$/),
+})
 
 const subjectSchema = z.object({
   type: z.enum(['company', 'department', 'person', 'key', 'channel', 'upstream']),
@@ -87,6 +98,11 @@ export const alertActionResponseSchema = z.object({
   item: alertEventSchema,
   operation: z.object({ action: z.enum(['acknowledge', 'close']), idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
+export const alertRuleUpdateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  rule: alertRuleSchema,
+  operation: z.object({ action: z.literal('update'), idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
 
 export type AlertsQuery = z.infer<typeof alertsQuerySchema>
 export type AlertEvent = z.infer<typeof alertEventSchema>
@@ -94,6 +110,8 @@ export type AlertRule = z.infer<typeof alertRuleSchema>
 export type AlertAcknowledgeBody = z.infer<typeof alertAcknowledgeBodySchema>
 export type AlertCloseBody = z.infer<typeof alertCloseBodySchema>
 export type AlertActionResponse = z.infer<typeof alertActionResponseSchema>
+export type AlertRuleUpdateBody = z.infer<typeof alertRuleUpdateBodySchema>
+export type AlertRuleUpdateResponse = z.infer<typeof alertRuleUpdateResponseSchema>
 
 const notificationConfig = {
   configured: false as const,

@@ -32,16 +32,21 @@ const alertActionBodySchema = z.object({ reason: z.string().trim().min(8).max(20
 export const alertAcknowledgeBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-ack-[a-z0-9-]{8,96}$/) })
 export const alertCloseBodySchema = alertActionBodySchema.extend({ idempotencyKey: z.string().regex(/^alert-close-[a-z0-9-]{8,96}$/) })
 export const alertActionResponseSchema = z.object({ meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }), item: alertEventSchema, operation: z.object({ action: z.enum(['acknowledge', 'close']), idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }) })
+export const alertRuleUpdateBodySchema = z.object({ severity: severitySchema, enabled: z.boolean(), condition: z.string().trim().min(1).max(120), window: z.string().trim().min(1).max(60), cooldownMinutes: z.number().int().min(0).max(1_440), reason: z.string().trim().min(8).max(200), acknowledgeSimulation: z.literal(true), idempotencyKey: z.string().regex(/^alert-rule-[a-z0-9-]{8,96}$/) })
+export const alertRuleUpdateResponseSchema = z.object({ meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }), rule: alertRuleSchema, operation: z.object({ action: z.literal('update'), idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }) })
 
 export type AlertFilters = z.infer<typeof alertFiltersSchema>
 export type AlertEvent = z.infer<typeof alertEventSchema>
 export type AlertSummary = z.infer<typeof alertSummaryResponseSchema>
 export type AlertsResponse = z.infer<typeof alertsResponseSchema>
 export type AlertRules = z.infer<typeof alertRulesResponseSchema>
+export type AlertRule = z.infer<typeof alertRuleSchema>
 export type AlertDetail = z.infer<typeof alertDetailResponseSchema>
 export type AlertAcknowledgeBody = z.infer<typeof alertAcknowledgeBodySchema>
 export type AlertCloseBody = z.infer<typeof alertCloseBodySchema>
 export type AlertActionResponse = z.infer<typeof alertActionResponseSchema>
+export type AlertRuleUpdateBody = z.infer<typeof alertRuleUpdateBodySchema>
+export type AlertRuleUpdateResponse = z.infer<typeof alertRuleUpdateResponseSchema>
 
 export class AlertsApiError extends Error { constructor(message: string, readonly requestId?: string) { super(message) } }
 async function getResource<T>(url: string, schema: z.ZodType<T>, signal?: AbortSignal): Promise<T> { const response = await fetch(url, { headers: { accept: 'application/json' }, signal }); const requestId = response.headers.get('x-request-id') ?? undefined; if (!response.ok) throw new AlertsApiError(response.status === 404 ? '未找到指定告警事件' : '告警中心暂时无法加载', requestId); const parsed = schema.safeParse(await response.json()); if (!parsed.success) throw new AlertsApiError('告警数据格式不符合接口约定', requestId); return parsed.data }
@@ -67,3 +72,16 @@ async function performLocalAlertAction<T extends AlertAcknowledgeBody | AlertClo
 
 export function acknowledgeLocalAlert(id: string, payload: AlertAcknowledgeBody) { return performLocalAlertAction(id, 'acknowledge', payload) }
 export function closeLocalAlert(id: string, payload: AlertCloseBody) { return performLocalAlertAction(id, 'close', payload) }
+
+export async function updateLocalAlertRule(id: string, payload: AlertRuleUpdateBody): Promise<AlertRuleUpdateResponse> {
+  const body = alertRuleUpdateBodySchema.parse(payload)
+  const response = await fetch(`/api/alert-rules/${encodeURIComponent(id)}`, { method: 'PATCH', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new AlertsApiError(detail?.error?.message ?? '本地告警规则编辑失败', requestId)
+  }
+  const result = alertRuleUpdateResponseSchema.safeParse(await response.json().catch(() => null))
+  if (!result.success) throw new AlertsApiError('本地告警规则编辑响应格式不符合接口约定', requestId)
+  return result.data
+}
