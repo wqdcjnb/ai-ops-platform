@@ -4,7 +4,7 @@ import {
   IconAlertTriangle, IconArrowLeft, IconArrowRight, IconBan, IconChevronRight, IconCircleCheck,
   IconDatabase, IconDownload, IconFingerprint, IconHistory, IconLock, IconRefresh, IconSearch, IconShieldLock, IconUser, IconX,
 } from '@tabler/icons-vue'
-import { AuditApiError, fetchAuditDetail, fetchAuditEvents, type AuditDetail, type AuditEvent, type AuditFilters, type AuditResponse } from '../audit-api'
+import { AuditApiError, exportAudit, fetchAuditDetail, fetchAuditEvents, type AuditDetail, type AuditEvent, type AuditFilters, type AuditResponse } from '../audit-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const audit = ref<AuditResponse | null>(null)
@@ -40,6 +40,7 @@ const source = ref<AuditFilters['source']>('all')
 const page = ref(1)
 const pageSize = 10
 const isLoading = ref(false)
+const isExporting = ref(false)
 const detailLoadingId = ref('')
 const errorMessage = ref('')
 let request: AbortController | undefined
@@ -98,6 +99,28 @@ async function openDetail(item: AuditEvent) {
   finally { if (detailRequest === next) detailLoadingId.value = '' }
 }
 
+async function exportCurrentAudit() {
+  if (!audit.value?.items.length || isExporting.value) return
+  isExporting.value = true
+  errorMessage.value = ''
+  try {
+    const { blob, filename } = await exportAudit(currentFilters())
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    const requestId = error instanceof AuditApiError ? error.requestId : undefined
+    errorMessage.value = `${error instanceof Error ? error.message : '审计导出暂时无法完成'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally {
+    isExporting.value = false
+  }
+}
+
 const { cancel: cancelSearch } = useDebouncedSearch(search, () => { page.value = 1; void loadData() })
 
 onMounted(() => void loadData())
@@ -106,7 +129,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 
 <template>
   <div class="dashboard audit-dashboard">
-    <section class="page-heading"><div><div class="eyebrow">AUDIT TRAIL</div><h1>审计日志</h1><p>按请求 ID 复核管理员操作、配置变化、权限拒绝与执行结果。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="异步导出、授权和导出审计完成后开放"><IconDownload :size="16" />导出审计</button></div></section>
+    <section class="page-heading"><div><div class="eyebrow">AUDIT TRAIL</div><h1>审计日志</h1><p>按请求 ID 复核管理员操作、配置变化、权限拒绝与执行结果。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" :disabled="isExporting || !audit?.items.length" :title="audit?.items.length ? '导出当前筛选范围内的脱敏 CSV，最多 500 条' : '当前筛选范围没有可导出的事件'" @click="exportCurrentAudit"><IconDownload :size="16" />{{ isExporting ? '导出中…' : '导出脱敏 CSV' }}</button></div></section>
     <div v-if="audit" class="source-banner"><span>{{ sourceLabel }}</span>{{ audit.meta.notice }}</div>
     <div v-if="hasLinkedAuditFilter" class="audit-related-filter" role="status"><span><IconFingerprint :size="15" />{{ linkedAuditMessage }}</span><button class="text-button" type="button" :aria-label="linkedAuditClearLabel" @click="clearLinkedAuditFilter">清除关联</button></div>
     <section class="audit-summary-grid" aria-label="审计汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>

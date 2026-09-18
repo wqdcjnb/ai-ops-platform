@@ -18,7 +18,7 @@ import { CatalogError, createModelCatalog, type CatalogReader } from './model-ca
 import { createDatabaseUpstreamHistory, createDemoUpstreams, upstreamCheckBodySchema, upstreamCheckResponseSchema, upstreamHistoryResponseSchema, upstreamIdParamsSchema, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
-import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
+import { auditDetailResponseSchema, auditExportQuerySchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createAuditCsv, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessHistoryResponseSchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDatabaseConversationAccess, createDatabaseConversationAccessHistory, createDatabaseConversationAudits, getDatabaseConversationAuditRecord } from './conversation-audit.js'
 import { createSettings, settingsResponseSchema } from './settings.js'
 import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
@@ -948,6 +948,33 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/audit-events', {
     schema: { querystring: auditQuerySchema, response: { 200: auditResponseSchema, 400: errorResponseSchema } },
   }, async (request) => createDatabaseAudit(database, request.query))
+
+  app.post('/api/audit-events/export', {
+    schema: { body: auditExportQuerySchema, response: { 200: z.string(), 400: errorResponseSchema } },
+  }, async (request, reply) => {
+    const now = new Date()
+    const result = createDatabaseAudit(database, { ...request.body, page: 1, pageSize: 500 }, now)
+    const csv = createAuditCsv(result.items)
+    database.appendAuditEvent({
+      id: `audit-export-${crypto.randomUUID()}`,
+      actorUserId: request.authUser?.id ?? null,
+      action: 'export',
+      resourceType: 'export',
+      resourceId: 'local-audit-csv',
+      result: 'success',
+      requestId: request.id,
+      summary: {
+        code: 'AUDIT_CSV_EXPORTED',
+        message: '已导出当前筛选范围内的本地脱敏审计摘要；不包含正文、完整 Key、原因原文或凭据。',
+        resourceName: '本地脱敏审计 CSV',
+        exportedRows: result.items.length,
+        maxRows: 500,
+        format: 'csv',
+      },
+    }, now)
+    const date = now.toISOString().slice(0, 10).replaceAll('-', '')
+    return reply.type('text/csv; charset=utf-8').header('content-disposition', `attachment; filename="audit-export-${date}.csv"`).send(csv)
+  })
 
   app.get('/api/audit-events/:id', {
     schema: { params: auditParamsSchema, response: { 200: auditDetailResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema } },

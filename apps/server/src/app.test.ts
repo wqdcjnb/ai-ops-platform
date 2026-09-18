@@ -965,6 +965,39 @@ describe('BFF', () => {
     expect(invalidEventId.json().error.code).toBe('INVALID_REQUEST')
   })
 
+  it('exports the current local audit view as a redacted CSV and records the export', async () => {
+    const app = createApp()
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/audit-events/export',
+      payload: { period: '7d', search: '', eventId: '', actor: 'all', action: 'all', resource: 'all', result: 'all', source: 'all', page: 1, pageSize: 10 },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['content-type']).toMatch(/text\/csv/i)
+    expect(response.headers['content-disposition']).toMatch(/audit-export-\d{8}\.csv/)
+    expect(response.body.startsWith('\uFEFFevent_id,occurred_at,actor')).toBe(true)
+    expect(response.body).toContain('changed_fields')
+    expect(response.body).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|密码|原因原文/i)
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=export&resource=export&pageSize=50' })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'export', resource: expect.objectContaining({ id: 'local-audit-csv' }), result: { status: 'success', code: 'AUDIT_CSV_EXPORTED' } }),
+    ]))
+
+    const secured = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(secured)
+    const adminLogin = await secured.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const adminCookie = cookieHeader(adminLogin.headers['set-cookie'])
+    const missingCsrf = await secured.inject({ method: 'POST', url: '/api/audit-events/export', headers: { cookie: adminCookie }, payload: { period: '7d' } })
+    expect(missingCsrf.statusCode).toBe(403)
+    expect(missingCsrf.json().error.code).toBe('CSRF_INVALID')
+    const employeeLogin = await secured.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
+    const employeeCookie = cookieHeader(employeeLogin.headers['set-cookie'])
+    const employeeExport = await secured.inject({ method: 'POST', url: '/api/audit-events/export', headers: { cookie: employeeCookie, 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { period: '7d' } })
+    expect(employeeExport.statusCode).toBe(403)
+  })
+
   it('returns audit detail without content or credentials and stable missing errors', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/audit-events/audit-key-rotate' })
     const body = response.json()

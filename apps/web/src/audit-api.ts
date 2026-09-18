@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { withCsrfHeader } from './csrf'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
 const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'verify', 'view'])
@@ -29,3 +30,25 @@ async function getResource<T>(url: string, schema: z.ZodType<T>, signal?: AbortS
 
 export function fetchAuditEvents(filters: AuditFilters, signal?: AbortSignal) { const value = auditFiltersSchema.parse(filters); const params = new URLSearchParams(Object.entries(value).map(([key, item]) => [key, String(item)])); return getResource(`/api/audit-events?${params}`, auditResponseSchema, signal) }
 export function fetchAuditDetail(id: string, signal?: AbortSignal) { return getResource(`/api/audit-events/${encodeURIComponent(id)}`, auditDetailResponseSchema, signal) }
+
+export async function exportAudit(filters: AuditFilters, signal?: AbortSignal) {
+  const value = auditFiltersSchema.parse(filters)
+  const response = await fetch('/api/audit-events/export', {
+    method: 'POST',
+    headers: withCsrfHeader({ accept: 'text/csv', 'content-type': 'application/json' }),
+    body: JSON.stringify(value),
+    signal,
+  })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    let message = '审计导出暂时无法完成'
+    try {
+      const payload = await response.json() as { error?: { message?: string } }
+      message = payload.error?.message ?? message
+    } catch { /* the response may not be JSON */ }
+    throw new AuditApiError(message, requestId)
+  }
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const filename = /filename="([^"]+)"/u.exec(disposition)?.[1] ?? 'audit-export.csv'
+  return { blob: await response.blob(), filename }
+}

@@ -25,6 +25,10 @@ export const auditQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(5).max(50).default(10),
 })
 
+export const auditExportQuerySchema = auditQuerySchema.extend({
+  pageSize: z.coerce.number().int().min(5).max(500).default(500),
+})
+
 export const auditParamsSchema = z.object({ id: z.string().regex(/^audit-[a-z0-9-]+$/) })
 
 const actorSchema = z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']) })
@@ -118,6 +122,30 @@ export function createDemoAuditDetail(id: string, now = new Date()) {
 
 const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', logout: '退出登录', access: '访问被拒绝', create: '创建', update: '更新', disable: '停用', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', verify: '验证连接', view: '查看' }
 const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', authorization: '权限校验', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', channel: '模型渠道', upstream: '上游账号', export: '数据导出', settings: '系统设置', alert: '告警事件', conversation: '对话审计记录' }
+
+function csvCell(value: string | number | null | undefined) {
+  const text = value == null ? '' : String(value)
+  return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+}
+
+export function createAuditCsv(events: AuditEvent[]) {
+  const header = ['event_id', 'occurred_at', 'actor', 'action', 'resource_type', 'resource_name', 'result', 'result_code', 'source', 'request_id', 'summary', 'changed_fields']
+  const rows = events.map((event) => [
+    event.id,
+    event.occurredAt,
+    event.actor.name,
+    event.actionLabel,
+    resourceLabels[event.resource.type],
+    event.resource.name,
+    event.result.status,
+    event.result.code,
+    event.source.label,
+    event.requestId,
+    event.summary,
+    event.changes.map((change) => `${change.label}${change.sensitive ? '（敏感字段）' : ''}`).join('、'),
+  ])
+  return `\uFEFF${[header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`
+}
 const auditSummarySchema = z.object({
   code: z.string().trim().min(1).max(64).optional(),
   message: z.string().trim().min(1).max(240).optional(),
