@@ -20,7 +20,7 @@ import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSche
 import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRuleParamsSchema, alertRuleUpdateBodySchema, alertRuleUpdateResponseSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditExportQuerySchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createAuditCsv, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
 import { conversationAccessBodySchema, conversationAccessHistoryResponseSchema, conversationAccessResponseSchema, conversationAuditParamsSchema, conversationAuditQuerySchema, conversationAuditResponseSchema, createDatabaseConversationAccess, createDatabaseConversationAccessHistory, createDatabaseConversationAudits, getDatabaseConversationAuditRecord } from './conversation-audit.js'
-import { createSettings, settingsResponseSchema } from './settings.js'
+import { businessRuleDraftBodySchema, businessRulePreviewBodySchema, businessRulePreviewResponseSchema, businessRulePublishBodySchema, businessRuleRollbackBodySchema, businessRuleVersionActionResponseSchema, createSettings, settingsResponseSchema } from './settings.js'
 import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
 import { dataScopeFor } from './data-scope.js'
@@ -1097,6 +1097,96 @@ export function buildApp(options: BuildAppOptions = {}) {
       (options.probeDocs ?? (() => probeHttpService(docsUrl)))(),
     ])
     return createSettings(newApi, cpa, docs, database, new Date(), request.authUser?.role ?? 'super_admin')
+  })
+
+  const businessRuleError = (error: unknown, reply: any, requestId: string): any => {
+    const code = error instanceof Error ? error.message : 'BUSINESS_RULE_OPERATION_FAILED'
+    const status = code === 'BUSINESS_RULE_VERSION_NOT_FOUND' ? 404 : code === 'IDEMPOTENCY_KEY_REUSED' ? 409 : 400
+    const messages: Record<string, string> = {
+      BUSINESS_RULE_SNAPSHOT_INVALID: '业务口径快照与当前 SQLite 配置不一致',
+      BUSINESS_RULE_VERSION_NOT_FOUND: '业务口径版本不存在',
+      BUSINESS_RULE_DRAFT_REQUIRED: '只有草稿版本可以发布',
+      BUSINESS_RULE_ROLLBACK_INVALID: '只能回滚到非当前的已发布版本',
+      IDEMPOTENCY_KEY_REUSED: '幂等编号已被其他变更占用',
+    }
+    return reply.status(status).send({ error: { code, message: messages[code] ?? '业务口径版本操作失败', requestId } })
+  }
+
+  app.post('/api/settings/business-rules/preview', {
+    schema: { body: businessRulePreviewBodySchema, response: { 200: businessRulePreviewResponseSchema, 400: errorResponseSchema } },
+  }, async (request, reply) => {
+    const state = database.getBusinessRuleState()
+    const values = new Map(request.body.values.map((item) => [item.id, item.value]))
+    if (values.size !== request.body.values.length || state.items.some((item) => !values.has(item.id)) || values.size !== state.items.length) {
+      return reply.status(400).send({ error: { code: 'BUSINESS_RULE_SNAPSHOT_INVALID', message: '必须提交当前全部业务口径字段，且字段不能重复', requestId: request.id } })
+    }
+    const proposed = state.items.map((item) => ({ ...item, value: values.get(item.id) ?? item.value }))
+    const changes = proposed.filter((item, index) => item.value !== state.items[index]?.value).map((item) => ({
+      id: item.id, label: item.label, impact: item.impact, before: state.items.find((current) => current.id === item.id)?.value ?? '', after: item.value,
+    }))
+    return { meta: { source: 'database' as const, generatedAt: new Date().toISOString(), notice: '仅在内存中计算差异；预览不会写入 SQLite 或产生审计记录。' }, baseVersion: state.version, current: state.items, proposed, changes, changedCount: changes.length }
+  })
+
+  app.post('/api/settings/business-rules/drafts', {
+    schema: { body: businessRuleDraftBodySchema, response: { 200: businessRuleVersionActionResponseSchema, 400: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const state = database.getBusinessRuleState()
+    const values = new Map(request.body.values.map((item) => [item.id, item.value]))
+    if (values.size !== request.body.values.length || state.items.some((item) => !values.has(item.id)) || values.size !== state.items.length) {
+      return reply.status(400).send({ error: { code: 'BUSINESS_RULE_SNAPSHOT_INVALID', message: '必须提交当前全部业务口径字段，且字段不能重复', requestId: request.id } })
+    }
+    const versionId = `business-rule-draft-${createHash('sha256').update(request.body.idempotencyKey).digest('hex').slice(0, 24)}`
+    const version = `draft-v${Date.now()}`
+    const fingerprint = createHash('sha256').update(JSON.stringify(request.body.values.slice().sort((a, b) => a.id.localeCompare(b.id)))).digest('hex')
+    const auditEventId = `audit-settings-business-draft-${request.body.idempotencyKey}`
+    try {
+      const result = database.createBusinessRuleDraft({
+        id: versionId, version, actorUserId: request.authUser?.id ?? null,
+        items: state.items.map((item) => ({ ...item, value: values.get(item.id) ?? item.value })),
+        note: '管理员提交本地业务口径草稿；原因已提供但不保存原文。',
+      }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'draft', resourceType: 'business_rule_version', resourceId: versionId,
+        result: 'success', requestId: request.id,
+        summary: { code: 'BUSINESS_RULE_DRAFT_SAVED', message: '已保存本地业务口径草稿；审计不保存原因原文。', versionId, version, reasonLength: request.body.reason.length, acknowledgedSimulation: true, idempotencyFingerprint: fingerprint },
+      })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '草稿仅写入本地 SQLite，尚未改变当前生效口径。' }, version: result.version, operation: { action: 'draft' as const, idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      return businessRuleError(error, reply, request.id)
+    }
+  })
+
+  app.post('/api/settings/business-rules/publish', {
+    schema: { body: businessRulePublishBodySchema, response: { 200: businessRuleVersionActionResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const fingerprint = createHash('sha256').update(request.body.versionId).digest('hex')
+    const auditEventId = `audit-settings-business-publish-${request.body.idempotencyKey}`
+    try {
+      const result = database.publishBusinessRuleVersion(request.body.versionId, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'publish', resourceType: 'business_rule_version', resourceId: request.body.versionId,
+        result: 'success', requestId: request.id,
+        summary: { code: 'BUSINESS_RULE_PUBLISHED', message: '已发布本地业务口径版本；审计不保存原因原文。', versionId: request.body.versionId, reasonLength: request.body.reason.length, acknowledgedSimulation: true, idempotencyFingerprint: fingerprint },
+      })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '版本已发布到本地 SQLite；真实财务和网关配置仍未连接。' }, version: result.version, operation: { action: 'publish' as const, idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      return businessRuleError(error, reply, request.id)
+    }
+  })
+
+  app.post('/api/settings/business-rules/rollback', {
+    schema: { body: businessRuleRollbackBodySchema, response: { 200: businessRuleVersionActionResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const fingerprint = createHash('sha256').update(request.body.versionId).digest('hex')
+    const auditEventId = `audit-settings-business-rollback-${request.body.idempotencyKey}`
+    try {
+      const result = database.rollbackBusinessRuleVersion(request.body.versionId, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'rollback', resourceType: 'business_rule_version', resourceId: request.body.versionId,
+        result: 'success', requestId: request.id,
+        summary: { code: 'BUSINESS_RULE_ROLLED_BACK', message: '已回滚本地业务口径版本；审计不保存原因原文。', versionId: request.body.versionId, reasonLength: request.body.reason.length, acknowledgedSimulation: true, idempotencyFingerprint: fingerprint },
+      })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '版本已回滚到本地 SQLite；真实财务和网关配置仍未连接。' }, version: result.version, operation: { action: 'rollback' as const, idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      return businessRuleError(error, reply, request.id)
+    }
   })
 
   app.get('/api/me', {

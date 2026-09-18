@@ -37,8 +37,8 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(20)
-    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
+    expect(body.migrationVersion).toBe(21)
+    expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'business_rule_versions', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     expect(body.sessionCleanup).toMatchObject({ revokedRetentionHours: 24, lastRun: { triggeredBy: 'startup' } })
     expect(body.auditChain).toMatchObject({ algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, firstInvalidEventId: null })
   })
@@ -1127,6 +1127,41 @@ describe('BFF', () => {
     expect(body.features.items.every((item: { enabled: boolean; editable: boolean }) => item.enabled === false && item.editable === false)).toBe(true)
     expect(body.backup).toMatchObject({ source: 'database', configured: false, browserDownloadAllowed: false })
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|password/i)
+  })
+
+  it('supports local business-rule preview, draft, publish, rollback, and safe audit summaries', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    const app = buildApp({ database, authMode: 'disabled', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const initial = await app.inject({ method: 'GET', url: '/api/settings' })
+    const state = initial.json().businessRules
+    const values = state.items.map((item: { id: string; value: string }) => ({ id: item.id, value: item.id === 'currency' ? 'CNY · 额度点数' : item.value }))
+    const preview = await app.inject({ method: 'POST', url: '/api/settings/business-rules/preview', payload: { values } })
+    expect(preview.statusCode).toBe(200)
+    expect(preview.json()).toMatchObject({ baseVersion: 'draft-v0.1', changedCount: 1, changes: [expect.objectContaining({ id: 'currency', before: 'CNY · 点数', after: 'CNY · 额度点数' })] })
+    const draft = await app.inject({ method: 'POST', url: '/api/settings/business-rules/drafts', payload: { values, reason: '统一预算展示口径', acknowledgeSimulation: true, idempotencyKey: 'settings-business-draft-test-001' } })
+    expect(draft.statusCode).toBe(200)
+    expect(draft.json()).toMatchObject({ version: { status: 'draft', isCurrent: false, items: expect.arrayContaining([expect.objectContaining({ id: 'currency', value: 'CNY · 额度点数' })]) }, operation: { action: 'draft', idempotent: false } })
+    const repeatDraft = await app.inject({ method: 'POST', url: '/api/settings/business-rules/drafts', payload: { values, reason: '统一预算展示口径', acknowledgeSimulation: true, idempotencyKey: 'settings-business-draft-test-001' } })
+    expect(repeatDraft.statusCode).toBe(200)
+    expect(repeatDraft.json().operation.idempotent).toBe(true)
+    const draftId = draft.json().version.id as string
+    const published = await app.inject({ method: 'POST', url: '/api/settings/business-rules/publish', payload: { versionId: draftId, reason: '评审通过预算展示口径', acknowledgeSimulation: true, idempotencyKey: 'settings-business-publish-test-001' } })
+    expect(published.statusCode).toBe(200)
+    expect(published.json()).toMatchObject({ version: { status: 'published', isCurrent: true }, operation: { action: 'publish', idempotent: false } })
+    const rollback = await app.inject({ method: 'POST', url: '/api/settings/business-rules/rollback', payload: { versionId: 'business-rule-v0-1', reason: '回退到已验证的基础业务口径', acknowledgeSimulation: true, idempotencyKey: 'settings-business-rollback-test-001' } })
+    expect(rollback.statusCode).toBe(200)
+    expect(rollback.json()).toMatchObject({ version: { id: 'business-rule-v0-1', isCurrent: true, status: 'published' }, operation: { action: 'rollback' } })
+    const finalSettings = await app.inject({ method: 'GET', url: '/api/settings' })
+    expect(finalSettings.json().businessRules).toMatchObject({ version: 'draft-v0.1', currentVersionId: 'business-rule-v0-1', items: expect.arrayContaining([expect.objectContaining({ id: 'currency', value: 'CNY · 点数' })]) })
+    expect(database.tableCounts().businessRuleVersions).toBe(2)
+    expect(JSON.stringify(database.listAuditEvents())).not.toContain('统一预算展示口径')
+    expect(database.listAuditEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: 'draft', resourceType: 'business_rule_version', summary: expect.objectContaining({ reasonLength: 8, acknowledgedSimulation: true }) }),
+      expect.objectContaining({ action: 'publish', resourceType: 'business_rule_version' }),
+      expect.objectContaining({ action: 'rollback', resourceType: 'business_rule_version' }),
+    ]))
+    database.close()
   })
 
   it('returns a self-scoped employee profile and masked personal Keys', async () => {

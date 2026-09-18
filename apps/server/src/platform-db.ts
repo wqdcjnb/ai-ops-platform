@@ -304,6 +304,19 @@ const migrationSql = [
     models_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS business_rule_versions (
+    id TEXT PRIMARY KEY,
+    version TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('draft', 'published', 'rolled_back')),
+    is_current INTEGER NOT NULL CHECK (is_current IN (0, 1)),
+    snapshot_json TEXT NOT NULL,
+    created_by TEXT REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    rolled_back_at TEXT,
+    note TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS business_rule_versions_status_idx ON business_rule_versions(status, is_current, created_at DESC);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -710,6 +723,34 @@ export interface PlatformBusinessRuleSeed {
   status: 'fixed' | 'unverified'
 }
 
+export type PlatformBusinessRuleItem = Pick<PlatformBusinessRuleSeed, 'id' | 'label' | 'value' | 'impact' | 'status'>
+export type PlatformBusinessRuleVersionStatus = 'draft' | 'published' | 'rolled_back'
+export interface PlatformBusinessRuleVersion {
+  id: string
+  version: string
+  status: PlatformBusinessRuleVersionStatus
+  isCurrent: boolean
+  items: PlatformBusinessRuleItem[]
+  createdBy: string | null
+  createdAt: string
+  publishedAt: string | null
+  rolledBackAt: string | null
+  note: string
+}
+
+export interface PlatformBusinessRuleVersionInput {
+  id: string
+  version: string
+  items: PlatformBusinessRuleItem[]
+  actorUserId: string | null
+  note: string
+}
+
+export interface PlatformBusinessRuleVersionResult {
+  version: PlatformBusinessRuleVersion
+  idempotent: boolean
+}
+
 export interface PlatformFeatureFlagSeed {
   id: string
   label: string
@@ -1076,6 +1117,17 @@ export class PlatformDatabase {
       ON CONFLICT(id) DO UPDATE SET version = excluded.version, label = excluded.label, value = excluded.value,
       impact = excluded.impact, status = excluded.status, updated_at = excluded.updated_at`).run(
       seed.id, seed.version, seed.label, seed.value, seed.impact, seed.status, timestamp, timestamp,
+    )
+  }
+
+  seedBusinessRuleVersion(seed: PlatformBusinessRuleVersionInput & { status?: PlatformBusinessRuleVersionStatus; isCurrent?: boolean; publishedAt?: string | null; rolledBackAt?: string | null }, now = this.now()) {
+    const timestamp = now.toISOString()
+    this.db.prepare(`INSERT INTO business_rule_versions(
+      id, version, status, is_current, snapshot_json, created_by, created_at, published_at, rolled_back_at, note
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO NOTHING`).run(
+      seed.id, seed.version, seed.status ?? 'published', Number(seed.isCurrent ?? true), JSON.stringify(seed.items),
+      seed.actorUserId, timestamp, seed.publishedAt ?? timestamp, seed.rolledBackAt ?? null, seed.note,
     )
   }
 
@@ -1675,6 +1727,165 @@ export class PlatformDatabase {
       }>
   }
 
+  private parseBusinessRuleItems(snapshotJson: string): PlatformBusinessRuleItem[] {
+    const parsed = JSON.parse(snapshotJson) as unknown
+    if (!Array.isArray(parsed)) throw new Error('BUSINESS_RULE_SNAPSHOT_INVALID')
+    return parsed as PlatformBusinessRuleItem[]
+  }
+
+  private businessRuleVersionFromRow(row: {
+    id: string; version: string; status: PlatformBusinessRuleVersionStatus; isCurrent: number; snapshotJson: string
+    createdBy: string | null; createdAt: string; publishedAt: string | null; rolledBackAt: string | null; note: string; createdByName?: string | null
+  }): PlatformBusinessRuleVersion {
+    return {
+      id: row.id,
+      version: row.version,
+      status: row.status,
+      isCurrent: row.isCurrent === 1,
+      items: this.parseBusinessRuleItems(row.snapshotJson),
+      createdBy: row.createdByName ?? row.createdBy,
+      createdAt: row.createdAt,
+      publishedAt: row.publishedAt,
+      rolledBackAt: row.rolledBackAt,
+      note: row.note,
+    }
+  }
+
+  listBusinessRuleVersions(): PlatformBusinessRuleVersion[] {
+    const rows = this.db.prepare(`SELECT v.id, v.version, v.status, v.is_current AS isCurrent,
+      v.snapshot_json AS snapshotJson, v.created_by AS createdBy, u.display_name AS createdByName,
+      v.created_at AS createdAt, v.published_at AS publishedAt, v.rolled_back_at AS rolledBackAt, v.note
+      FROM business_rule_versions v LEFT JOIN users u ON u.id = v.created_by
+      ORDER BY v.is_current DESC, v.created_at DESC, v.id DESC`).all() as Array<{
+        id: string; version: string; status: PlatformBusinessRuleVersionStatus; isCurrent: number; snapshotJson: string
+        createdBy: string | null; createdByName: string | null; createdAt: string; publishedAt: string | null; rolledBackAt: string | null; note: string
+      }>
+    return rows.map((row) => this.businessRuleVersionFromRow(row))
+  }
+
+  getBusinessRuleState() {
+    const items = this.listBusinessRules()
+    const versions = this.listBusinessRuleVersions()
+    const current = versions.find((item) => item.isCurrent) ?? null
+    const draft = versions.find((item) => item.status === 'draft') ?? null
+    return {
+      status: 'published' as const,
+      version: current?.version ?? items[0]?.version ?? 'unavailable',
+      currentVersionId: current?.id ?? null,
+      items,
+      draft,
+      versions,
+    }
+  }
+
+  private businessRuleVersionById(versionId: string) {
+    const row = this.db.prepare(`SELECT v.id, v.version, v.status, v.is_current AS isCurrent,
+      v.snapshot_json AS snapshotJson, v.created_by AS createdBy, u.display_name AS createdByName,
+      v.created_at AS createdAt, v.published_at AS publishedAt, v.rolled_back_at AS rolledBackAt, v.note
+      FROM business_rule_versions v LEFT JOIN users u ON u.id = v.created_by WHERE v.id = ? LIMIT 1`).get(versionId) as {
+        id: string; version: string; status: PlatformBusinessRuleVersionStatus; isCurrent: number; snapshotJson: string
+        createdBy: string | null; createdByName: string | null; createdAt: string; publishedAt: string | null; rolledBackAt: string | null; note: string
+      } | undefined
+    return row ? this.businessRuleVersionFromRow(row) : null
+  }
+
+  private applyBusinessRuleSnapshot(version: PlatformBusinessRuleVersion, now: Date) {
+    const currentItems = this.listBusinessRules()
+    const ids = currentItems.map((item) => item.id).sort()
+    const proposedIds = version.items.map((item) => item.id).sort()
+    if (ids.length !== proposedIds.length || ids.some((id, index) => id !== proposedIds[index])) throw new Error('BUSINESS_RULE_SNAPSHOT_INVALID')
+    const timestamp = now.toISOString()
+    const update = this.db.prepare(`UPDATE system_business_rules SET version = ?, label = ?, value = ?, impact = ?, status = ?, updated_at = ? WHERE id = ?`)
+    for (const item of version.items) update.run(version.version, item.label, item.value, item.impact, item.status, timestamp, item.id)
+  }
+
+  private idempotentBusinessRuleResult(auditEvent: PlatformAuditEventSeed) {
+    const previous = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    if (!previous) return null
+    const summary = JSON.parse(previous.summaryJson) as { idempotencyFingerprint?: unknown }
+    if (previous.resourceId !== auditEvent.resourceId || summary.idempotencyFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+    const stored = this.businessRuleVersionById(previous.resourceId ?? '')
+    if (!stored) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+    return { version: stored, idempotent: true }
+  }
+
+  createBusinessRuleDraft(input: PlatformBusinessRuleVersionInput, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformBusinessRuleVersionResult {
+    const previous = this.idempotentBusinessRuleResult(auditEvent)
+    if (previous) return previous
+    const currentItems = this.listBusinessRules()
+    const ids = currentItems.map((item) => item.id).sort()
+    const proposedIds = input.items.map((item) => item.id).sort()
+    if (ids.length !== proposedIds.length || ids.some((id, index) => id !== proposedIds[index])) throw new Error('BUSINESS_RULE_SNAPSHOT_INVALID')
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE business_rule_versions SET status = 'rolled_back', is_current = 0, rolled_back_at = ? WHERE status = 'draft'`).run(timestamp)
+      this.db.prepare(`INSERT INTO business_rule_versions(
+        id, version, status, is_current, snapshot_json, created_by, created_at, published_at, rolled_back_at, note
+      ) VALUES (?, ?, 'draft', 0, ?, ?, ?, NULL, NULL, ?)`).run(
+        input.id, input.version, JSON.stringify(input.items), input.actorUserId, timestamp, input.note,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const version = this.businessRuleVersionById(input.id)
+    if (!version) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+    return { version, idempotent: false }
+  }
+
+  publishBusinessRuleVersion(versionId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformBusinessRuleVersionResult {
+    const previous = this.idempotentBusinessRuleResult(auditEvent)
+    if (previous) return previous
+    const target = this.businessRuleVersionById(versionId)
+    if (!target) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+    if (target.status !== 'draft') throw new Error('BUSINESS_RULE_DRAFT_REQUIRED')
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE business_rule_versions SET status = 'rolled_back', is_current = 0, rolled_back_at = ? WHERE is_current = 1`).run(timestamp)
+      this.db.prepare(`UPDATE business_rule_versions SET status = 'published', is_current = 1, published_at = ? WHERE id = ?`).run(timestamp, versionId)
+      const published = this.businessRuleVersionById(versionId)
+      if (!published) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+      this.applyBusinessRuleSnapshot(published, now)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const version = this.businessRuleVersionById(versionId)
+    if (!version) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+    return { version, idempotent: false }
+  }
+
+  rollbackBusinessRuleVersion(versionId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformBusinessRuleVersionResult {
+    const previous = this.idempotentBusinessRuleResult(auditEvent)
+    if (previous) return previous
+    const target = this.businessRuleVersionById(versionId)
+    if (!target) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+    if (target.isCurrent || target.status === 'draft') throw new Error('BUSINESS_RULE_ROLLBACK_INVALID')
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE business_rule_versions SET status = 'rolled_back', is_current = 0, rolled_back_at = ? WHERE is_current = 1`).run(timestamp)
+      this.db.prepare(`UPDATE business_rule_versions SET status = 'published', is_current = 1, published_at = ?, rolled_back_at = NULL WHERE id = ?`).run(timestamp, versionId)
+      const published = this.businessRuleVersionById(versionId)
+      if (!published) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+      this.applyBusinessRuleSnapshot(published, now)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const version = this.businessRuleVersionById(versionId)
+    if (!version) throw new Error('BUSINESS_RULE_VERSION_NOT_FOUND')
+    return { version, idempotent: false }
+  }
+
   listFeatureFlags() {
     return this.db.prepare(`SELECT id, label, enabled, reason, risk FROM system_feature_flags
       ORDER BY id`).all() as Array<{
@@ -1934,6 +2145,7 @@ export class PlatformDatabase {
       conversationAuditExpiryProofs: count('conversation_audit_expiry_proofs'),
       conversationUsageLinks: count('conversation_usage_links'),
       businessRules: count('system_business_rules'),
+      businessRuleVersions: count('business_rule_versions'),
       featureFlags: count('system_feature_flags'),
       roleDefinitions: count('system_role_definitions'),
       retentionPolicies: count('system_retention_policies'),
@@ -2059,6 +2271,17 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { id: 'retry-billing', version: 'draft-v0.1', label: '重试计费', value: '按最终成功请求记一次', impact: '网关自动重试与成本归集', status: 'unverified' },
   ]
   for (const rule of businessRules) database.seedBusinessRule(rule)
+  if (database.listBusinessRuleVersions().length === 0) {
+    database.seedBusinessRuleVersion({
+      id: 'business-rule-v0-1',
+      version: 'draft-v0.1',
+      items: database.listBusinessRules().map(({ id, label, value, impact, status }) => ({ id, label, value, impact, status })),
+      actorUserId: 'user-super-admin',
+      note: 'SQLite 初始业务口径基线',
+      status: 'published',
+      isCurrent: true,
+    })
+  }
 
   const featureFlags: PlatformFeatureFlagSeed[] = [
     { id: 'management-writes', label: '管理写操作', enabled: false, reason: '登录、RBAC、幂等、审计和回滚未完成', risk: 'high' },
