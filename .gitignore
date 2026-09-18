@@ -25,6 +25,8 @@ dist/
 .vitepress/cache/
 .vitepress/dist/
 coverage/
+/apps/web/playwright-report/
+/apps/web/test-results/
 /output/
 
 # Local tools and editors
