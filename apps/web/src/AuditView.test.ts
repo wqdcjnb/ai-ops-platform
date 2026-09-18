@@ -55,4 +55,12 @@ describe('audit view local alert action handoff', () => {
     expect(host.textContent).toContain('正在显示请求 ID“req-demo-007”的审计记录')
     expect(host.querySelector<HTMLButtonElement>('[aria-label="清除请求审计关联"]')).not.toBeNull()
   })
+
+  it('labels an exact management mutation audit handoff', async () => {
+    window.history.replaceState({}, '', '/audit?eventId=audit-quota-update-test&origin=mutation')
+    app = createApp(AuditView); app.mount(host)
+    await vi.waitFor(() => expect(fetchAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'audit-quota-update-test', page: 1 }), expect.any(AbortSignal)))
+    expect(host.textContent).toContain('正在显示本次管理操作的审计记录')
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="清除管理操作审计关联"]')).not.toBeNull()
+  })
 })
