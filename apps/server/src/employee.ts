@@ -10,7 +10,7 @@ const selfScopeSchema = z.object({ mode: z.literal('self_database'), currentUser
 export const employeeProfileResponseSchema = z.object({
   meta: databaseMetaSchema, scope: selfScopeSchema,
   person: z.object({ id: z.string(), name: z.string(), initials: z.string(), employeeCode: z.string(), department: z.string(), role: z.literal('employee'), status: z.literal('active'), manager: z.string(), joinedAt: z.string().date() }),
-  support: z.object({ contact: z.string(), serviceHours: z.string(), temporaryQuotaRequestAvailable: z.literal(false), notice: z.string() }),
+  support: z.object({ contact: z.string(), serviceHours: z.string(), temporaryQuotaRequestAvailable: z.literal(true), notice: z.string() }),
   commonErrors: z.array(z.object({ code: z.enum(['AUTH_INVALID', 'MODEL_NOT_ALLOWED', 'SOFT_TARGET_REACHED', 'UPSTREAM_UNAVAILABLE']), title: z.string(), explanation: z.string(), action: z.string(), internalDetailAvailable: z.literal(false) })),
 })
 
@@ -46,8 +46,8 @@ const demoMeta = (now: Date, notice: string) => ({ source: 'demo' as const, gene
 const support = {
   contact: '联系部门负责人或平台管理员',
   serviceHours: '工作日 09:30–18:30',
-  temporaryQuotaRequestAvailable: false as const,
-  notice: '临时额度申请为二期功能；当前达到软目标后仍允许调用。',
+  temporaryQuotaRequestAvailable: true as const,
+  notice: '可提交临时额度申请；审批、到期和审计均只写入本地 SQLite，不会阻断请求。',
 }
 
 const commonErrors = [
@@ -126,7 +126,9 @@ export function createDatabaseEmployeeUsage(database: PlatformDatabase, userId: 
     return { date, points: roundPoints(item.points), requests: item.requests }
   })
   const monthlyPoints = monthRecords.reduce((total, item) => total + item.points, 0)
-  const target = database.listQuotaPolicies().find((item) => item.level === 'person' && item.subjectId === userId && item.period === 'month')?.targetPoints ?? 1
+  const baseTarget = database.listQuotaPolicies().find((item) => item.level === 'person' && item.subjectId === userId && item.period === 'month')?.targetPoints ?? 1
+  const temporaryTarget = database.listActiveTemporaryQuotaGrants(now).filter((item) => item.requesterUserId === userId).reduce((total, item) => total + (item.approvedPoints ?? 0), 0)
+  const target = baseTarget + temporaryTarget
   const usagePercent = Math.round((monthlyPoints / target) * 1_000) / 10
   const tokens = periodRecords.reduce((total, item) => total + item.inputTokens + item.outputTokens, 0)
   const succeeded = periodRecords.filter((item) => item.status === 'succeeded').length

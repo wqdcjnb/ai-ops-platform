@@ -222,11 +222,17 @@ function nodesForScope(nodes: LimitNode[], scope: DataScope) {
 export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): LimitsResponse {
   const demo = createDemoLimits({ level: 'all', search: '' }, newApi, now)
   const policies = database.listQuotaPolicies()
+  const temporaryGrantPoints = new Map<string, number>()
+  for (const grant of database.listActiveTemporaryQuotaGrants(now)) {
+    temporaryGrantPoints.set(grant.requesterUserId, (temporaryGrantPoints.get(grant.requesterUserId) ?? 0) + (grant.approvedPoints ?? 0))
+  }
   const all = demo.items.map((node) => {
     const policy = policies.find((item) => item.level === node.level && item.subjectId === quotaPolicySubject(node) && item.period === 'month')
     if (!policy) return node
+    const temporaryPoints = node.level === 'person' ? (temporaryGrantPoints.get(node.id) ?? 0) : 0
+    const targetPoints = policy.targetPoints + temporaryPoints
     const periods = node.periods.map((period) => period.id === 'month'
-      ? { ...period, limit: policy.targetPoints, percent: Number(((period.used + period.reserved) / policy.targetPoints * 100).toFixed(1)) }
+      ? { ...period, limit: targetPoints, percent: Number(((period.used + period.reserved) / targetPoints * 100).toFixed(1)) }
       : period)
     const month = periods.find((period) => period.id === 'month')!
     const state = (month.used + month.reserved) / month.limit >= 1 ? 'reached' : (month.used + month.reserved) / month.limit >= 0.8 ? 'near' : 'normal'

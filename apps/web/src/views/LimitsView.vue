@@ -5,6 +5,7 @@ import {
   IconFilter, IconGauge, IconKey, IconRefresh, IconSearch, IconShieldLock, IconSparkles, IconUser, IconX,
 } from '@tabler/icons-vue'
 import { fetchLimits, LimitsApiError, updateMonthlySoftQuota, type LimitFilters, type LimitNode, type LimitsResponse, type QuotaUpdateBody, type QuotaUpdateResponse } from '../limits-api'
+import { decideQuotaRequest, fetchQuotaRequests, QuotaRequestsApiError, type QuotaDecisionBody, type QuotaRequest, type QuotaRequestActionResponse, type QuotaRequestsResponse } from '../quota-requests-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const limits = ref<LimitsResponse | null>(null)
@@ -19,6 +20,13 @@ const adjustError = ref('')
 const isAdjusting = ref(false)
 const adjustResult = ref<QuotaUpdateResponse | null>(null)
 const adjustForm = ref<QuotaUpdateBody>({ targetPoints: 1, idempotencyKey: '', reason: '', acknowledgeImpact: true })
+const quotaRequests = ref<QuotaRequestsResponse | null>(null)
+const quotaStatus = ref<'all' | 'pending' | 'approved' | 'rejected' | 'expired'>('all')
+const quotaRequestError = ref('')
+const quotaDecision = ref<{ request: QuotaRequest; decision: 'approve' | 'reject' } | null>(null)
+const quotaDecisionForm = ref<QuotaDecisionBody>({ decision: 'approve', reason: '', acknowledgeImpact: true, idempotencyKey: '' })
+const quotaDecisionResult = ref<QuotaRequestActionResponse | null>(null)
+const isDecidingQuota = ref(false)
 let request: AbortController | null = null
 
 const selected = computed(() => limits.value?.items.find((item) => item.id === selectedId.value) ?? limits.value?.items[0] ?? null)
@@ -86,6 +94,14 @@ async function loadLimits() {
   } finally { if (request === next) isLoading.value = false }
 }
 
+async function loadQuotaRequests() {
+  quotaRequestError.value = ''
+  try { quotaRequests.value = await fetchQuotaRequests(quotaStatus.value) } catch (error) {
+    const requestId = error instanceof QuotaRequestsApiError ? error.requestId : undefined
+    quotaRequestError.value = `${error instanceof Error ? error.message : '临时额度申请暂时无法加载'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  }
+}
+
 function applyFilters() { cancelSearch(); void loadLimits() }
 function clearFilters() { level.value = 'all'; search.value = ''; applyFilters() }
 
@@ -122,9 +138,24 @@ async function submitAdjust() {
   }
 }
 
+function openQuotaDecision(item: QuotaRequest, decision: 'approve' | 'reject') {
+  quotaDecision.value = { request: item, decision }
+  quotaDecisionResult.value = null
+  quotaDecisionForm.value = { decision, reason: '', acknowledgeImpact: true, idempotencyKey: `quota-decision-${crypto.randomUUID()}` }
+}
+function closeQuotaDecision() { if (!isDecidingQuota.value) quotaDecision.value = null }
+async function submitQuotaDecision() {
+  if (!quotaDecision.value) return
+  isDecidingQuota.value = true; quotaRequestError.value = ''
+  try { quotaDecisionResult.value = await decideQuotaRequest(quotaDecision.value.request.id, quotaDecisionForm.value); await Promise.all([loadQuotaRequests(), loadLimits()]) } catch (error) {
+    const requestId = error instanceof QuotaRequestsApiError ? error.requestId : undefined
+    quotaRequestError.value = `${error instanceof Error ? error.message : '处理临时额度申请失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isDecidingQuota.value = false }
+}
+
 const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadLimits())
 
-onMounted(() => void loadLimits())
+onMounted(() => { void loadLimits(); void loadQuotaRequests() })
 onBeforeUnmount(() => request?.abort())
 </script>
 
@@ -169,9 +200,11 @@ onBeforeUnmount(() => request?.abort())
         </div>
       </section>
 
-      <section class="panel hard-mode-panel"><header class="panel-header"><div><span class="panel-title">硬额度上线条件</span><span class="panel-subtitle">全部验收后才允许开启阻断模式</span></div><span class="hard-mode-off">服务端已关闭</span></header><div class="hard-requirements"><article v-for="item in limits.hardMode.requirements" :key="item.label"><span><IconClock :size="16" /></span><div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div><em>待验证</em></article></div><footer><IconCheck :size="16" />月度软目标可在本地 SQLite 调整；硬额度和临时额度申请仍需并发、审批与自动到期能力。</footer></section>
+      <section class="panel hard-mode-panel"><header class="panel-header"><div><span class="panel-title">硬额度上线条件</span><span class="panel-subtitle">全部验收后才允许开启阻断模式</span></div><span class="hard-mode-off">服务端已关闭</span></header><div class="hard-requirements"><article v-for="item in limits.hardMode.requirements" :key="item.label"><span><IconClock :size="16" /></span><div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div><em>待验证</em></article></div><footer><IconCheck :size="16" />月度软目标和临时额度审批均可写入本地 SQLite；硬额度仍保持关闭，不会阻断请求。</footer></section>
+
+      <section class="panel quota-approval-panel"><header class="panel-header"><div><span class="panel-title">临时额度申请</span><span class="panel-subtitle">本地审批轨道 · 申请原因只保存长度</span></div><div class="quota-approval-summary"><strong>{{ quotaRequests?.summary.pending ?? 0 }}</strong><small>待审批</small><strong>{{ quotaRequests?.summary.active ?? 0 }}</strong><small>活跃</small></div></header><div class="quota-approval-toolbar"><span>审批状态</span><select v-model="quotaStatus" @change="loadQuotaRequests"><option value="all">全部申请</option><option value="pending">待审批</option><option value="approved">已批准</option><option value="rejected">已拒绝</option><option value="expired">已到期</option></select><button class="text-button" @click="loadQuotaRequests"><IconRefresh :size="14" />刷新</button></div><div v-if="quotaRequestError" class="quota-request-error"><IconAlertTriangle :size="15" />{{ quotaRequestError }}</div><div v-else-if="quotaRequests?.items.length" class="quota-approval-list"><article v-for="item in quotaRequests.items" :key="item.id" class="quota-approval-card"><div class="quota-status-rail" :class="item.status" /><div class="quota-approval-main"><header><div><strong>{{ item.requester.name }}</strong><span>{{ item.requester.department }}</span></div><span class="quota-status" :class="item.status">{{ item.status === 'pending' ? '待审批' : item.status === 'approved' ? '已批准' : item.status === 'rejected' ? '已拒绝' : '已到期' }}</span></header><div class="quota-approval-metrics"><span><small>申请点数</small><strong>{{ item.targetPoints.toLocaleString('zh-CN') }} 点</strong></span><span><small>有效时长</small><strong>{{ item.durationHours }} 小时</strong></span><span><small>申请时间</small><strong>{{ resetText(item.requestedAt) }}</strong></span><span><small>原因记录</small><strong>{{ item.reasonLength }} 字（脱敏）</strong></span></div><footer><span v-if="item.expiresAt">{{ item.status === 'approved' ? `到期 ${resetText(item.expiresAt)}` : `处理于 ${resetText(item.decidedAt ?? item.requestedAt)}` }}</span><span v-else>审批操作会写入审计链</span><div v-if="quotaRequests?.scope.canDecide && item.status === 'pending'" class="quota-approval-actions"><button class="btn btn-white" @click="openQuotaDecision(item, 'reject')">拒绝</button><button class="btn" @click="openQuotaDecision(item, 'approve')">批准</button></div></footer></div></article></div><div v-else class="quota-approval-empty"><IconCheck :size="18" />当前筛选下没有申请记录</div></section>
     </template>
-    <footer class="page-footer">数据来源：{{ limits?.meta.source.toUpperCase() ?? '等待数据' }} · 月度软目标可调整（本地 SQLite）· 硬额度与临时申请仍未开放</footer>
+    <footer class="page-footer">数据来源：{{ limits?.meta.source.toUpperCase() ?? '等待数据' }} · 月度软目标与临时额度审批均为本地 SQLite · 硬额度关闭 · 不调用 New API</footer>
 
     <div v-if="showAdjust && selected && month" class="drawer-backdrop" @click.self="closeAdjust">
       <aside class="create-key-dialog quota-adjust-dialog" role="dialog" aria-modal="true" aria-label="调整月度软目标">
@@ -180,5 +213,7 @@ onBeforeUnmount(() => request?.abort())
         <form v-else class="create-key-form" @submit.prevent="submitAdjust"><p class="create-person-note"><strong>{{ selected.name }}</strong> 的月度软目标将写入本地 SQLite，并在页面提示中立即生效。此操作不启用硬额度、不阻断请求，也不会调用 New API 或修改真实预算。</p><label><span>本月软目标（点）</span><input v-model.number="adjustForm.targetPoints" required min="1" max="1000000" type="number" /></label><div class="quota-adjust-impact"><span>当前已用 + 预留</span><strong>{{ month.used.toLocaleString('zh-CN') }} + {{ month.reserved.toLocaleString('zh-CN') }} 点</strong><span>保存后预计使用率</span><strong :class="`state-${adjustedProjectionState}`">{{ adjustedProjectedPercent }}%</strong></div><p v-if="adjustedProjectedPercent >= 100" class="quota-adjust-warning"><IconAlertTriangle :size="15" />新目标低于当前已用与预留总和；系统只会提示，不会拦截请求。</p><label><span>调整原因 <em>至少 8 个字符</em></span><textarea v-model="adjustForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示大促活动需要提高月度提示阈值" /></label><label class="access-ack"><input v-model="adjustForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该操作只修改本地演示月度软目标，并写入不含原因原文的审计摘要；不会开启硬额度或影响真实预算。</span></label><div v-if="adjustError" class="create-person-error"><IconAlertTriangle :size="16" />{{ adjustError }}</div><footer><button class="btn btn-white" type="button" :disabled="isAdjusting" @click="closeAdjust">取消</button><button class="btn create-key" type="submit" :disabled="isAdjusting || adjustForm.targetPoints < 1 || adjustForm.targetPoints > 1000000 || adjustForm.reason.trim().length < 8 || !adjustForm.acknowledgeImpact">{{ isAdjusting ? '保存中…' : '确认更新软目标' }}</button></footer></form>
       </aside>
     </div>
+
+    <div v-if="quotaDecision" class="drawer-backdrop" @click.self="closeQuotaDecision"><aside class="create-key-dialog quota-decision-dialog" role="dialog" aria-modal="true" aria-label="处理临时额度申请"><header><div><span class="source-tag demo">LOCAL SQLITE</span><h2>{{ quotaDecisionResult ? '审批已完成' : quotaDecision.decision === 'approve' ? '批准临时额度' : '拒绝临时额度' }}</h2></div><button class="icon-button" aria-label="关闭临时额度审批" :disabled="isDecidingQuota" @click="closeQuotaDecision"><IconX :size="20" /></button></header><template v-if="quotaDecisionResult"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ quotaDecisionResult.request.requester.name }} 的申请已{{ quotaDecisionResult.request.status === 'approved' ? '批准' : '拒绝' }}</strong><p>{{ quotaDecisionResult.meta.notice }}</p><small v-if="quotaDecisionResult.request.expiresAt">本次额度 {{ quotaDecisionResult.request.approvedPoints?.toLocaleString('zh-CN') }} 点 · 到期 {{ resetText(quotaDecisionResult.request.expiresAt) }}</small><small>审计事件：{{ quotaDecisionResult.operation.auditEventId }}</small></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(quotaDecisionResult.operation.auditEventId)}&origin=quota_decision`"><IconClock :size="16" />查看操作审计</a><button class="btn create-key" @click="closeQuotaDecision">完成</button></footer></template><form v-else class="create-key-form" @submit.prevent="submitQuotaDecision"><p class="create-person-note"><strong>{{ quotaDecision.request.requester.name }}</strong> 申请 {{ quotaDecision.request.targetPoints.toLocaleString('zh-CN') }} 点、{{ quotaDecision.request.durationHours }} 小时。原申请说明仅保留 {{ quotaDecision.request.reasonLength }} 字长度，不在页面或审计中还原。</p><label><span>审批说明 <em>至少 8 个字符</em></span><textarea v-model="quotaDecisionForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="说明批准或拒绝依据，不要填写密钥或敏感数据" /></label><label class="access-ack"><input v-model="quotaDecisionForm.acknowledgeImpact" type="checkbox" /><span>我已确认：这是本地演示审批，批准后只增加软目标展示，不阻断请求。</span></label><div v-if="quotaRequestError" class="create-person-error"><IconAlertTriangle :size="16" />{{ quotaRequestError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDecidingQuota" @click="closeQuotaDecision">取消</button><button class="btn create-key" type="submit" :disabled="isDecidingQuota || quotaDecisionForm.reason.trim().length < 8 || !quotaDecisionForm.acknowledgeImpact">{{ isDecidingQuota ? '提交中…' : quotaDecision.decision === 'approve' ? '确认批准' : '确认拒绝' }}</button></footer></form></aside></div>
   </div>
 </template>

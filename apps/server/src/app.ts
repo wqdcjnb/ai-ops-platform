@@ -23,9 +23,10 @@ import { conversationAccessBodySchema, conversationAccessHistoryResponseSchema, 
 import { businessRuleDraftBodySchema, businessRulePreviewBodySchema, businessRulePreviewResponseSchema, businessRulePublishBodySchema, businessRuleRollbackBodySchema, businessRuleVersionActionResponseSchema, createSettings, settingsResponseSchema } from './settings.js'
 import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
-import { dataScopeFor } from './data-scope.js'
+import { dataScopeFor, isDepartmentVisible } from './data-scope.js'
 import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
 import { createDatabaseSearch, searchQuerySchema, searchResponseSchema } from './search.js'
+import { createQuotaRequestsResponse, quotaDecisionBodySchema, quotaRequestBodySchema, quotaRequestParamsSchema, quotaRequestQuerySchema, quotaRequestActionResponseSchema, quotaRequestsResponseSchema } from './quota-requests.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -98,6 +99,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   const requiredRoles = (path: string, method: string, source?: string): readonly AppRole[] => {
     if ((path === '/api/models' || path === '/api/channels') && source === 'new_api') return ['super_admin', 'admin']
     if (path.startsWith('/api/me')) return ['employee']
+    if (path.startsWith('/api/quota-requests')) return method === 'GET' ? ['super_admin', 'admin', 'department_lead', 'finance'] : ['super_admin', 'admin', 'department_lead']
     if (path.startsWith('/api/conversation-audits')) return ['super_admin']
     if (path.startsWith('/api/integrations/new-api/management')) return ['super_admin', 'admin']
     if (path.startsWith('/api/alert-rules') && method !== 'GET') return ['super_admin', 'admin']
@@ -626,6 +628,41 @@ export function buildApp(options: BuildAppOptions = {}) {
       }
     } catch (error) {
       if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他额度调整或不同目标值', requestId: request.id } })
+      throw error
+    }
+  })
+
+  app.get('/api/quota-requests', {
+    schema: { querystring: quotaRequestQuerySchema, response: { 200: quotaRequestsResponseSchema } },
+  }, async (request) => {
+    const scope = dataScopeFor(request.authUser)
+    const filter = { ...(scope.mode === 'department' ? { departmentId: scope.departmentId } : {}), ...(request.query.status !== 'all' ? { status: request.query.status } : {}) }
+    return createQuotaRequestsResponse(database, filter, { mode: scope.mode === 'department' ? 'department' : 'global', departmentId: scope.mode === 'department' ? scope.departmentId : null, canDecide: request.authUser?.role !== 'finance' })
+  })
+
+  app.patch('/api/quota-requests/:id/decision', {
+    schema: { params: quotaRequestParamsSchema, body: quotaDecisionBodySchema, response: { 200: quotaRequestActionResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const scope = dataScopeFor(request.authUser)
+    const current = database.listTemporaryQuotaRequests({}, new Date()).find((item) => item.id === request.params.id)
+    if (!current || !isDepartmentVisible(scope, current.departmentId)) return reply.status(404).send({ error: { code: 'QUOTA_REQUEST_NOT_FOUND', message: '未找到当前范围内的临时额度申请', requestId: request.id } })
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.decideTemporaryQuotaRequest({
+        id: request.params.id, decision: request.body.decision, approverUserId: request.authUser?.id ?? 'user-super-admin', reasonLength: request.body.reason.length, idempotencyKey: request.body.idempotencyKey,
+      }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'quota', resourceId: request.params.id, result: 'success', requestId: request.id,
+        summary: { code: request.body.decision === 'approve' ? 'TEMPORARY_QUOTA_APPROVED' : 'TEMPORARY_QUOTA_REJECTED', message: '已更新本地临时额度申请状态；审计只保存说明长度。', statusBefore: current.status, statusAfter: request.body.decision === 'approve' ? 'approved' : 'rejected', targetPoints: current.targetPoints, durationHours: current.durationHours, reasonLength: request.body.reason.length },
+      }, new Date())
+      if (!result) return reply.status(404).send({ error: { code: 'QUOTA_REQUEST_NOT_FOUND', message: '申请已不存在，请刷新后重试', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, generatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), notice: '状态已写入本地 SQLite；批准只增加软目标展示，不启用硬额度拦截。' },
+        request: { id: result.request.id, requester: { id: result.request.requesterUserId, name: result.request.requesterName, department: result.request.departmentName }, targetPoints: result.request.targetPoints, durationHours: result.request.durationHours, reasonLength: result.request.reasonLength, status: result.request.status, requestedAt: result.request.requestedAt, decidedAt: result.request.decidedAt, approver: result.request.approverUserId && result.request.approverName ? { id: result.request.approverUserId, name: result.request.approverName } : null, decisionReasonLength: result.request.decisionReasonLength, expiresAt: result.request.expiresAt, approvedPoints: result.request.approvedPoints },
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该审批操作编号已用于其他申请或不同状态', requestId: request.id } })
+      if (error instanceof Error && error.message === 'QUOTA_REQUEST_NOT_PENDING') return reply.status(409).send({ error: { code: 'QUOTA_REQUEST_NOT_PENDING', message: '该申请已处理，不能重复审批', requestId: request.id } })
       throw error
     }
   })
@@ -1204,6 +1241,34 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/me/models', {
     schema: { response: { 200: employeeModelsResponseSchema } },
   }, async () => createDemoEmployeeModels())
+
+  app.get('/api/me/quota-requests', {
+    schema: { querystring: quotaRequestQuerySchema, response: { 200: quotaRequestsResponseSchema } },
+  }, async (request) => createQuotaRequestsResponse(database, { requesterUserId: request.authUser?.id ?? 'person-lin', ...(request.query.status !== 'all' ? { status: request.query.status } : {}) }, { mode: 'self', departmentId: database.findPersonDepartmentId(request.authUser?.id ?? 'person-lin'), canDecide: false }))
+
+  app.post('/api/me/quota-requests', {
+    schema: { body: quotaRequestBodySchema, response: { 200: quotaRequestActionResponseSchema, 400: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const requesterUserId = request.authUser?.id ?? 'person-lin'
+    const departmentId = database.findPersonDepartmentId(requesterUserId)
+    const previous = database.listTemporaryQuotaRequests({ requesterUserId }).find((item) => item.idempotencyKey === request.body.idempotencyKey)
+    const id = previous?.id ?? `quota-request-${crypto.randomUUID()}`
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.createTemporaryQuotaRequest({ id, requesterUserId, departmentId, targetPoints: request.body.targetPoints, durationHours: request.body.durationHours, reasonLength: request.body.reason.length, idempotencyKey: request.body.idempotencyKey }, {
+        id: auditEventId, actorUserId: requesterUserId, action: 'create', resourceType: 'quota', resourceId: id, result: 'success', requestId: request.id,
+        summary: { code: 'TEMPORARY_QUOTA_REQUESTED', message: '已创建本地临时额度申请；审计只保存说明长度。', targetPoints: request.body.targetPoints, durationHours: request.body.durationHours, reasonLength: request.body.reason.length },
+      }, new Date())
+      return {
+        meta: { source: 'database' as const, generatedAt: new Date().toISOString(), completedAt: new Date().toISOString(), notice: '申请已写入本地 SQLite，等待部门负责人或管理员审批；不会阻断请求。' },
+        request: { id: result.request.id, requester: { id: result.request.requesterUserId, name: result.request.requesterName, department: result.request.departmentName }, targetPoints: result.request.targetPoints, durationHours: result.request.durationHours, reasonLength: result.request.reasonLength, status: result.request.status, requestedAt: result.request.requestedAt, decidedAt: result.request.decidedAt, approver: null, decisionReasonLength: null, expiresAt: null, approvedPoints: null },
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该申请操作编号已用于其他申请', requestId: request.id } })
+      throw error
+    }
+  })
 
   app.setErrorHandler((error, request, reply) => {
     const isValidationError = typeof error === 'object' && error !== null && 'validation' in error

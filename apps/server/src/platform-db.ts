@@ -317,6 +317,25 @@ const migrationSql = [
     note TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS business_rule_versions_status_idx ON business_rule_versions(status, is_current, created_at DESC);`,
+  `CREATE TABLE IF NOT EXISTS temporary_quota_requests (
+    id TEXT PRIMARY KEY,
+    requester_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    department_id TEXT REFERENCES departments(id),
+    target_points INTEGER NOT NULL CHECK (target_points BETWEEN 1 AND 1000000),
+    duration_hours INTEGER NOT NULL CHECK (duration_hours BETWEEN 1 AND 720),
+    reason_length INTEGER NOT NULL CHECK (reason_length BETWEEN 8 AND 200),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'cancelled')),
+    requested_at TEXT NOT NULL,
+    decided_at TEXT,
+    approver_user_id TEXT REFERENCES users(id),
+    decision_reason_length INTEGER CHECK (decision_reason_length IS NULL OR decision_reason_length BETWEEN 8 AND 200),
+    expires_at TEXT,
+    approved_points INTEGER CHECK (approved_points IS NULL OR approved_points BETWEEN 1 AND 1000000),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS temporary_quota_requests_requester_idx ON temporary_quota_requests(requester_user_id, requested_at DESC);
+  CREATE INDEX IF NOT EXISTS temporary_quota_requests_status_idx ON temporary_quota_requests(status, requested_at DESC);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -412,6 +431,47 @@ export interface PlatformMonthlySoftQuotaPolicyUpdateResult {
   targetPoints: number
   mode: 'soft'
   previousTargetPoints: number
+  idempotent: boolean
+}
+
+export type TemporaryQuotaRequestStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled'
+export interface PlatformTemporaryQuotaRequestCreate {
+  id: string
+  requesterUserId: string
+  departmentId: string | null
+  targetPoints: number
+  durationHours: number
+  reasonLength: number
+  idempotencyKey: string
+}
+export interface PlatformTemporaryQuotaRequestDecision {
+  id: string
+  decision: 'approve' | 'reject'
+  approverUserId: string
+  reasonLength: number
+  idempotencyKey: string
+}
+export interface PlatformTemporaryQuotaRequest {
+  id: string
+  requesterUserId: string
+  requesterName: string
+  departmentId: string | null
+  departmentName: string
+  targetPoints: number
+  durationHours: number
+  reasonLength: number
+  status: TemporaryQuotaRequestStatus
+  requestedAt: string
+  decidedAt: string | null
+  approverUserId: string | null
+  approverName: string | null
+  decisionReasonLength: number | null
+  expiresAt: string | null
+  approvedPoints: number | null
+  idempotencyKey: string
+}
+export interface PlatformTemporaryQuotaRequestResult {
+  request: PlatformTemporaryQuotaRequest
   idempotent: boolean
 }
 
@@ -936,6 +996,14 @@ export class PlatformDatabase {
       ON CONFLICT(id) DO NOTHING`).run(
       seed.id, seed.level, seed.subjectId, seed.period, seed.targetPoints, seed.mode ?? 'soft', timestamp, timestamp,
     )
+  }
+
+  seedTemporaryQuotaRequest(seed: PlatformTemporaryQuotaRequestCreate, now = this.now()) {
+    if (this.db.prepare('SELECT 1 FROM temporary_quota_requests WHERE id = ? LIMIT 1').get(seed.id)) return
+    this.createTemporaryQuotaRequest(seed, {
+      id: `audit-${seed.idempotencyKey}`, actorUserId: seed.requesterUserId, action: 'create', resourceType: 'quota', resourceId: seed.id,
+      result: 'success', summary: { code: 'TEMPORARY_QUOTA_REQUESTED', message: '已创建本地临时额度演示申请；审计只保存说明长度。', targetPoints: seed.targetPoints, durationHours: seed.durationHours, reasonLength: seed.reasonLength },
+    }, now)
   }
 
   seedAuditEvent(seed: PlatformAuditEventSeed, now = this.now()) {
@@ -1500,6 +1568,125 @@ export class PlatformDatabase {
     return stored && stored.period === 'month' && stored.mode === 'soft'
       ? { id: stored.id, level: stored.level, subjectId: stored.subjectId, targetPoints: stored.targetPoints, mode: 'soft', previousTargetPoints: fallbackPreviousTarget, idempotent: false }
       : null
+  }
+
+  private expireTemporaryQuotaRequests(now = this.now()) {
+    const timestamp = now.toISOString()
+    const rows = this.db.prepare(`SELECT id FROM temporary_quota_requests
+      WHERE status = 'approved' AND expires_at IS NOT NULL AND expires_at <= ?`).all(timestamp) as Array<{ id: string }>
+    if (!rows.length) return
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const row of rows) {
+        this.db.prepare("UPDATE temporary_quota_requests SET status = 'expired', updated_at = ? WHERE id = ? AND status = 'approved'").run(timestamp, row.id)
+        this.appendAuditEvent({
+          id: `audit-quota-expire-${row.id}`,
+          action: 'update', resourceType: 'quota', resourceId: row.id, result: 'success',
+          summary: { code: 'TEMPORARY_QUOTA_EXPIRED', message: '临时额度已自动到期；审计只保存状态变更。', status: 'expired' },
+        }, now)
+      }
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  private mapTemporaryQuotaRequest(row: Record<string, unknown>): PlatformTemporaryQuotaRequest {
+    return {
+      id: String(row.id), requesterUserId: String(row.requesterUserId), requesterName: String(row.requesterName),
+      departmentId: row.departmentId ? String(row.departmentId) : null, departmentName: String(row.departmentName ?? '未分配部门'),
+      targetPoints: Number(row.targetPoints), durationHours: Number(row.durationHours), reasonLength: Number(row.reasonLength),
+      status: row.status as TemporaryQuotaRequestStatus, requestedAt: String(row.requestedAt),
+      decidedAt: row.decidedAt ? String(row.decidedAt) : null, approverUserId: row.approverUserId ? String(row.approverUserId) : null,
+      approverName: row.approverName ? String(row.approverName) : null, decisionReasonLength: row.decisionReasonLength == null ? null : Number(row.decisionReasonLength),
+      expiresAt: row.expiresAt ? String(row.expiresAt) : null, approvedPoints: row.approvedPoints == null ? null : Number(row.approvedPoints),
+      idempotencyKey: String(row.idempotencyKey),
+    }
+  }
+
+  listTemporaryQuotaRequests(filter: { requesterUserId?: string; departmentId?: string; status?: TemporaryQuotaRequestStatus } = {}, now = this.now()) {
+    this.expireTemporaryQuotaRequests(now)
+    const clauses = ['1 = 1']
+    const params: string[] = []
+    if (filter.requesterUserId) { clauses.push('r.requester_user_id = ?'); params.push(filter.requesterUserId) }
+    if (filter.departmentId) { clauses.push('r.department_id = ?'); params.push(filter.departmentId) }
+    if (filter.status) { clauses.push('r.status = ?'); params.push(filter.status) }
+    const rows = this.db.prepare(`SELECT r.id, r.requester_user_id AS requesterUserId, u.display_name AS requesterName,
+      r.department_id AS departmentId, COALESCE(d.name, '未分配部门') AS departmentName,
+      r.target_points AS targetPoints, r.duration_hours AS durationHours, r.reason_length AS reasonLength,
+      r.status, r.requested_at AS requestedAt, r.decided_at AS decidedAt, r.approver_user_id AS approverUserId,
+      approver.display_name AS approverName, r.decision_reason_length AS decisionReasonLength,
+      r.expires_at AS expiresAt, r.approved_points AS approvedPoints, r.idempotency_key AS idempotencyKey
+      FROM temporary_quota_requests r
+      JOIN users u ON u.id = r.requester_user_id
+      LEFT JOIN departments d ON d.id = r.department_id
+      LEFT JOIN users approver ON approver.id = r.approver_user_id
+      WHERE ${clauses.join(' AND ')} ORDER BY CASE r.status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, r.requested_at DESC`).all(...params) as Array<Record<string, unknown>>
+    return rows.map((row) => this.mapTemporaryQuotaRequest(row))
+  }
+
+  listActiveTemporaryQuotaGrants(now = this.now()) {
+    return this.listTemporaryQuotaRequests({ status: 'approved' }, now).filter((item) => item.expiresAt && new Date(item.expiresAt).getTime() > now.getTime())
+  }
+
+  createTemporaryQuotaRequest(request: PlatformTemporaryQuotaRequestCreate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformTemporaryQuotaRequestResult {
+    const existing = this.db.prepare('SELECT id, requester_user_id AS requesterUserId FROM temporary_quota_requests WHERE idempotency_key = ? LIMIT 1').get(request.idempotencyKey) as { id: string; requesterUserId: string } | undefined
+    if (existing) {
+      if (existing.id !== request.id || existing.requesterUserId !== request.requesterUserId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = this.listTemporaryQuotaRequests({ requesterUserId: request.requesterUserId }, now).find((item) => item.id === request.id)
+      if (!stored) throw new Error('QUOTA_REQUEST_NOT_FOUND')
+      return { request: stored, idempotent: true }
+    }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO temporary_quota_requests(
+        id, requester_user_id, department_id, target_points, duration_hours, reason_length, status,
+        requested_at, decided_at, approver_user_id, decision_reason_length, expires_at, approved_points, idempotency_key, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`).run(
+        request.id, request.requesterUserId, request.departmentId, request.targetPoints, request.durationHours, request.reasonLength, timestamp, request.idempotencyKey, timestamp,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = this.listTemporaryQuotaRequests({ requesterUserId: request.requesterUserId }, now).find((item) => item.id === request.id)
+    if (!stored) throw new Error('QUOTA_REQUEST_NOT_FOUND')
+    return { request: stored, idempotent: false }
+  }
+
+  decideTemporaryQuotaRequest(request: PlatformTemporaryQuotaRequestDecision, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformTemporaryQuotaRequestResult | null {
+    const previous = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    if (previous) {
+      if (previous.resourceId !== request.id) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = this.listTemporaryQuotaRequests({}, now).find((item) => item.id === request.id)
+      if (!stored) return null
+      return { request: stored, idempotent: true }
+    }
+    const current = this.listTemporaryQuotaRequests({}, now).find((item) => item.id === request.id)
+    if (!current) return null
+    if (current.status !== 'pending') throw new Error('QUOTA_REQUEST_NOT_PENDING')
+    const timestamp = now.toISOString()
+    const expiresAt = request.decision === 'approve' ? new Date(now.getTime() + current.durationHours * 3_600_000).toISOString() : null
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE temporary_quota_requests SET status = ?, decided_at = ?, approver_user_id = ?,
+        decision_reason_length = ?, expires_at = ?, approved_points = ?, updated_at = ? WHERE id = ? AND status = 'pending'`).run(
+        request.decision === 'approve' ? 'approved' : 'rejected', timestamp, request.approverUserId, request.reasonLength,
+        expiresAt, request.decision === 'approve' ? current.targetPoints : null, timestamp, request.id,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = this.listTemporaryQuotaRequests({}, now).find((item) => item.id === request.id)
+    if (!stored) return null
+    return { request: stored, idempotent: false }
   }
 
   listRoutePolicyOverrides(): PlatformRoutePolicyOverride[] {
@@ -2262,6 +2449,10 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     { id: 'quota-key-lin-1-month', level: 'key', subjectId: 'key-lin-1', period: 'month', targetPoints: 860 },
   ]
   for (const policy of policies) database.seedQuotaPolicy(policy)
+  database.seedTemporaryQuotaRequest({
+    id: 'quota-request-demo-001', requesterUserId: 'person-lin', departmentId: 'content', targetPoints: 800,
+    durationHours: 72, reasonLength: 34, idempotencyKey: 'quota-request-demo-001',
+  }, now)
 
   const businessRules: PlatformBusinessRuleSeed[] = [
     { id: 'timezone', version: 'draft-v0.1', label: '业务时区', value: 'Asia/Shanghai (UTC+8)', impact: '账期、告警窗口和日志展示', status: 'fixed' },

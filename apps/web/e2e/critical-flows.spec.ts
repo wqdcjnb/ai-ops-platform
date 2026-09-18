@@ -68,6 +68,7 @@ test.describe('管理端关键本地闭环', () => {
     await expect(page.getByRole('heading', { name: 'Key 管理' })).toBeVisible()
     await page.getByRole('button', { name: '创建 Key' }).click()
     const dialog = page.getByRole('dialog', { name: '创建 Key' })
+    await dialog.getByLabel('所属人员').selectOption({ label: '林筱雨' })
     await dialog.getByLabel('业务用途').fill('自动化验收')
     await dialog.getByLabel('允许模型（逗号分隔）').fill('ecommerce-general,ecommerce-copy')
     await dialog.getByLabel('设备备注').fill('Playwright 本地验收')
@@ -110,6 +111,20 @@ test.describe('管理端关键本地闭环', () => {
 
     await expect(dialog).toContainText('的月度软目标已更新')
     await expect(dialog.getByRole('link', { name: /查看 .* 操作审计/ })).toBeVisible()
+  })
+
+  test('审批临时额度申请并回溯审计', async ({ page }) => {
+    await openAsAdmin(page, '/limits')
+    await expect(page.getByText('临时额度申请', { exact: true }).last()).toBeVisible()
+    const request = page.locator('.quota-approval-card').filter({ hasText: '林筱雨' }).first()
+    await expect(request).toBeVisible()
+    await request.getByRole('button', { name: '批准' }).click()
+    const dialog = page.getByRole('dialog', { name: '处理临时额度申请' })
+    await dialog.locator('textarea').fill('自动化验收确认本地短期额度')
+    await dialog.locator('input[type=checkbox]').check()
+    await dialog.getByRole('button', { name: '确认批准' }).click()
+    await expect(dialog).toContainText('审批已完成')
+    await expect(dialog.getByRole('link', { name: /查看操作审计/ })).toBeVisible()
   })
 
   test('处置告警并从结果回溯审计', async ({ page }) => {

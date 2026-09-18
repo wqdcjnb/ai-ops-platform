@@ -4,10 +4,10 @@ import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './pl
 describe('platform database migrations', () => {
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 21, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
-    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'business_rule_versions', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 22, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
+    expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'temporary_quota_requests', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'business_rule_versions', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(21)
+    expect(database.status().migrationVersion).toBe(22)
     database.close()
   })
 
@@ -15,7 +15,7 @@ describe('platform database migrations', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
     const first = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
     const second = seedDemoData(database, new Date('2026-09-17T10:00:00.000Z'))
-    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, routePolicyOverrides: 0, channelHealthSnapshots: 0, auditEvents: 4, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, conversationAuditCleanupRuns: 0, conversationAuditExpiryProofs: 0, conversationUsageLinks: 7, businessRules: 5, businessRuleVersions: 1, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
+    expect(first).toEqual({ departments: 6, users: 20, apiKeys: 5, quotaPolicies: 6, routePolicyOverrides: 0, channelHealthSnapshots: 0, auditEvents: 5, usageRequests: 12, alertRules: 8, alertEvents: 8, conversationAccessEvents: 0, conversationAuditRecords: 7, conversationAuditCleanupRuns: 0, conversationAuditExpiryProofs: 0, conversationUsageLinks: 7, businessRules: 5, businessRuleVersions: 1, featureFlags: 5, roleDefinitions: 5, retentionPolicies: 4, backupStatus: 1, userSessions: 0, sessionCleanupRuns: 0 })
     expect(second).toEqual(first)
     expect(database.findUserByUsername('demo-zhou')).toMatchObject({ id: 'person-zhou', role: 'employee', status: 'active' })
     expect(database.passwordMatches('demo-yan', 'demo-person-yan')).toBe(false)
@@ -23,7 +23,7 @@ describe('platform database migrations', () => {
       expect.objectContaining({ id: 'audit-key-rotate', resourceType: 'key', result: 'success', summary: expect.objectContaining({ sensitive: true }) }),
       expect.objectContaining({ id: 'audit-export-denied', resourceType: 'export', result: 'denied' }),
     ]))
-    expect(database.verifyAuditChain()).toMatchObject({ algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 4, firstInvalidEventId: null })
+    expect(database.verifyAuditChain()).toMatchObject({ algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 5, firstInvalidEventId: null })
     expect(database.listUsageRequests()).toEqual(expect.arrayContaining([
       expect.objectContaining({ requestId: 'req-demo-001', maskedValue: 'sk-ops••••••7F2A', errorSummary: null }),
       expect.objectContaining({ requestId: 'req-demo-003', status: 'failed', errorCategory: 'rate_limit' }),
@@ -77,7 +77,7 @@ describe('platform database migrations', () => {
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
     expect(database.listConversationAccessEvents('conv-audit-copy-01')).toHaveLength(1)
     expect(database.listConversationAccessEvents('conv-audit-support-02')).toEqual([])
-    expect(database.status().migrationVersion).toBe(21)
+    expect(database.status().migrationVersion).toBe(22)
     database.close()
   })
 
@@ -92,7 +92,7 @@ describe('platform database migrations', () => {
     expect(updated).toMatchObject({ targetPoints: 3000, previousTargetPoints: 2600, idempotent: false })
     seedDemoData(database, now)
     expect(database.listQuotaPolicies().find((item) => item.id === 'quota-content-month')).toMatchObject({ targetPoints: 3000, mode: 'soft' })
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 5 })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 6 })
     database.close()
   })
 
@@ -107,7 +107,7 @@ describe('platform database migrations', () => {
     expect(updated).toMatchObject({ routeId: 'route-copy', onRateLimit: 'retry', maxRetries: 3, idempotent: false })
     seedDemoData(database, now)
     expect(database.listRoutePolicyOverrides()).toEqual([expect.objectContaining({ routeId: 'route-copy', onServerError: 'fallback', maxRetries: 3 })])
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 5 })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 6 })
     database.close()
   })
 
@@ -122,7 +122,7 @@ describe('platform database migrations', () => {
     expect(checked).toMatchObject({ channelId: 'channel-official-cn-1', checkedAt: now.toISOString(), idempotent: false })
     seedDemoData(database, now)
     expect(database.listSyntheticChannelChecks()).toEqual([expect.objectContaining({ channelId: 'channel-official-cn-1', successRate: 99.6 })])
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 5 })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 6 })
     database.close()
   })
 
@@ -145,7 +145,7 @@ describe('platform database migrations', () => {
       expect.objectContaining({ id: 'alert-error-global', status: 'acknowledged', assigneeUserId: 'user-super-admin' }),
       expect.objectContaining({ id: 'alert-balance-low', status: 'closed', assigneeUserId: 'user-super-admin' }),
     ]))
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 6 })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, eventCount: 7 })
     database.close()
   })
 
@@ -177,11 +177,11 @@ describe('platform database migrations', () => {
     database.appendAuditEvent({ id: 'audit-chain-append', actorUserId: 'user-super-admin', action: 'create', resourceType: 'person', resourceId: 'person-chain', result: 'success', requestId: 'req-audit-chain-01', summary: { message: '哈希链测试事件。' } }, now)
     const events = database.listAuditEvents()
     expect(events.find((event) => event.id === 'audit-chain-append')).toMatchObject({ previousHash: expect.stringMatching(/^[a-f0-9]{64}$/), eventHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 5, firstInvalidEventId: null })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 6, firstInvalidEventId: null })
 
     const internals = database as unknown as { db: { prepare: (sql: string) => { run: (...values: unknown[]) => unknown } } }
     internals.db.prepare('UPDATE audit_events SET summary_json = ? WHERE id = ?').run('{invalid-json', 'audit-chain-append')
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: false, hashChainVerified: false, checkpointVerified: true, eventCount: 5, firstInvalidEventId: 'audit-chain-append' })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: false, hashChainVerified: false, checkpointVerified: true, eventCount: 6, firstInvalidEventId: 'audit-chain-append' })
     expect(database.listAuditEvents().find((event) => event.id === 'audit-chain-append')?.summary).toEqual({})
     expect(() => database.appendAuditEvent({ id: 'audit-chain-blocked', action: 'create', resourceType: 'person', result: 'success', requestId: 'req-audit-chain-02', summary: { message: '不应写入。' } }, now)).toThrow('AUDIT_CHAIN_INVALID:audit-chain-append')
     database.close()
@@ -213,7 +213,7 @@ describe('platform database migrations', () => {
     database.appendAuditEvent({ id: 'audit-chain-tail', actorUserId: 'user-super-admin', action: 'create', resourceType: 'person', resourceId: 'person-tail', result: 'success', requestId: 'req-audit-tail-01', summary: { message: '尾部检查点测试事件。' } }, now)
     const internals = database as unknown as { db: { prepare: (sql: string) => { run: (...values: unknown[]) => unknown } } }
     internals.db.prepare('DELETE FROM audit_events WHERE id = ?').run('audit-chain-tail')
-    expect(database.verifyAuditChain(now)).toMatchObject({ verified: false, hashChainVerified: true, checkpointVerified: false, eventCount: 4, firstInvalidEventId: 'audit-chain-tail' })
+    expect(database.verifyAuditChain(now)).toMatchObject({ verified: false, hashChainVerified: true, checkpointVerified: false, eventCount: 5, firstInvalidEventId: 'audit-chain-tail' })
     expect(() => database.appendAuditEvent({ id: 'audit-chain-after-tail-delete', action: 'create', resourceType: 'person', result: 'success', requestId: 'req-audit-tail-02', summary: { message: '不应写入。' } }, now)).toThrow('AUDIT_CHAIN_INVALID:audit-chain-tail')
     database.close()
   })
