@@ -300,17 +300,22 @@ function filterPeopleResponse(query: PeopleQuery, people: PeopleResponse['items'
 export function createDatabasePeople(database: PlatformDatabase, query: PeopleQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): PeopleResponse {
   const demo = createDemoPeople({ search: '', department: 'all', status: 'all', goal: 'all', page: 1, pageSize: 50 }, newApi, now)
   const demoById = new Map(demo.items.map((person) => [person.id, person]))
+  const personPolicies = new Map(database.listQuotaPolicies().filter((policy) => policy.level === 'person' && policy.period === 'month').map((policy) => [policy.subjectId, policy]))
   const tones: PeopleResponse['items'][number]['tone'][] = ['blue', 'violet', 'green', 'amber', 'coral']
   const people = database.listPeople().map((row, index) => {
     const existing = demoById.get(row.id)
     if (existing) {
+      const targetPoints = personPolicies.get(row.id)?.targetPoints ?? existing.goal.limit
+      const percent = Math.round(existing.goal.used / targetPoints * 100)
       return {
         ...existing,
         name: row.displayName,
         department: row.departmentId && row.departmentName ? { id: row.departmentId, name: row.departmentName } : existing.department,
         status: row.status === 'disabled' ? 'disabled' as const : existing.status,
+        goal: { used: existing.goal.used, limit: targetPoints, percent, state: goalState(percent) },
       }
     }
+    const targetPoints = personPolicies.get(row.id)?.targetPoints ?? 500
     const percent = 0
     return {
       id: row.id,
@@ -322,7 +327,7 @@ export function createDatabasePeople(database: PlatformDatabase, query: PeopleQu
       status: row.status === 'disabled' ? 'disabled' as const : 'active' as const,
       keyCount: 0,
       purpose: '待配置',
-      goal: { used: 0, limit: 500, percent, state: 'normal' as const },
+      goal: { used: 0, limit: targetPoints, percent, state: 'normal' as const },
       lastActiveAt: null,
       tone: tones[index % tones.length]!,
     }

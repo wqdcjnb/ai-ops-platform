@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { withCsrfHeader } from './csrf'
+import { quotaUpdateBodySchema, quotaUpdateResponseSchema, type QuotaUpdateBody, type QuotaUpdateResponse } from './limits-api'
 
 export const peopleFilterSchema = z.object({
   search: z.string(),
@@ -105,6 +106,8 @@ export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
 export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
 export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
 export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
+export type PersonGoalUpdateBody = QuotaUpdateBody
+export type PersonGoalUpdateResponse = QuotaUpdateResponse
 export type Person = PeopleResponse['items'][number]
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>
 export type PersonUsageResponse = z.infer<typeof personUsageResponseSchema>
@@ -159,6 +162,21 @@ export async function disablePerson(id: string, payload: PersonDisableBody): Pro
   }
   const result = personDisableResponseSchema.safeParse(await response.json())
   if (!result.success) throw new PeopleApiError('停用人员响应格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function updatePersonMonthlyGoal(id: string, payload: PersonGoalUpdateBody): Promise<PersonGoalUpdateResponse> {
+  const body = quotaUpdateBodySchema.parse(payload)
+  const response = await fetch(`/api/people/${encodeURIComponent(id)}/goal`, {
+    method: 'PATCH', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body),
+  })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '调整人员月度软目标失败', requestId)
+  }
+  const result = quotaUpdateResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('人员月度软目标响应格式不符合接口约定', requestId)
   return result.data
 }
 

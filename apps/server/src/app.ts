@@ -326,6 +326,42 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
   })
 
+  app.patch('/api/people/:id/goal', {
+    schema: { params: personIdParamsSchema, body: quotaUpdateBodySchema, response: { 200: quotaUpdateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visible = createDatabasePersonDetail(database, request.params.id, newApi, new Date(), dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到可调整软目标的人员', requestId: request.id } })
+    const existing = database.listQuotaPolicies().find((item) => item.level === 'person' && item.subjectId === request.params.id && item.period === 'month')
+    const policyId = existing?.id ?? `quota-person-${request.params.id}-month`
+    const previousTargetPoints = existing?.targetPoints ?? visible.metrics.monthPointLimit
+    const idempotencyFingerprint = createHash('sha256').update(`${request.params.id}:${request.body.targetPoints}`).digest('hex')
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.updateMonthlySoftQuotaPolicy({ id: policyId, level: 'person', subjectId: request.params.id, targetPoints: request.body.targetPoints }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'quota', resourceId: policyId,
+        result: 'success', requestId: request.id,
+        summary: {
+          message: '已调整本地 SQLite 人员月度软目标；未开启硬额度，未调用 New API，也未记录调整原因原文。', resourceName: `${visible.profile.name} · 月度软目标`,
+          reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint, previousTargetPoints,
+          changes: [{ field: 'targetPoints', label: '人员月度软目标', before: `${previousTargetPoints.toLocaleString('zh-CN')} 点`, after: `${request.body.targetPoints.toLocaleString('zh-CN')} 点`, sensitive: false }],
+        },
+      })
+      if (!result) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '该人员软目标已不可用，请刷新后重试', requestId: request.id } })
+      const reserved = 0
+      const projectedPercent = Number(((visible.metrics.monthPoints + reserved) / result.targetPoints * 100).toFixed(1))
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已更新本地 SQLite 人员月度软目标；该目标仅用于演示提示，不会阻断请求或调用 New API。' },
+        policy: { id: result.id, nodeId: request.params.id, level: result.level, targetPoints: result.targetPoints, mode: 'soft' as const },
+        impact: { previousTargetPoints: result.previousTargetPoints, used: visible.metrics.monthPoints, reserved, projectedPercent },
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该人员软目标操作编号已用于其他目标值', requestId: request.id } })
+      throw error
+    }
+  })
+
   app.get('/api/people/:id', {
     schema: {
       params: personIdParamsSchema,

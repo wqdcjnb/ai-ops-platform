@@ -23,7 +23,7 @@ import {
   IconSparkles,
   IconUser,
 } from '@tabler/icons-vue'
-import { disablePerson, fetchPersonDetail, fetchPersonUsage, PeopleApiError, type PersonDetailResponse, type PersonDisableBody, type PersonDisableResponse, type PersonUsagePeriod, type PersonUsageResponse } from '../people-api'
+import { disablePerson, fetchPersonDetail, fetchPersonUsage, PeopleApiError, type PersonDetailResponse, type PersonDisableBody, type PersonDisableResponse, type PersonGoalUpdateBody, type PersonGoalUpdateResponse, type PersonUsagePeriod, type PersonUsageResponse, updatePersonMonthlyGoal } from '../people-api'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -40,6 +40,11 @@ const disableError = ref('')
 const isDisabling = ref(false)
 const disableResult = ref<PersonDisableResponse | null>(null)
 const disableForm = ref<PersonDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
+const showGoalAdjust = ref(false)
+const goalAdjustError = ref('')
+const isGoalAdjusting = ref(false)
+const goalAdjustResult = ref<PersonGoalUpdateResponse | null>(null)
+const goalAdjustForm = ref<PersonGoalUpdateBody>({ targetPoints: 1, idempotencyKey: '', reason: '', acknowledgeImpact: true })
 const chartElement = ref<HTMLElement | null>(null)
 let activeRequest: AbortController | null = null
 let usageRequest: AbortController | null = null
@@ -50,6 +55,11 @@ const statusLabels = { active: '在职', disabled: '已停用', offboarding: '�
 const updatedAt = computed(() => detail.value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(detail.value.meta.generatedAt)) : '等待数据')
 const remainingPoints = computed(() => detail.value ? Math.max(0, detail.value.metrics.monthPointLimit - detail.value.metrics.monthPoints) : 0)
 const allowedModels = computed(() => detail.value?.models.filter((model) => model.allowed) ?? [])
+const goalProjectedPercent = computed(() => {
+  if (!detail.value || !Number.isFinite(goalAdjustForm.value.targetPoints) || goalAdjustForm.value.targetPoints < 1) return 0
+  return Number((detail.value.metrics.monthPoints / goalAdjustForm.value.targetPoints * 100).toFixed(1))
+})
+const goalProjectionState = computed(() => goalProjectedPercent.value >= 100 ? 'reached' : goalProjectedPercent.value >= 80 ? 'near' : 'normal')
 
 function compact(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
@@ -150,6 +160,25 @@ async function changePeriod(nextPeriod: PersonUsagePeriod) {
 }
 
 function newDisableIdempotencyKey() { return `person-disable-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function newGoalIdempotencyKey() { return `quota-update-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function openGoalAdjust() {
+  if (!detail.value || detail.value.profile.status === 'disabled') return
+  goalAdjustError.value = ''; goalAdjustResult.value = null
+  goalAdjustForm.value = { targetPoints: detail.value.profile.goal.limit, idempotencyKey: newGoalIdempotencyKey(), reason: '', acknowledgeImpact: true }
+  showGoalAdjust.value = true
+}
+function closeGoalAdjust() { if (!isGoalAdjusting.value) { showGoalAdjust.value = false; goalAdjustError.value = ''; goalAdjustResult.value = null } }
+async function submitGoalAdjust() {
+  if (!detail.value) return
+  isGoalAdjusting.value = true; goalAdjustError.value = ''
+  try {
+    goalAdjustResult.value = await updatePersonMonthlyGoal(detail.value.profile.id, goalAdjustForm.value)
+    await loadPerson()
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    goalAdjustError.value = `${error instanceof Error ? error.message : '调整人员月度软目标失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isGoalAdjusting.value = false }
+}
 function openDisable() {
   if (!detail.value || detail.value.profile.status === 'disabled') return
   disableError.value = ''; disableResult.value = null
@@ -234,11 +263,19 @@ onBeforeUnmount(() => {
 
       <section class="person-bottom-grid">
         <article class="panel allowed-models-panel"><div class="panel-header"><div><h2>允许模型</h2><p>客户端使用业务别名，不接触实际渠道</p></div><IconSparkles :size="18" /></div><div class="allowed-model-list"><div v-for="model in detail.models" :key="model.alias" :class="{ blocked: !model.allowed }"><span><IconCheck v-if="model.allowed" :size="15" /><IconShieldLock v-else :size="15" /></span><div><strong>{{ model.alias }}<em :class="{ experiment: model.type === 'experiment' }">{{ model.type === 'experiment' ? '实验' : '正式' }}</em></strong><small>{{ model.name }} · {{ model.purpose }}</small></div><b>{{ model.allowed ? '允许' : '未授权' }}</b></div></div></article>
-        <article class="panel management-boundary"><div class="panel-header"><div><h2>管理操作</h2><p>仅开放本地模拟人员停用</p></div><IconShieldLock :size="18" /></div><div class="boundary-copy"><strong>停用会同时回收关联 Key</strong><p>操作要求管理员、CSRF、原因确认和幂等编号；只影响 SQLite 模拟人员与 Key，不调用 New API。</p><button class="btn btn-white" disabled>调整软目标</button><button class="btn danger-outline" :disabled="detail.profile.status === 'disabled'" @click="openDisable">{{ detail.profile.status === 'disabled' ? '人员已停用' : '停用并回收 Key' }}</button></div></article>
+        <article class="panel management-boundary"><div class="panel-header"><div><h2>管理操作</h2><p>仅开放本地模拟人员停用与软目标调整</p></div><IconShieldLock :size="18" /></div><div class="boundary-copy"><strong>停用会同时回收关联 Key</strong><p>操作要求管理员、CSRF、原因确认和幂等编号；只影响 SQLite 模拟人员与 Key，不调用 New API。</p><button class="btn btn-white" :disabled="detail.profile.status === 'disabled'" @click="openGoalAdjust">调整软目标</button><button class="btn danger-outline" :disabled="detail.profile.status === 'disabled'" @click="openDisable">{{ detail.profile.status === 'disabled' ? '人员已停用' : '停用并回收 Key' }}</button></div></article>
       </section>
 
       <footer class="page-footer">数据来源：{{ detail.meta.source.toUpperCase() }} · 人员状态与 Key 回收可写入本地 SQLite · 完整 Key 从不返回浏览器</footer>
     </template>
+
+    <div v-if="showGoalAdjust && detail" class="drawer-backdrop" @click.self="closeGoalAdjust">
+      <aside class="create-key-dialog quota-adjust-dialog" role="dialog" aria-modal="true" aria-label="调整人员月度软目标">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ goalAdjustResult ? '人员软目标已更新' : '调整人员月度软目标' }}</h2></div><button class="icon-button" aria-label="关闭人员软目标调整" :disabled="isGoalAdjusting" @click="closeGoalAdjust">×</button></header>
+        <template v-if="goalAdjustResult"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ detail.profile.name }} 的月度软目标已更新</strong><p>{{ goalAdjustResult.meta.notice }}</p><small>{{ goalAdjustResult.impact.previousTargetPoints.toLocaleString('zh-CN') }} 点 → {{ goalAdjustResult.policy.targetPoints.toLocaleString('zh-CN') }} 点 · 预计 {{ goalAdjustResult.impact.projectedPercent }}%</small></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeGoalAdjust">完成</button></footer></template>
+        <form v-else class="create-key-form" @submit.prevent="submitGoalAdjust"><p class="create-person-note"><strong>{{ detail.profile.name }}</strong> 的月度软目标将写入本地 SQLite，并在详情页立即生效。此操作不启用硬额度、不阻断请求，也不会调用 New API 或修改真实预算。</p><label><span>本月软目标（点）</span><input v-model.number="goalAdjustForm.targetPoints" required min="1" max="1000000" type="number" /></label><div class="quota-adjust-impact"><span>当前已用点数</span><strong>{{ detail.metrics.monthPoints.toLocaleString('zh-CN') }} 点</strong><span>保存后预计使用率</span><strong :class="`state-${goalProjectionState}`">{{ goalProjectedPercent }}%</strong></div><p v-if="goalProjectedPercent >= 100" class="quota-adjust-warning"><IconAlertTriangle :size="15" />新目标低于当前已用点数；系统只会提示，不会拦截请求。</p><label><span>调整原因 <em>至少 8 个字符</em></span><textarea v-model="goalAdjustForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示活动需要提高人员月度提示阈值" /></label><label class="access-ack"><input v-model="goalAdjustForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该操作只修改本地演示月度软目标，并写入不含原因原文的审计摘要；不会开启硬额度或影响真实预算。</span></label><div v-if="goalAdjustError" class="create-person-error"><IconAlertTriangle :size="16" />{{ goalAdjustError }}</div><footer><button class="btn btn-white" type="button" :disabled="isGoalAdjusting" @click="closeGoalAdjust">取消</button><button class="btn create-key" type="submit" :disabled="isGoalAdjusting || goalAdjustForm.targetPoints < 1 || goalAdjustForm.targetPoints > 1000000 || goalAdjustForm.reason.trim().length < 8 || !goalAdjustForm.acknowledgeImpact">{{ isGoalAdjusting ? '保存中…' : '确认更新软目标' }}</button></footer></form>
+      </aside>
+    </div>
 
     <div v-if="showDisable && detail" class="drawer-backdrop" @click.self="closeDisable">
       <aside class="create-person-dialog disable-person-dialog" role="dialog" aria-modal="true" aria-label="停用人员">
