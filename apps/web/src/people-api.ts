@@ -100,6 +100,19 @@ export const personBatchCreateResponseSchema = z.object({
   people: z.array(z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) })),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
+export const personModelsUpdateBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^person-models-[a-z0-9-]{8,96}$/),
+  models: z.array(z.string().trim().regex(/^ecommerce-[a-z0-9-]+$/)).min(1).max(10).refine((items) => new Set(items).size === items.length, '模型别名不能重复'),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+export const personModelsUpdateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string() }),
+  person: z.object({ id: z.string(), name: z.string() }),
+  models: z.array(z.object({ alias: z.string(), name: z.string(), purpose: z.string(), type: z.enum(['production', 'experiment']), allowed: z.boolean() })),
+  keysUpdated: z.number().int().nonnegative(),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
 export const personDisableBodySchema = z.object({
   idempotencyKey: z.string().regex(/^person-disable-[a-z0-9-]{8,96}$/),
   reason: z.string().trim().min(8).max(200),
@@ -116,6 +129,8 @@ export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
 export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
 export type PersonBatchCreateBody = z.infer<typeof personBatchCreateBodySchema>
 export type PersonBatchCreateResponse = z.infer<typeof personBatchCreateResponseSchema>
+export type PersonModelsUpdateBody = z.infer<typeof personModelsUpdateBodySchema>
+export type PersonModelsUpdateResponse = z.infer<typeof personModelsUpdateResponseSchema>
 export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
 export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
 export type PersonGoalUpdateBody = QuotaUpdateBody
@@ -174,6 +189,19 @@ export async function createPeopleBatch(payload: PersonBatchCreateBody): Promise
   }
   const result = personBatchCreateResponseSchema.safeParse(await response.json())
   if (!result.success) throw new PeopleApiError('批量导入响应格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function updatePersonModels(id: string, payload: PersonModelsUpdateBody): Promise<PersonModelsUpdateResponse> {
+  const body = personModelsUpdateBodySchema.parse(payload)
+  const response = await fetch(`/api/people/${encodeURIComponent(id)}/models`, { method: 'PATCH', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '更新人员模型白名单失败', requestId)
+  }
+  const result = personModelsUpdateResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('人员模型白名单响应格式不符合接口约定', requestId)
   return result.data
 }
 

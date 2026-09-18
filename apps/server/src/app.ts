@@ -9,7 +9,7 @@ import { createDatabaseOverview, overviewResponseSchema, periodSchema } from './
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
-import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
+import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, modelsForPurpose, peopleQuerySchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personModelsUpdateBodySchema, personModelsUpdateResponseSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
 import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
@@ -364,6 +364,28 @@ export function buildApp(options: BuildAppOptions = {}) {
       if (!result) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到指定人员', requestId: request.id } })
       if (result.state === 'already_disabled') return reply.status(409).send({ error: { code: 'PERSON_ALREADY_DISABLED', message: '该人员已停用，请勿重复提交新的操作', requestId: request.id } })
       return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '已停用本地 SQLite 演示人员并回收其仍有效 Key；该人员后续本地登录和会话访问会被拒绝。' }, person: { id: result.person.id, name: result.person.displayName, status: 'disabled' as const }, keysDisabled: result.keysDisabled, operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一名人员', requestId: request.id } })
+      throw error
+    }
+  })
+
+  app.patch('/api/people/:id/models', {
+    schema: { params: personIdParamsSchema, body: personModelsUpdateBodySchema, response: { 200: personModelsUpdateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const visible = createDatabasePersonDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser))
+    if (!visible) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到可调整模型白名单的人员', requestId: request.id } })
+    const available = new Set(visible.models.map((model) => model.alias))
+    if (request.body.models.some((model) => !available.has(model))) return reply.status(400).send({ error: { code: 'MODEL_NOT_AVAILABLE', message: '包含当前人员不可用的业务模型别名，请刷新后重试', requestId: request.id } })
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.updatePersonModelPolicy(request.params.id, request.body.models, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'person', resourceId: request.params.id,
+        result: 'success', requestId: request.id,
+        summary: { message: '已更新本地 SQLite 人员模型白名单；同步更新仍有效 Key，未调用 New API，也未记录调整原因原文。', resourceName: visible.profile.name, reasonProvided: true, reasonLength: request.body.reason.length, changes: [{ field: 'models', label: '允许模型', before: visible.models.filter((model) => model.allowed).map((model) => model.alias).join('、'), after: request.body.models.join('、'), sensitive: false }, { field: 'keys', label: '关联 Key', before: '仍有效', after: '已同步模型白名单', sensitive: false }] },
+      })
+      if (!result) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '该人员已不可用，请刷新后重试', requestId: request.id } })
+      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次模型白名单调整结果；未重复写入。' : '已更新本地 SQLite 模型白名单并同步仍有效 Key；不会调用 New API。' }, person: { id: visible.profile.id, name: visible.profile.name }, models: modelsForPurpose(visible.profile.purpose, result.models), keysUpdated: result.keysUpdated, operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
     } catch (error) {
       if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一名人员', requestId: request.id } })
       throw error

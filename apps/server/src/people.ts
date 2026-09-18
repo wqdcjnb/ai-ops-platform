@@ -90,6 +90,21 @@ export const personBatchCreateResponseSchema = z.object({
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
 
+export const personModelsUpdateBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^person-models-[a-z0-9-]{8,96}$/),
+  models: z.array(z.string().trim().regex(/^ecommerce-[a-z0-9-]+$/)).min(1).max(10).refine((items) => new Set(items).size === items.length, '模型别名不能重复'),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+
+export const personModelsUpdateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  person: z.object({ id: z.string(), name: z.string() }),
+  models: z.array(z.object({ alias: z.string(), name: z.string(), purpose: z.string(), type: z.enum(['production', 'experiment']), allowed: z.boolean() })),
+  keysUpdated: z.number().int().nonnegative(),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export const personDisableBodySchema = z.object({
   idempotencyKey: z.string().regex(/^person-disable-[a-z0-9-]{8,96}$/),
   reason: z.string().trim().min(8).max(200),
@@ -157,6 +172,8 @@ export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
 export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
 export type PersonBatchCreateBody = z.infer<typeof personBatchCreateBodySchema>
 export type PersonBatchCreateResponse = z.infer<typeof personBatchCreateResponseSchema>
+export type PersonModelsUpdateBody = z.infer<typeof personModelsUpdateBodySchema>
+export type PersonModelsUpdateResponse = z.infer<typeof personModelsUpdateResponseSchema>
 export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
 export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>
@@ -365,13 +382,15 @@ function detailNotice(newApi: NewApiStatus) {
   return 'New API 当前离线；个人详情为演示数据'
 }
 
-function modelsForPurpose(purpose: string): PersonDetailResponse['models'] {
+export function modelsForPurpose(purpose: string, allowedAliases?: string[]): PersonDetailResponse['models'] {
   const primary = purpose.includes('翻译') ? 'ecommerce-translate' : purpose.includes('分析') ? 'ecommerce-analysis' : purpose.includes('回复') || purpose.includes('质检') ? 'ecommerce-service' : 'ecommerce-copy'
-  return [
+  const models: PersonDetailResponse['models'] = [
     { alias: primary, name: primary.replace('ecommerce-', '').replace('-', ' '), purpose, type: 'production', allowed: true },
     { alias: 'ecommerce-general', name: 'General Assistant', purpose: '通用辅助', type: 'production', allowed: true },
     { alias: 'ecommerce-pro-lab', name: 'Pro Lab', purpose: '隔离实验', type: 'experiment', allowed: false },
   ]
+  if (!allowedAliases) return models
+  return models.map((model) => ({ ...model, allowed: allowedAliases.includes(model.alias) }))
 }
 
 export function createDemoPersonDetail(id: string, newApi: NewApiStatus, now = new Date()): PersonDetailResponse | null {
@@ -409,7 +428,7 @@ export function createDemoPersonDetail(id: string, newApi: NewApiStatus, now = n
 export function createDatabasePersonDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): PersonDetailResponse | null {
   const person = findDatabasePerson(database, id, newApi, now)
   if (!person || !isDepartmentVisible(scope, person.department.id)) return null
-  const models = modelsForPurpose(person.purpose)
+  const models = modelsForPurpose(person.purpose, database.getPersonModelPolicy(id) ?? undefined)
   const activeModels = models.filter((model) => model.allowed).map((model) => model.alias)
   const keys = Array.from({ length: person.keyCount }, (_, index) => ({
     id: `key-${person.id.replace('person-', '')}-${index + 1}`,

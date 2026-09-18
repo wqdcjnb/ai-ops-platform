@@ -299,6 +299,11 @@ const migrationSql = [
     success_rate REAL NOT NULL CHECK (success_rate >= 0 AND success_rate <= 100),
     checked_at TEXT NOT NULL
   );`,
+  `CREATE TABLE IF NOT EXISTS person_model_policies (
+    person_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    models_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -1136,6 +1141,40 @@ export class PlatformDatabase {
     }
     const ids = new Set(people.map((person) => person.id))
     return { people: this.listPeople().filter((item) => ids.has(item.id)), idempotent: false }
+  }
+
+  getPersonModelPolicy(personId: string) {
+    const row = this.db.prepare('SELECT models_json AS modelsJson FROM person_model_policies WHERE person_id = ? LIMIT 1').get(personId) as { modelsJson: string } | undefined
+    return row ? JSON.parse(row.modelsJson) as string[] : null
+  }
+
+  updatePersonModelPolicy(personId: string, models: string[], auditEvent: PlatformAuditEventSeed, now = this.now()) {
+    const previous = this.db.prepare('SELECT summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { summaryJson: string } | undefined
+    if (previous) {
+      const summary = JSON.parse(previous.summaryJson) as { modelsAfter?: unknown }
+      const stored = Array.isArray(summary.modelsAfter) && summary.modelsAfter.every((item): item is string => typeof item === 'string') ? summary.modelsAfter : models
+      const currentKeysUpdated = (this.db.prepare("SELECT COUNT(*) AS count FROM api_keys WHERE owner_user_id = ? AND status <> 'revoked'").get(personId) as { count: number }).count
+      const keysUpdated = typeof (summary as { keysUpdated?: unknown }).keysUpdated === 'number' && Number.isInteger((summary as { keysUpdated: number }).keysUpdated) && (summary as { keysUpdated: number }).keysUpdated >= 0
+        ? (summary as { keysUpdated: number }).keysUpdated
+        : currentKeysUpdated
+      return { models: stored, keysUpdated, idempotent: true }
+    }
+    const person = this.listPeople().find((item) => item.id === personId)
+    if (!person) return null
+    const previousModels = this.getPersonModelPolicy(personId) ?? []
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO person_model_policies(person_id, models_json, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(person_id) DO UPDATE SET models_json = excluded.models_json, updated_at = excluded.updated_at`).run(personId, JSON.stringify(models), timestamp)
+      const keysUpdated = Number(this.db.prepare("UPDATE api_keys SET models_json = ?, updated_at = ? WHERE owner_user_id = ? AND status <> 'revoked'").run(JSON.stringify(models), timestamp, personId).changes)
+      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, modelsBefore: previousModels, modelsAfter: models, keysUpdated } }, now)
+      this.db.exec('COMMIT')
+      return { models, keysUpdated, idempotent: false }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
   }
 
   disablePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonDisableResult | null {
