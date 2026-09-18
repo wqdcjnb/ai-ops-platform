@@ -14,15 +14,25 @@ function linkedAuditEventFromLocation() {
   const value = initialQuery?.get('eventId')?.trim() ?? ''
   return /^audit-[a-z0-9-]{1,80}$/.test(value) ? value : ''
 }
+function initialSearchFromLocation() {
+  const value = initialQuery?.get('search')?.trim() ?? ''
+  return value.length <= 80 ? value : ''
+}
+function initialResourceFromLocation(): AuditFilters['resource'] {
+  const value = initialQuery?.get('resource') ?? 'all'
+  return ['all', 'session', 'authorization', 'person', 'key', 'quota', 'route', 'channel', 'upstream', 'export', 'settings', 'alert', 'conversation'].includes(value)
+    ? value as AuditFilters['resource']
+    : 'all'
+}
 type LinkedAuditOrigin = 'alert_action' | 'direct'
 function linkedAuditOriginFromLocation(): LinkedAuditOrigin { return initialQuery?.get('origin') === 'alert_action' ? 'alert_action' : 'direct' }
 const period = ref<AuditFilters['period']>('7d')
-const search = ref('')
+const search = ref(initialSearchFromLocation())
 const eventId = ref(linkedAuditEventFromLocation())
 const linkedAuditOrigin = ref<LinkedAuditOrigin>(linkedAuditOriginFromLocation())
 const actor = ref('all')
 const action = ref<AuditFilters['action']>('all')
-const resource = ref<AuditFilters['resource']>('all')
+const resource = ref<AuditFilters['resource']>(initialResourceFromLocation())
 const result = ref<AuditFilters['result']>('all')
 const source = ref<AuditFilters['source']>('all')
 const page = ref(1)
@@ -58,7 +68,7 @@ function applyFilters() { cancelSearch(); page.value = 1; void loadData() }
 function removeLinkedAuditQuery() {
   if (typeof window === 'undefined') return
   const params = new URLSearchParams(window.location.search)
-  params.delete('eventId'); params.delete('origin')
+  params.delete('eventId'); params.delete('origin'); params.delete('search'); params.delete('resource')
   window.history.replaceState({}, '', `${window.location.pathname}${params.size ? `?${params}` : ''}${window.location.hash}`)
 }
 function clearLinkedAuditFilter() { eventId.value = ''; linkedAuditOrigin.value = 'direct'; removeLinkedAuditQuery(); applyFilters() }
