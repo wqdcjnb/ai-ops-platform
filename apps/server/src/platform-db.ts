@@ -336,6 +336,22 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS temporary_quota_requests_requester_idx ON temporary_quota_requests(requester_user_id, requested_at DESC);
   CREATE INDEX IF NOT EXISTS temporary_quota_requests_status_idx ON temporary_quota_requests(status, requested_at DESC);`,
+  `CREATE TABLE IF NOT EXISTS quota_reservations (
+    id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    node_name TEXT NOT NULL,
+    points INTEGER NOT NULL CHECK (points BETWEEN 1 AND 1000000),
+    concurrent_units INTEGER NOT NULL CHECK (concurrent_units BETWEEN 1 AND 100),
+    status TEXT NOT NULL CHECK (status IN ('reserved', 'settled', 'cancelled')),
+    actor_user_id TEXT REFERENCES users(id),
+    requested_at TEXT NOT NULL,
+    settled_at TEXT,
+    cancelled_at TEXT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS quota_reservations_node_idx ON quota_reservations(node_id, requested_at DESC);
+  CREATE INDEX IF NOT EXISTS quota_reservations_status_idx ON quota_reservations(status, requested_at DESC);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -473,6 +489,41 @@ export interface PlatformTemporaryQuotaRequest {
 export interface PlatformTemporaryQuotaRequestResult {
   request: PlatformTemporaryQuotaRequest
   idempotent: boolean
+}
+
+export type PlatformQuotaReservationStatus = 'reserved' | 'settled' | 'cancelled'
+export interface PlatformQuotaReservationCreate {
+  id: string
+  nodeId: string
+  nodeName: string
+  points: number
+  concurrentUnits: number
+  actorUserId: string | null
+  idempotencyKey: string
+}
+export interface PlatformQuotaReservation {
+  id: string
+  nodeId: string
+  nodeName: string
+  points: number
+  concurrentUnits: number
+  status: PlatformQuotaReservationStatus
+  actorUserId: string | null
+  actorName: string | null
+  requestedAt: string
+  settledAt: string | null
+  cancelledAt: string | null
+  idempotencyKey: string
+}
+export interface PlatformQuotaReservationResult {
+  reservation: PlatformQuotaReservation
+  idempotent: boolean
+}
+export interface PlatformQuotaReservationAction {
+  id: string
+  action: 'settle' | 'cancel'
+  actorUserId: string | null
+  idempotencyKey: string
 }
 
 export interface PlatformRoutePolicyOverrideUpdate {
@@ -1689,6 +1740,99 @@ export class PlatformDatabase {
     return { request: stored, idempotent: false }
   }
 
+  private mapQuotaReservation(row: Record<string, unknown>): PlatformQuotaReservation {
+    return {
+      id: String(row.id), nodeId: String(row.nodeId), nodeName: String(row.nodeName),
+      points: Number(row.points), concurrentUnits: Number(row.concurrentUnits), status: row.status as PlatformQuotaReservationStatus,
+      actorUserId: row.actorUserId ? String(row.actorUserId) : null, actorName: row.actorName ? String(row.actorName) : null,
+      requestedAt: String(row.requestedAt), settledAt: row.settledAt ? String(row.settledAt) : null,
+      cancelledAt: row.cancelledAt ? String(row.cancelledAt) : null, idempotencyKey: String(row.idempotencyKey),
+    }
+  }
+
+  listQuotaReservations(filter: { nodeId?: string; status?: PlatformQuotaReservationStatus } = {}) {
+    const clauses = ['1 = 1']
+    const params: string[] = []
+    if (filter.nodeId) { clauses.push('r.node_id = ?'); params.push(filter.nodeId) }
+    if (filter.status) { clauses.push('r.status = ?'); params.push(filter.status) }
+    const rows = this.db.prepare(`SELECT r.id, r.node_id AS nodeId, r.node_name AS nodeName, r.points,
+      r.concurrent_units AS concurrentUnits, r.status, r.actor_user_id AS actorUserId, u.display_name AS actorName,
+      r.requested_at AS requestedAt, r.settled_at AS settledAt, r.cancelled_at AS cancelledAt, r.idempotency_key AS idempotencyKey
+      FROM quota_reservations r LEFT JOIN users u ON u.id = r.actor_user_id
+      WHERE ${clauses.join(' AND ')} ORDER BY r.requested_at DESC`).all(...params) as Array<Record<string, unknown>>
+    return rows.map((row) => this.mapQuotaReservation(row))
+  }
+
+  seedQuotaReservation(seed: PlatformQuotaReservationCreate, now = this.now()) {
+    if (this.db.prepare('SELECT 1 FROM quota_reservations WHERE id = ? LIMIT 1').get(seed.id)) return
+    this.createQuotaReservation(seed, {
+      id: `audit-${seed.idempotencyKey}`, actorUserId: seed.actorUserId, action: 'create', resourceType: 'quota', resourceId: seed.id,
+      result: 'success', summary: { code: 'QUOTA_RESERVATION_CREATED', message: '已创建本地并发预留演示记录；不参与硬额度阻断。', nodeId: seed.nodeId, points: seed.points, concurrentUnits: seed.concurrentUnits },
+    }, now)
+  }
+
+  createQuotaReservation(reservation: PlatformQuotaReservationCreate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformQuotaReservationResult {
+    const existing = this.db.prepare('SELECT id, actor_user_id AS actorUserId FROM quota_reservations WHERE idempotency_key = ? LIMIT 1').get(reservation.idempotencyKey) as { id: string; actorUserId: string | null } | undefined
+    if (existing) {
+      if (existing.id !== reservation.id || existing.actorUserId !== reservation.actorUserId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = this.listQuotaReservations().find((item) => item.id === reservation.id)
+      if (!stored) throw new Error('QUOTA_RESERVATION_NOT_FOUND')
+      if (stored.nodeId !== reservation.nodeId || stored.points !== reservation.points || stored.concurrentUnits !== reservation.concurrentUnits) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      return { reservation: stored, idempotent: true }
+    }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO quota_reservations(
+        id, node_id, node_name, points, concurrent_units, status, actor_user_id,
+        requested_at, settled_at, cancelled_at, idempotency_key, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, NULL, NULL, ?, ?)`).run(
+        reservation.id, reservation.nodeId, reservation.nodeName, reservation.points, reservation.concurrentUnits, reservation.actorUserId,
+        timestamp, reservation.idempotencyKey, timestamp,
+      )
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = this.listQuotaReservations().find((item) => item.id === reservation.id)
+    if (!stored) throw new Error('QUOTA_RESERVATION_NOT_FOUND')
+    return { reservation: stored, idempotent: false }
+  }
+
+  applyQuotaReservationAction(action: PlatformQuotaReservationAction, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformQuotaReservationResult | null {
+    const previous = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    if (previous) {
+      if (previous.resourceId !== action.id) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const previousSummary = JSON.parse(previous.summaryJson) as { code?: unknown }
+      const expectedCode = action.action === 'settle' ? 'QUOTA_RESERVATION_SETTLED' : 'QUOTA_RESERVATION_CANCELLED'
+      if (previousSummary.code !== expectedCode) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const stored = this.listQuotaReservations().find((item) => item.id === action.id)
+      if (!stored) return null
+      return { reservation: stored, idempotent: true }
+    }
+    const current = this.listQuotaReservations().find((item) => item.id === action.id)
+    if (!current) return null
+    if (current.status !== 'reserved') throw new Error('QUOTA_RESERVATION_NOT_RESERVED')
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (action.action === 'settle') {
+        this.db.prepare("UPDATE quota_reservations SET status = 'settled', settled_at = ?, updated_at = ? WHERE id = ? AND status = 'reserved'").run(timestamp, timestamp, action.id)
+      } else {
+        this.db.prepare("UPDATE quota_reservations SET status = 'cancelled', cancelled_at = ?, updated_at = ? WHERE id = ? AND status = 'reserved'").run(timestamp, timestamp, action.id)
+      }
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const stored = this.listQuotaReservations().find((item) => item.id === action.id)
+    return stored ? { reservation: stored, idempotent: false } : null
+  }
+
   listRoutePolicyOverrides(): PlatformRoutePolicyOverride[] {
     return this.db.prepare(`SELECT route_id AS routeId, on_timeout AS onTimeout, on_rate_limit AS onRateLimit,
       on_server_error AS onServerError, max_retries AS maxRetries, created_at AS createdAt, updated_at AS updatedAt
@@ -2320,6 +2464,7 @@ export class PlatformDatabase {
       users: count('users'),
       apiKeys: count('api_keys'),
       quotaPolicies: count('quota_policies'),
+      quotaReservations: count('quota_reservations'),
       routePolicyOverrides: count('route_policy_overrides'),
       channelHealthSnapshots: count('channel_health_snapshots'),
       auditEvents: count('audit_events'),

@@ -27,6 +27,7 @@ import { dataScopeFor, isDepartmentVisible } from './data-scope.js'
 import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
 import { createDatabaseSearch, searchQuerySchema, searchResponseSchema } from './search.js'
 import { createQuotaRequestsResponse, quotaDecisionBodySchema, quotaRequestBodySchema, quotaRequestParamsSchema, quotaRequestQuerySchema, quotaRequestActionResponseSchema, quotaRequestsResponseSchema } from './quota-requests.js'
+import { createQuotaReservationsResponse, quotaReservationActionBodySchema, quotaReservationActionResponseSchema, quotaReservationBodySchema, quotaReservationParamsSchema, quotaReservationQuerySchema, quotaReservationsResponseSchema, mapQuotaReservation } from './quota-reservations.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -100,6 +101,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     if ((path === '/api/models' || path === '/api/channels') && source === 'new_api') return ['super_admin', 'admin']
     if (path.startsWith('/api/me')) return ['employee']
     if (path.startsWith('/api/quota-requests')) return method === 'GET' ? ['super_admin', 'admin', 'department_lead', 'finance'] : ['super_admin', 'admin', 'department_lead']
+    if (path.startsWith('/api/quota-reservations')) return method === 'GET' ? ['super_admin', 'admin', 'department_lead', 'finance'] : ['super_admin', 'admin']
     if (path.startsWith('/api/conversation-audits')) return ['super_admin']
     if (path.startsWith('/api/integrations/new-api/management')) return ['super_admin', 'admin']
     if (path.startsWith('/api/alert-rules') && method !== 'GET') return ['super_admin', 'admin']
@@ -628,6 +630,68 @@ export function buildApp(options: BuildAppOptions = {}) {
       }
     } catch (error) {
       if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他额度调整或不同目标值', requestId: request.id } })
+      throw error
+    }
+  })
+
+  app.get('/api/quota-reservations', {
+    schema: { querystring: quotaReservationQuerySchema, response: { 200: quotaReservationsResponseSchema } },
+  }, async (request) => {
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visibleIds = new Set(createDatabaseLimits(database, { level: 'all', search: '' }, newApi, new Date(), dataScopeFor(request.authUser)).items.map((item) => item.id))
+    const query = request.query
+    const nodeId = query.nodeId && visibleIds.has(query.nodeId) ? query.nodeId : query.nodeId ? '__not-visible__' : undefined
+    return createQuotaReservationsResponse(database, { ...query, nodeId }, { canDecide: request.authUser?.role === 'super_admin' || request.authUser?.role === 'admin' })
+  })
+
+  app.post('/api/quota-reservations', {
+    schema: { body: quotaReservationBodySchema, response: { 200: quotaReservationActionResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visible = createDatabaseLimits(database, { level: 'all', search: '' }, newApi, new Date(), dataScopeFor(request.authUser)).items.find((item) => item.id === request.body.nodeId)
+    if (!visible) return reply.status(404).send({ error: { code: 'QUOTA_SCOPE_NOT_FOUND', message: '未找到当前范围内的额度节点', requestId: request.id } })
+    const id = `quota-reservation-${createHash('sha256').update(request.body.idempotencyKey).digest('hex').slice(0, 24)}`
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.createQuotaReservation({
+        id, nodeId: visible.id, nodeName: visible.name, points: request.body.points, concurrentUnits: request.body.concurrentUnits,
+        actorUserId: request.authUser?.id ?? null, idempotencyKey: request.body.idempotencyKey,
+      }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'create', resourceType: 'quota', resourceId: id, result: 'success', requestId: request.id,
+        summary: { code: 'QUOTA_RESERVATION_CREATED', message: '已创建本地并发预留演练；不会阻断请求、调用 New API 或改变真实网关额度。', resourceName: visible.name, nodeId: visible.id, points: request.body.points, concurrentUnits: request.body.concurrentUnits, reasonLength: request.body.reason.length, idempotencyFingerprint: createHash('sha256').update(`${visible.id}:${request.body.points}:${request.body.concurrentUnits}`).digest('hex') },
+      }, new Date())
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: '预留已写入本地 SQLite；当前仅用于验证预留路径，不启用硬额度阻断。' },
+        reservation: mapQuotaReservation(result.reservation), operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他预留或不同范围', requestId: request.id } })
+      throw error
+    }
+  })
+
+  app.patch('/api/quota-reservations/:id', {
+    schema: { params: quotaReservationParamsSchema, body: quotaReservationActionBodySchema, response: { 200: quotaReservationActionResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  }, async (request, reply) => {
+    const current = database.listQuotaReservations().find((item) => item.id === request.params.id)
+    if (!current) return reply.status(404).send({ error: { code: 'QUOTA_RESERVATION_NOT_FOUND', message: '未找到该并发预留演练', requestId: request.id } })
+    const newApi = await (options.probeNewApi ?? probeNewApiFromEnvironment)()
+    const visible = createDatabaseLimits(database, { level: 'all', search: '' }, newApi, new Date(), dataScopeFor(request.authUser)).items.some((item) => item.id === current.nodeId)
+    if (!visible) return reply.status(404).send({ error: { code: 'QUOTA_RESERVATION_NOT_FOUND', message: '未找到当前范围内的并发预留演练', requestId: request.id } })
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.applyQuotaReservationAction({ id: current.id, action: request.body.action, actorUserId: request.authUser?.id ?? null, idempotencyKey: request.body.idempotencyKey }, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'quota', resourceId: current.id, result: 'success', requestId: request.id,
+        summary: { code: request.body.action === 'settle' ? 'QUOTA_RESERVATION_SETTLED' : 'QUOTA_RESERVATION_CANCELLED', message: '已更新本地并发预留演练状态；审计只保存说明长度。', nodeId: current.nodeId, statusBefore: current.status, statusAfter: request.body.action === 'settle' ? 'settled' : 'cancelled', reasonLength: request.body.reason.length },
+      }, new Date())
+      if (!result) return reply.status(404).send({ error: { code: 'QUOTA_RESERVATION_NOT_FOUND', message: '该预留已不存在，请刷新后重试', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: request.body.action === 'settle' ? '预留已结算；本地演练记录保留，不会改变真实用量。' : '预留已取消并释放演练占用；本地演练不会阻断请求。' },
+        reservation: mapQuotaReservation(result.reservation), operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于其他预留操作', requestId: request.id } })
+      if (error instanceof Error && error.message === 'QUOTA_RESERVATION_NOT_RESERVED') return reply.status(409).send({ error: { code: 'QUOTA_RESERVATION_NOT_RESERVED', message: '该预留已经结算或取消，不能重复处理', requestId: request.id } })
       throw error
     }
   })
