@@ -909,6 +909,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     const record = getDatabaseConversationAuditRecord(database, request.params.id)
     if (!record || !record.contentAccess.available) return reply.status(404).send({ error: { code: 'CONVERSATION_CONTENT_UNAVAILABLE', message: '该记录没有可访问的对话内容', requestId: request.id } })
     const actorUserId = request.authUser?.id ?? 'user-super-admin'
+    const auditEventId = `audit-conversation-${crypto.randomUUID()}`
     const accessEvent = database.recordConversationAccess({
       id: `access-demo-${crypto.randomUUID()}`,
       actorUserId,
@@ -919,7 +920,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       reasonLength: request.body.reason.length,
       acknowledgedSensitiveScope: request.body.acknowledgeSensitiveScope,
     }, now, {
-      id: `audit-conversation-${crypto.randomUUID()}`,
+      id: auditEventId,
       actorUserId,
       action: 'view',
       resourceType: 'conversation',
@@ -937,7 +938,7 @@ export function buildApp(options: BuildAppOptions = {}) {
         ],
       },
     })
-    const result = createDatabaseConversationAccess(database, record, request.body, now, { id: accessEvent.id, persisted: true })
+    const result = createDatabaseConversationAccess(database, record, request.body, now, { id: accessEvent.id, persisted: true, auditEventId })
     if (result) return result
     return reply.status(404).send({ error: { code: 'CONVERSATION_CONTENT_UNAVAILABLE', message: '该记录没有可访问的对话内容', requestId: request.id } })
   })

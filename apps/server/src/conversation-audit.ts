@@ -62,7 +62,7 @@ const messageSchema = z.object({
 export const conversationAccessResponseSchema = z.object({
   meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }),
   record: recordSchema,
-  access: z.object({ accessRecordId: z.string().regex(/^access-demo-[a-z0-9-]+$/), reasonAccepted: z.literal(true), persisted: z.boolean(), authorizedByServerRbac: z.literal(true), copyAllowed: z.literal(false), exportAllowed: z.literal(false), deleteAllowed: z.literal(false) }),
+  access: z.object({ accessRecordId: z.string().regex(/^access-demo-[a-z0-9-]+$/), auditEventId: z.string().regex(/^audit-[a-z0-9-]+$/).nullable(), reasonAccepted: z.literal(true), persisted: z.boolean(), authorizedByServerRbac: z.literal(true), copyAllowed: z.literal(false), exportAllowed: z.literal(false), deleteAllowed: z.literal(false) }),
   content: z.object({ synthetic: z.literal(true), decrypted: z.literal(false), redactionPassed: z.boolean(), conversationTitle: z.string(), messages: z.array(messageSchema) }),
   retention: z.object({ expiresAt: z.string().datetime(), cleanupState: z.enum(['scheduled', 'expired', 'not_applicable']), deletionProofAvailable: z.literal(false), notice: z.string() }),
   linkedUsage: z.object({ auditRequestId: z.string(), usageRequestId: z.string().nullable(), metadataEndpoint: z.string().nullable(), linkVerified: z.boolean(), source: z.enum(['synthetic_seed', 'unavailable']), notice: z.string() }),
@@ -200,13 +200,13 @@ export function getDemoConversationAuditRecord(id: string, now = new Date()) {
   return records(now).find((item) => item.id === id) ?? null
 }
 
-function createSyntheticConversationAccess(record: ConversationAuditRecord, now: Date, accessRecord: { id: string; persisted: boolean } | undefined, source: 'demo' | 'database', usageLink: { usageRequestId: string; linkSource: 'synthetic_seed' } | null = null) {
+function createSyntheticConversationAccess(record: ConversationAuditRecord, now: Date, accessRecord: { id: string; persisted: boolean; auditEventId?: string | null } | undefined, source: 'demo' | 'database', usageLink: { usageRequestId: string; linkSource: 'synthetic_seed' } | null = null) {
   const baseTime = new Date(record.capturedAt).getTime()
   const at = (seconds: number) => new Date(baseTime + seconds * 1_000).toISOString()
   const expired = new Date(record.policy.expiresAt).getTime() <= now.getTime()
   return {
     meta: { source, generatedAt: now.toISOString(), notice: source === 'database' ? '以下为合成且预先脱敏的演示轮次；SQLite 仅保存元数据，未读取、解密或返回任何真实对话正文。' : '以下为合成且预先脱敏的演示轮次；未读取、解密或返回任何真实对话正文。' }, record,
-    access: { accessRecordId: accessRecord?.id ?? `access-demo-${record.id.replace('conv-audit-', '')}`, reasonAccepted: true as const, persisted: accessRecord?.persisted ?? false, authorizedByServerRbac: true as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
+    access: { accessRecordId: accessRecord?.id ?? `access-demo-${record.id.replace('conv-audit-', '')}`, auditEventId: accessRecord?.auditEventId ?? null, reasonAccepted: true as const, persisted: accessRecord?.persisted ?? false, authorizedByServerRbac: true as const, copyAllowed: false as const, exportAllowed: false as const, deleteAllowed: false as const },
     content: { synthetic: true as const, decrypted: false as const, redactionPassed: record.redaction.status === 'passed', conversationTitle: record.grouping.type === 'independent_call' ? '独立调用 · 演示内容' : `${record.purpose.label} · 演示会话`, messages: [
       { id: 'msg-user-1', role: 'user' as const, label: '用户输入', occurredAt: at(0), text: '请根据订单 [ORDER_ID] 的公开商品信息，整理一版不超过 120 字的回复。客户联系方式已替换为 [PHONE_REDACTED]。', redacted: true, redactionLabels: ['订单编号', '手机号'], tool: null },
       { id: 'msg-tool-1', role: 'tool' as const, label: '工具调用摘要', occurredAt: at(2), text: '读取公开商品目录，返回 3 条匹配记录。参数和原始输出未保留。', redacted: false, redactionLabels: [], tool: { name: 'catalog_search', summary: '按脱敏商品编号查询公开目录', argumentsAvailable: false as const, outputAvailable: false as const } },
@@ -225,7 +225,7 @@ export function createDemoConversationAccess(id: string, _body: ConversationAcce
   return createSyntheticConversationAccess(record, now, accessRecord, 'demo')
 }
 
-export function createDatabaseConversationAccess(database: PlatformDatabase, record: ConversationAuditRecord, body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean }) {
+export function createDatabaseConversationAccess(database: PlatformDatabase, record: ConversationAuditRecord, body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean; auditEventId?: string | null }) {
   void body
   if (!record.contentAccess.available) return null
   return createSyntheticConversationAccess(record, now, accessRecord, 'database', database.getConversationUsageLink(record.id))

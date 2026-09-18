@@ -969,7 +969,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.content).toMatchObject({ synthetic: true, decrypted: false })
-    expect(body.access).toMatchObject({ reasonAccepted: true, persisted: true, authorizedByServerRbac: true, copyAllowed: false, exportAllowed: false, deleteAllowed: false })
+    expect(body.access).toMatchObject({ reasonAccepted: true, persisted: true, authorizedByServerRbac: true, copyAllowed: false, exportAllowed: false, deleteAllowed: false, auditEventId: expect.stringMatching(/^audit-conversation-/) })
     expect(body.linkedUsage).toMatchObject({ auditRequestId: 'req-260915-8f31', usageRequestId: 'req-demo-001', metadataEndpoint: '/api/usage/req-demo-001', linkVerified: true, source: 'synthetic_seed' })
     expect(body.linkedUsage.notice).toMatch(/合成用量映射/)
     expect(body.content.messages.some((item: { redacted: boolean }) => item.redacted)).toBe(true)
@@ -1000,6 +1000,7 @@ describe('BFF', () => {
       }),
     ]))
     const accessAudit = audit.json().items.find((item: { resource: { type: string } }) => item.resource.type === 'conversation')
+    expect(accessAudit.id).toBe(body.access.auditEventId)
     expect(accessAudit.changes).toEqual(expect.arrayContaining([
       expect.objectContaining({ field: 'reason', after: '已变化', sensitive: true }),
       expect.objectContaining({ field: 'contentMode', after: '合成且预先脱敏', sensitive: false }),
