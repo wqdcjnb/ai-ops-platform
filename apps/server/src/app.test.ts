@@ -319,6 +319,7 @@ describe('BFF', () => {
     const created = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { username: 'demo-new-person', displayName: '王小明', departmentId: 'content', password: 'demo-password-1' } })
     expect(created.statusCode).toBe(201)
     expect(created.json().person.displayName).toBe('王小明')
+    expect(created.json().operation.auditEventId).toBe(`audit-${created.json().person.id}-create`)
 
     const listed = await app.inject({ method: 'GET', url: '/api/people?search=王小明', headers: { cookie } })
     expect(listed.statusCode).toBe(200)

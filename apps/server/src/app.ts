@@ -289,7 +289,7 @@ export function buildApp(options: BuildAppOptions = {}) {
         },
       })
       if (!created || !created.departmentId || !created.departmentName) throw new Error('PERSON_CREATE_FAILED')
-      return reply.status(201).send({ meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: '人员已写入本地 SQLite；职位、用途和真实 New API 映射将在后续接入' }, person: { id: created.id, username: created.username, displayName: created.displayName, department: { id: created.departmentId, name: created.departmentName } } })
+      return reply.status(201).send({ meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: '人员已写入本地 SQLite；职位、用途和真实 New API 映射将在后续接入' }, person: { id: created.id, username: created.username, displayName: created.displayName, department: { id: created.departmentId, name: created.departmentName } }, operation: { auditEventId: `audit-${id}-create` } })
     } catch (error) {
       if (error instanceof Error && /UNIQUE constraint failed: users\.username/i.test(error.message)) {
         return reply.status(409).send({ error: { code: 'USERNAME_CONFLICT', message: '用户名已存在，请更换后重试', requestId: request.id } })

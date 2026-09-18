@@ -89,6 +89,7 @@ export const personCreateBodySchema = z.object({
 export const personCreateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
   person: z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) }),
+  operation: z.object({ auditEventId: z.string() }),
 })
 export const personDisableBodySchema = z.object({
   idempotencyKey: z.string().regex(/^person-disable-[a-z0-9-]{8,96}$/),

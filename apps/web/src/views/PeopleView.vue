@@ -11,12 +11,13 @@ import {
   IconKey,
   IconRefresh,
   IconSearch,
+  IconShieldCheck,
   IconUserCheck,
   IconUserOff,
   IconUserPlus,
   IconUsers,
 } from '@tabler/icons-vue'
-import { createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonCreateBody } from '../people-api'
+import { createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const people = ref<PeopleResponse | null>(null)
@@ -31,6 +32,7 @@ const pageSize = 10
 const showCreate = ref(false)
 const createError = ref('')
 const isCreating = ref(false)
+const createdPerson = ref<PersonCreateResponse | null>(null)
 const createForm = ref<PersonCreateBody>({ username: '', displayName: '', departmentId: 'content', password: '' })
 let activeRequest: AbortController | null = null
 
@@ -115,6 +117,7 @@ function goToPage(nextPage: number) {
 
 function openCreate() {
   createError.value = ''
+  createdPerson.value = null
   createForm.value = { username: '', displayName: '', departmentId: people.value?.departments[0]?.id ?? 'content', password: '' }
   showCreate.value = true
 }
@@ -122,14 +125,14 @@ function openCreate() {
 function closeCreate() {
   if (isCreating.value) return
   showCreate.value = false
+  createdPerson.value = null
 }
 
 async function submitCreate() {
   isCreating.value = true
   createError.value = ''
   try {
-    await createPerson(createForm.value)
-    showCreate.value = false
+    createdPerson.value = await createPerson(createForm.value)
     page.value = 1
     await loadPeople()
   } catch (error) {
@@ -224,7 +227,19 @@ onBeforeUnmount(() => activeRequest?.abort())
     <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
       <aside class="create-person-dialog" role="dialog" aria-modal="true" aria-label="添加人员">
         <header><div><span class="source-tag demo">SQLITE</span><h2>添加人员</h2></div><button class="icon-button" aria-label="关闭添加人员" :disabled="isCreating" @click="closeCreate">×</button></header>
-        <form class="create-person-form" @submit.prevent="submitCreate">
+        <template v-if="createdPerson">
+          <section class="created-key-success">
+            <IconUserCheck :size="22" />
+            <strong>{{ createdPerson.person.displayName }} 已添加</strong>
+            <p>{{ createdPerson.meta.notice }}</p>
+            <small>{{ createdPerson.person.department.name }} · {{ createdPerson.person.username }} · 初始密码仅保存摘要</small>
+          </section>
+          <footer class="create-key-dialog-footer">
+            <a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(createdPerson.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${createdPerson.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a>
+            <button class="btn create-key" type="button" @click="closeCreate">完成</button>
+          </footer>
+        </template>
+        <form v-else class="create-person-form" @submit.prevent="submitCreate">
           <p class="create-person-note">创建本地演示账号并绑定部门。密码只用于本地登录测试，不会在列表或日志中展示。</p>
           <label><span>姓名</span><input v-model="createForm.displayName" required minlength="2" maxlength="40" placeholder="例如：王小明" /></label>
           <label><span>登录用户名</span><input v-model="createForm.username" required pattern="[A-Za-z][A-Za-z0-9._-]{2,39}" maxlength="40" placeholder="例如：wang.xiaoming" /></label>
