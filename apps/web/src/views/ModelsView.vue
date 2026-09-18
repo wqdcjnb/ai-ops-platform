@@ -181,7 +181,7 @@ onBeforeUnmount(() => request?.abort())
         <section class="safe-probe-note"><IconShieldCheck :size="18" /><span><strong>{{ isLive ? '只读详情' : '本地模拟边界' }}</strong>{{ isLive ? '仅展示配置摘要和已验证字段，管理凭据不会出现在页面中。' : '复检只会更新本地 SQLite 模拟快照，不会访问渠道、使用凭据或变更配置。' }}</span></section>
         <p v-if="channelCheckResult" class="channel-check-success">{{ channelCheckResult }}</p>
       </template>
-      <footer class="drawer-actions"><button class="btn btn-white" disabled title="完整复检历史暂未开放；可在审计日志中按“模型渠道”筛选"><IconClock :size="16" />审计日志</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : '更新本地模拟健康快照'" @click="openChannelCheck"><IconRefresh :size="16" />模拟复检</button></footer>
+      <footer class="drawer-actions"><a v-if="selectedChannel" class="btn btn-white" :href="`/audit?resource=channel&search=${encodeURIComponent(selectedChannel.name)}`"><IconClock :size="16" />审计日志</a><button v-else class="btn btn-white" disabled title="模型目录不产生独立操作审计；请打开关联渠道详情"><IconClock :size="16" />审计日志</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : '更新本地模拟健康快照'" @click="openChannelCheck"><IconRefresh :size="16" />模拟复检</button></footer>
     </aside></div>
 
     <div v-if="showChannelCheck && selectedChannel" class="drawer-backdrop" @click.self="showChannelCheck = false"><aside class="model-drawer channel-check-dialog" role="dialog" aria-modal="true" aria-label="本地模拟渠道复检"><header><div><span class="source-tag demo">本地模拟</span><h2>模拟渠道复检</h2></div><button class="icon-button" aria-label="关闭模拟复检" :disabled="isCheckingChannel" @click="showChannelCheck = false"><IconX :size="20" /></button></header>
