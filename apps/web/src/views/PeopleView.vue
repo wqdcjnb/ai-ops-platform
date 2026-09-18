@@ -7,11 +7,13 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconDownload,
+  IconFileText,
   IconFilter,
   IconKey,
   IconRefresh,
   IconSearch,
   IconShieldCheck,
+  IconUpload,
   IconUserCheck,
   IconUserOff,
   IconUserPlus,
@@ -19,6 +21,7 @@ import {
 } from '@tabler/icons-vue'
 import { createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
+import { preflightPeopleImport, type PeopleImportRow } from '../people-import'
 
 const people = ref<PeopleResponse | null>(null)
 const isLoading = ref(false)
@@ -34,6 +37,11 @@ const createError = ref('')
 const isCreating = ref(false)
 const createdPerson = ref<PersonCreateResponse | null>(null)
 const createForm = ref<PersonCreateBody>({ username: '', displayName: '', departmentId: 'content', password: '' })
+const showImport = ref(false)
+const importFileName = ref('')
+const importError = ref('')
+const importRows = ref<PeopleImportRow[]>([])
+const importInput = ref<HTMLInputElement | null>(null)
 let activeRequest: AbortController | null = null
 
 const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '离职待回收' }
@@ -128,6 +136,52 @@ function closeCreate() {
   createdPerson.value = null
 }
 
+function openImport() {
+  importFileName.value = ''
+  importError.value = ''
+  importRows.value = []
+  showImport.value = true
+}
+
+function closeImport() {
+  showImport.value = false
+  importFileName.value = ''
+  importError.value = ''
+  importRows.value = []
+}
+
+function downloadImportTemplate() {
+  const csv = '\uFEFFusername,displayName,departmentId,password\nwang.xiaoming,王小明,content,local-pass-1\n'
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'people-import-template.csv'
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function handleImportFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  importRows.value = []
+  importError.value = ''
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.csv')) {
+    importError.value = '请选择 CSV 文件'
+    input.value = ''
+    return
+  }
+  if (file.size > 1_000_000) {
+    importError.value = '文件不能超过 1 MB'
+    input.value = ''
+    return
+  }
+  importFileName.value = file.name
+  const result = preflightPeopleImport(await file.text(), people.value?.departments ?? [])
+  importRows.value = result.rows
+  if (result.truncated) importError.value = '文件超过 200 行，仅预检前 200 行；批量写入暂未开放。'
+}
+
 async function submitCreate() {
   isCreating.value = true
   createError.value = ''
@@ -164,6 +218,7 @@ onBeforeUnmount(() => activeRequest?.abort())
         <span class="updated-at">更新于 {{ updatedAt }}</span>
         <button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadPeople"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button>
         <button class="btn btn-white" disabled title="真实数据与权限接入后开放"><IconDownload :size="16" />导出</button>
+        <button class="btn btn-white" type="button" @click="openImport"><IconUpload :size="16" />批量导入</button>
         <button class="btn create-key" type="button" @click="openCreate"><IconUserPlus :size="17" />添加人员</button>
       </div>
     </section>
@@ -248,6 +303,23 @@ onBeforeUnmount(() => activeRequest?.abort())
           <div v-if="createError" class="create-person-error"><IconAlertTriangle :size="16" />{{ createError }}</div>
           <footer><button class="btn btn-white" type="button" :disabled="isCreating" @click="closeCreate">取消</button><button class="btn create-key" type="submit" :disabled="isCreating">{{ isCreating ? '保存中…' : '保存人员' }}</button></footer>
         </form>
+      </aside>
+    </div>
+
+    <div v-if="showImport" class="drawer-backdrop" @click.self="closeImport">
+      <aside class="create-person-dialog people-import-dialog" role="dialog" aria-modal="true" aria-label="批量导入人员">
+        <header><div><span class="source-tag demo">CSV</span><h2>批量导入人员</h2></div><button class="icon-button" aria-label="关闭批量导入" @click="closeImport">×</button></header>
+        <section class="people-import-content">
+          <p class="create-person-note">下载模板后填写人员信息。文件只允许姓名、登录名、部门和初始密码，不接受完整 Key；当前仅做本地预检，不会写入数据库。</p>
+          <div class="people-import-actions"><button class="btn btn-white" type="button" @click="downloadImportTemplate"><IconDownload :size="15" />下载 CSV 模板</button><label class="btn btn-white" for="people-import-file"><IconUpload :size="15" />选择 CSV 文件</label><input id="people-import-file" ref="importInput" class="visually-hidden" type="file" accept=".csv,text/csv" @change="handleImportFile" /></div>
+          <div v-if="importFileName" class="people-import-file"><IconFileText :size="16" /><span>{{ importFileName }}</span><strong>{{ importRows.length }} 行已预检</strong></div>
+          <div v-if="importError" class="create-person-error"><IconAlertTriangle :size="16" />{{ importError }}</div>
+          <div v-if="importRows.length" class="people-import-table-wrap">
+            <table class="data-table people-import-table"><thead><tr><th>行</th><th>人员</th><th>登录名</th><th>部门</th><th>预检结果</th></tr></thead><tbody><tr v-for="row in importRows" :key="row.line"><td>{{ row.line }}</td><td>{{ row.displayName || '—' }}</td><td>{{ row.username || '—' }}</td><td>{{ row.departmentName || '—' }}</td><td><span :class="row.error ? 'people-import-invalid' : 'people-import-valid'">{{ row.error || '可导入' }}</span></td></tr></tbody></table>
+          </div>
+          <div v-else class="people-import-empty"><IconUpload :size="24" /><strong>还没有选择文件</strong><span>先下载模板或选择已有 CSV 文件。</span></div>
+        </section>
+        <footer class="create-key-dialog-footer"><button class="btn btn-white" type="button" @click="closeImport">关闭</button><button class="btn" type="button" disabled title="批量事务写入和审计接口完成后开放">确认导入</button></footer>
       </aside>
     </div>
   </div>
