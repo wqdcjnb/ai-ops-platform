@@ -25,6 +25,7 @@ import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDataba
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
 import { dataScopeFor } from './data-scope.js'
 import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
+import { createDatabaseSearch, searchQuerySchema, searchResponseSchema } from './search.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -237,6 +238,13 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/tasks/summary', {
     schema: { response: { 200: taskSummarySchema } },
   }, async (request) => createTaskSummary(database, new Date(), dataScopeFor(request.authUser)))
+
+  app.get('/api/search', {
+    schema: {
+      querystring: searchQuerySchema,
+      response: { 200: searchResponseSchema, 400: errorResponseSchema },
+    },
+  }, async (request) => createDatabaseSearch(database, request.query, dataScopeFor(request.authUser)))
 
   app.get('/api/people', {
     schema: {

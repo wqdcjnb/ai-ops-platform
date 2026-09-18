@@ -24,6 +24,8 @@ import {
 } from '@tabler/icons-vue'
 import { fetchPlatformStatus, type PlatformService, type PlatformStatus } from '../home-api'
 import { fetchCurrentUser, logout, type AuthUser } from '../auth-api'
+import { fetchGlobalSearch, GlobalSearchApiError, type GlobalSearchResponse } from '../search-api'
+import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 interface NavItem {
   label: string
@@ -43,6 +45,13 @@ const currentUser = ref<AuthUser | null>(null)
 const bffState = ref<'checking' | 'online' | 'offline'>('checking')
 const platform = ref<PlatformStatus | null>(null)
 const statusController = new AbortController()
+const globalSearchInput = ref<HTMLInputElement | null>(null)
+const globalSearch = ref('')
+const globalSearchOpen = ref(false)
+const globalSearchLoading = ref(false)
+const globalSearchError = ref('')
+const globalSearchResults = ref<GlobalSearchResponse | null>(null)
+let globalSearchController: AbortController | null = null
 
 const navSections: NavSection[] = [
   {
@@ -107,8 +116,16 @@ async function loadServiceStatus() {
   }
 }
 
-onMounted(() => void loadServiceStatus())
-onBeforeUnmount(() => statusController.abort())
+onMounted(() => {
+  void loadServiceStatus()
+  window.addEventListener('keydown', focusGlobalSearch)
+})
+onBeforeUnmount(() => {
+  statusController.abort()
+  globalSearchController?.abort()
+  cancelGlobalSearch()
+  window.removeEventListener('keydown', focusGlobalSearch)
+})
 
 async function loadCurrentUser() {
   currentUser.value = (await fetchCurrentUser().catch(() => null))?.user ?? null
@@ -120,6 +137,59 @@ async function signOut() {
 }
 
 onMounted(() => void loadCurrentUser())
+
+async function runGlobalSearch() {
+  const query = globalSearch.value.trim()
+  globalSearchController?.abort()
+  globalSearchController = null
+  globalSearchError.value = ''
+  if (!query) {
+    globalSearchOpen.value = false
+    globalSearchLoading.value = false
+    globalSearchResults.value = null
+    return
+  }
+
+  const controller = new AbortController()
+  globalSearchController = controller
+  globalSearchOpen.value = true
+  globalSearchLoading.value = true
+  try {
+    const result = await fetchGlobalSearch(query, controller.signal)
+    if (globalSearchController !== controller) return
+    globalSearchResults.value = result
+  } catch (error) {
+    if (controller.signal.aborted || globalSearchController !== controller) return
+    globalSearchError.value = error instanceof GlobalSearchApiError ? error.message : '全局搜索暂时无法加载'
+    globalSearchResults.value = null
+  } finally {
+    if (globalSearchController === controller) globalSearchLoading.value = false
+  }
+}
+
+const { cancel: cancelGlobalSearch } = useDebouncedSearch(globalSearch, () => void runGlobalSearch())
+
+function clearGlobalSearch() {
+  cancelGlobalSearch()
+  globalSearchController?.abort()
+  globalSearchController = null
+  globalSearch.value = ''
+  globalSearchOpen.value = false
+  globalSearchLoading.value = false
+  globalSearchError.value = ''
+  globalSearchResults.value = null
+}
+
+function focusGlobalSearch(event: KeyboardEvent) {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    globalSearchInput.value?.focus()
+  }
+}
+
+function handleGlobalSearchFocus() {
+  if (globalSearch.value.trim()) globalSearchOpen.value = true
+}
 </script>
 
 <template>
@@ -167,11 +237,37 @@ onMounted(() => void loadCurrentUser())
     <main class="app-main">
       <header class="topbar">
         <button class="icon-button mobile-menu" aria-label="打开导航" @click="mobileNavOpen = true"><IconMenu2 :size="22" /></button>
-        <label class="global-search" title="全局搜索将在人员页面完成后启用">
-          <IconSearch :size="18" />
-          <input type="search" aria-label="全局搜索尚未启用" placeholder="全局搜索将在人员页面完成后启用" disabled />
-          <kbd>⌘ K</kbd>
-        </label>
+        <div class="global-search-wrap">
+          <label class="global-search" :class="{ 'is-active': globalSearchOpen || globalSearchLoading }">
+            <IconSearch :size="18" />
+            <input
+              ref="globalSearchInput"
+              v-model="globalSearch"
+              type="search"
+              aria-label="全局搜索人员、Key 掩码或请求 ID"
+              placeholder="搜索人员、Key 掩码或请求 ID"
+              autocomplete="off"
+              @focus="handleGlobalSearchFocus"
+              @keydown.esc.prevent="clearGlobalSearch"
+            />
+            <kbd>⌘ K</kbd>
+          </label>
+          <div v-if="globalSearchOpen" class="global-search-popover" role="status" aria-live="polite">
+            <div v-if="globalSearchLoading" class="global-search-state">正在搜索…</div>
+            <div v-else-if="globalSearchError" class="global-search-state is-error" role="alert">{{ globalSearchError }}</div>
+            <template v-else-if="globalSearchResults?.total">
+              <div class="global-search-notice">{{ globalSearchResults.meta.notice }}</div>
+              <section v-for="group in globalSearchResults.groups" :key="group.id" class="global-search-group">
+                <div class="global-search-group-label">{{ group.label }}</div>
+                <RouterLink v-for="item in group.items" :key="item.id" :to="item.href" class="global-search-result" @click="clearGlobalSearch">
+                  <span>{{ item.title }}</span>
+                  <small>{{ item.detail }}</small>
+                </RouterLink>
+              </section>
+            </template>
+            <div v-else class="global-search-state">没有匹配内容</div>
+          </div>
+        </div>
         <div class="topbar-actions">
           <div class="service-status" :class="{ degraded }" :title="`BFF ${bffState}；${newApiLabel}；${cpaLabel}`">
             <span /> {{ bffState === 'online' ? 'BFF 在线' : bffState === 'offline' ? 'BFF 离线' : '检查服务' }}
