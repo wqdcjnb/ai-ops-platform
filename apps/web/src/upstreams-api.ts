@@ -37,8 +37,19 @@ export const upstreamCheckResponseSchema = z.object({
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
 
+export const upstreamHistoryResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), notice: z.string() }),
+  upstream: z.object({ id: z.string(), name: z.string() }),
+  items: z.array(z.object({
+    id: z.string(), checkedAt: z.string().datetime(), actorName: z.string(), actorRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']),
+    result: z.enum(['success', 'failed', 'denied']), requestId: z.string(), code: z.string(), summary: z.string(),
+  })),
+  total: z.number().int().nonnegative(),
+})
+
 export type UpstreamCheckBody = z.infer<typeof upstreamCheckBodySchema>
 export type UpstreamCheckResponse = z.infer<typeof upstreamCheckResponseSchema>
+export type UpstreamHistoryResponse = z.infer<typeof upstreamHistoryResponseSchema>
 
 export class UpstreamsApiError extends Error { constructor(message: string, readonly requestId?: string) { super(message) } }
 
@@ -64,5 +75,14 @@ export async function checkUpstream(id: string, payload: UpstreamCheckBody): Pro
   }
   const parsed = upstreamCheckResponseSchema.safeParse(await response.json())
   if (!parsed.success) throw new UpstreamsApiError('上游验证响应格式不符合接口约定', requestId)
+  return parsed.data
+}
+
+export async function fetchUpstreamHistory(id: string, signal?: AbortSignal): Promise<UpstreamHistoryResponse> {
+  const response = await fetch(`/api/upstreams/${encodeURIComponent(id)}/history`, { headers: { accept: 'application/json' }, signal })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) throw new UpstreamsApiError('上游认证历史暂时无法加载', requestId)
+  const parsed = upstreamHistoryResponseSchema.safeParse(await response.json())
+  if (!parsed.success) throw new UpstreamsApiError('上游认证历史格式不符合接口约定', requestId)
   return parsed.data
 }

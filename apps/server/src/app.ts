@@ -15,7 +15,7 @@ import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuer
 import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelCheckBodySchema, channelCheckResponseSchema, channelIdParamsSchema, channelsQuerySchema, channelsResponseSchema, createDatabaseDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
-import { createDemoUpstreams, upstreamCheckBodySchema, upstreamCheckResponseSchema, upstreamIdParamsSchema, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
+import { createDatabaseUpstreamHistory, createDemoUpstreams, upstreamCheckBodySchema, upstreamCheckResponseSchema, upstreamHistoryResponseSchema, upstreamIdParamsSchema, upstreamsQuerySchema, upstreamsResponseSchema } from './upstreams.js'
 import { createDatabaseUsage, createDatabaseUsageDetail, usageDetailResponseSchema, usageQuerySchema, usageRequestParamsSchema, usageResponseSchema } from './usage.js'
 import { alertAcknowledgeBodySchema, alertActionResponseSchema, alertCloseBodySchema, alertDetailResponseSchema, alertParamsSchema, alertRulesResponseSchema, alertsQuerySchema, alertsResponseSchema, alertSummaryResponseSchema, createDatabaseAlertDetail, createDatabaseAlertRules, createDatabaseAlerts, createDatabaseAlertSummary } from './alerts.js'
 import { auditDetailResponseSchema, auditParamsSchema, auditQuerySchema, auditResponseSchema, createDatabaseAudit, createDatabaseAuditDetail, createDemoAudit, createDemoAuditDetail } from './audit.js'
@@ -744,6 +744,22 @@ export function buildApp(options: BuildAppOptions = {}) {
       upstream,
       operation: { idempotencyKey: request.body.idempotencyKey, idempotent: false, auditEventId },
     }
+  })
+
+  app.get('/api/upstreams/:id/history', {
+    schema: { params: upstreamIdParamsSchema, response: { 200: upstreamHistoryResponseSchema, 404: errorResponseSchema } },
+  }, async (request, reply) => {
+    const now = new Date()
+    const demo = createDemoUpstreams(
+      { search: '', type: 'all', status: 'all' },
+      { state: 'offline', authConfigured: false, checkedAt: now.toISOString() },
+      { state: 'offline', checkedAt: now.toISOString() },
+      now,
+      database.listSyntheticUpstreamChecks(),
+    )
+    const visible = demo.items.find((item) => item.id === request.params.id)
+    if (!visible) return reply.status(404).send({ error: { code: 'UPSTREAM_NOT_FOUND', message: '未找到指定上游账号', requestId: request.id } })
+    return createDatabaseUpstreamHistory(database, visible.id, visible.name, now)
   })
 
   app.get('/api/upstreams', {

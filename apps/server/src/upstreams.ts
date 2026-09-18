@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
 import type { PlatformProbeResult } from './platform.js'
+import type { PlatformDatabase } from './platform-db.js'
 
 export const upstreamsQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
@@ -86,11 +87,22 @@ export const upstreamCheckResponseSchema = z.object({
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
 
+export const upstreamHistoryResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), notice: z.string() }),
+  upstream: z.object({ id: z.string(), name: z.string() }),
+  items: z.array(z.object({
+    id: z.string(), checkedAt: z.string().datetime(), actorName: z.string(), actorRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']),
+    result: z.enum(['success', 'failed', 'denied']), requestId: z.string(), code: z.string(), summary: z.string(),
+  })),
+  total: z.number().int().nonnegative(),
+})
+
 export type UpstreamsQuery = z.infer<typeof upstreamsQuerySchema>
 export type UpstreamsResponse = z.infer<typeof upstreamsResponseSchema>
 type UpstreamItem = z.infer<typeof upstreamItemSchema>
 export type UpstreamCheckBody = z.infer<typeof upstreamCheckBodySchema>
 export type UpstreamCheckResponse = z.infer<typeof upstreamCheckResponseSchema>
+export type UpstreamHistoryResponse = z.infer<typeof upstreamHistoryResponseSchema>
 
 function offset(now: Date, minutes: number) { return new Date(now.getTime() + minutes * 60_000).toISOString() }
 
@@ -140,6 +152,30 @@ export function createDemoUpstreams(query: UpstreamsQuery, newApi: NewApiStatus,
     meta: { source: 'demo', generatedAt: now.toISOString(), notice: `${liveText}；账号明细在管理适配器完成前使用演示数据`, live: { newApi: newApiState, cpa: cpa.state, checkedAt: now.toISOString() } },
     summary: { total: all.length, available: all.filter((item) => item.status === 'healthy').length, needsAttention: all.filter((item) => item.status !== 'healthy').length, official: all.filter((item) => item.type === 'official_api').length, experiment: all.filter((item) => item.type === 'cpa_oauth').length, configured: all.filter((item) => item.credentialConfigured).length },
     isolation: { enforced: true, productionToExperimentFallback: false, statement: '正式业务仅使用官方账号组；CPA Pro OAuth 仅用于隔离实验，不能成为正式路由的隐式回退。' },
+    items,
+    total: items.length,
+  }
+}
+
+export function createDatabaseUpstreamHistory(database: PlatformDatabase, upstreamId: string, upstreamName: string, now = new Date()): UpstreamHistoryResponse {
+  const items = database.listAuditEvents()
+    .filter((event) => event.resourceType === 'upstream' && event.resourceId === upstreamId && event.action === 'verify')
+    .map((event) => {
+      const summary = event.summary
+      return {
+        id: event.id,
+        checkedAt: event.occurredAt,
+        actorName: event.actorName ?? '平台任务',
+        actorRole: event.actorRole ?? ('system' as const),
+        result: event.result,
+        requestId: event.requestId ?? `req-${event.id.replace(/^audit-/, '')}`,
+        code: typeof summary.code === 'string' ? summary.code : 'UPSTREAM_CHECK_RECORDED',
+        summary: typeof summary.message === 'string' ? summary.message : '已记录本地模拟验证摘要。',
+      }
+    })
+  return {
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '仅展示 SQLite 本地模拟验证摘要；不会显示验证原因原文、凭据或上游响应。' },
+    upstream: { id: upstreamId, name: upstreamName },
     items,
     total: items.length,
   }

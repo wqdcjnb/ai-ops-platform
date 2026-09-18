@@ -739,6 +739,10 @@ describe('BFF', () => {
 
     const listed = await app.inject({ method: 'GET', url: '/api/upstreams', headers: { cookie } })
     expect(listed.json().items.find((item: { id: string }) => item.id === 'upstream-official-cn-1')).toMatchObject({ health: { checkedAt } })
+    const history = await app.inject({ method: 'GET', url: '/api/upstreams/upstream-official-cn-1/history', headers: { cookie } })
+    expect(history.statusCode).toBe(200)
+    expect(history.json()).toMatchObject({ upstream: { id: 'upstream-official-cn-1' }, total: 1, items: [expect.objectContaining({ actorName: '超级管理员', result: 'success', code: 'SYNTHETIC_UPSTREAM_CHECK_COMPLETED', checkedAt })] })
+    expect(JSON.stringify(history.json())).not.toContain(body.reason)
     const replay = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-cn-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
     expect(replay.statusCode).toBe(200)
     expect(replay.json().operation.idempotent).toBe(true)
