@@ -248,6 +248,7 @@ button { cursor: pointer; }
 .people-filters input { width: 100%; }.people-filters input::placeholder { color: #9ca7b0; }
 .people-filters select { min-width: 92px; cursor: pointer; }
 .filter-submit { flex: 0 0 auto; border: 1px solid var(--brand); color: #fff; background: var(--brand); }.filter-submit:hover { background: var(--brand-dark); }
+.realtime-search-hint { flex: 0 0 auto; color: #789099; font-size: 8px; white-space: nowrap; }
 .clear-filter { flex: 0 0 auto; }
 .people-table { min-width: 1120px; }
 .people-table th { padding: 0 12px; }.people-table td { height: 61px; padding: 0 12px; }

@@ -145,7 +145,7 @@ onBeforeUnmount(() => request?.abort())
 
     <template v-else-if="limits">
       <section class="panel limit-workbench">
-        <form class="limit-filters" @submit.prevent="applyFilters"><label class="limit-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索额度范围" maxlength="60" type="search" placeholder="搜索范围、人员、用途或 Key 掩码" /></label><label><IconFilter :size="15" /><select v-model="level" @change="applyFilters"><option value="all">全部层级</option><option v-for="item in limits.options.levels" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button></form>
+        <form class="limit-filters" @submit.prevent="applyFilters"><label class="limit-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索额度范围" maxlength="60" type="search" placeholder="搜索范围、人员、用途或 Key 掩码" /></label><label><IconFilter :size="15" /><select v-model="level" @change="applyFilters"><option value="all">全部层级</option><option v-for="item in limits.options.levels" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><span class="realtime-search-hint" aria-live="polite">输入即搜索</span><button class="text-button" type="button" @click="clearFilters">清除</button></form>
         <div class="limit-workbench-grid">
           <div class="limit-tree-column">
               <header><div><strong>五层额度树</strong><small>{{ limits.total }} 个策略范围</small></div><button class="tree-collapse-all" :disabled="!expandableIds.length" @click="toggleAll">{{ allCollapsed ? '全部展开' : '全部收起' }}</button></header>

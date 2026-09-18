@@ -141,7 +141,7 @@ onBeforeUnmount(() => request?.abort())
           <label><select v-model="capability" aria-label="模型能力" @change="applyFilters"><option value="all">全部能力</option><option v-for="item in models.options.capabilities" :key="item.id" :value="item.id">{{ item.label }}</option></select></label>
           <label><select v-model="environment" aria-label="模型环境" @change="applyFilters"><option value="all">全部环境</option><option v-for="(label, value) in environmentText" :key="value" :value="value">{{ label }}</option></select></label>
           <label><select v-model="status" aria-label="模型状态" @change="applyFilters"><option value="all">全部状态</option><option v-for="(label, value) in modelStatusText" :key="value" :value="value">{{ label }}</option></select></label>
-          <button class="btn filter-submit" type="submit">查询</button><button class="text-button" type="button" @click="clearFilters">清除</button>
+          <span class="realtime-search-hint" aria-live="polite">输入即搜索</span><button class="text-button" type="button" @click="clearFilters">清除</button>
         </form>
         <div v-if="models.items.length" class="table-responsive"><table class="data-table models-table"><thead><tr><th>模型</th><th>环境</th><th>能力</th><th>上下文</th><th>输入 / 输出价格</th><th>业务别名与用途</th><th>区域</th><th>状态</th><th><span class="catalog-sr-only">详情</span></th></tr></thead><tbody>
           <tr v-for="item in models.items" :key="item.id">

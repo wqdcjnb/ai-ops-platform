@@ -272,7 +272,7 @@ onBeforeUnmount(() => activeRequest?.abort())
         <label><IconBuilding :size="16" /><select v-model="department" @change="applyFilters"><option value="all">全部部门</option><option v-for="item in people?.departments ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
         <label><IconUsers :size="16" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">在职</option><option value="offboarding">离职待回收</option><option value="disabled">已停用</option></select></label>
         <label><IconFilter :size="16" /><select v-model="goal" @change="applyFilters"><option value="all">全部目标状态</option><option value="normal">正常</option><option value="near">接近目标</option><option value="reached">已达目标</option></select></label>
-        <button class="btn filter-submit" type="submit"><IconSearch :size="15" />查询</button>
+        <span class="realtime-search-hint" aria-live="polite">输入即搜索</span>
         <button class="text-button clear-filter" type="button" @click="clearFilters">清除</button>
       </form>
 

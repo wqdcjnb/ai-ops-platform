@@ -197,7 +197,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
         <label><IconFilter :size="15" /><select v-model="purpose" @change="applyFilters"><option value="all">全部用途</option><option v-for="item in keys?.options.purposes ?? []" :key="item" :value="item">{{ item }}</option></select></label>
         <label><IconSparkles :size="15" /><select v-model="model" @change="applyFilters"><option value="all">全部模型</option><option v-for="item in keys?.options.models ?? []" :key="item" :value="item">{{ item }}</option></select></label>
         <label><IconShieldCheck :size="15" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">正常启用</option><option value="expiring">30 天内到期</option><option value="disabled">已停用</option></select></label>
-        <button class="btn filter-submit" type="submit"><IconSearch :size="15" />查询</button><button class="text-button" type="button" @click="clearFilters">清除</button>
+        <span class="realtime-search-hint" aria-live="polite">输入即搜索</span><button class="text-button" type="button" @click="clearFilters">清除</button>
       </form>
 
       <div v-if="!keys && !errorMessage" class="data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取 Key 列表</strong><p>正在从 BFF 获取脱敏后的访问凭据…</p></div></div>

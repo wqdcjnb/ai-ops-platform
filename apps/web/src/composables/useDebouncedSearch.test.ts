@@ -1,44 +1,33 @@
-// @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
 import { effectScope, ref } from 'vue'
-import { SEARCH_DEBOUNCE_MS, useDebouncedSearch } from './useDebouncedSearch'
-
-afterEach(() => vi.useRealTimers())
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { useDebouncedSearch } from './useDebouncedSearch'
 
 describe('useDebouncedSearch', () => {
-  it('only runs the latest value after the short input pause', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('runs once after the quiet period and cancels stale searches', () => {
     vi.useFakeTimers()
     const scope = effectScope()
     const search = ref('')
     const runSearch = vi.fn()
-    let cancel: () => void
+    let cancel = () => {}
+    scope.run(() => { cancel = useDebouncedSearch(search, runSearch).cancel })
 
-    scope.run(() => { ({ cancel } = useDebouncedSearch(search, runSearch)) })
-    search.value = '林'
-    vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS - 1)
-    search.value = '林筱雨'
-    vi.advanceTimersByTime(SEARCH_DEBOUNCE_MS - 1)
+    search.value = '人'
+    vi.advanceTimersByTime(239)
     expect(runSearch).not.toHaveBeenCalled()
-
     vi.advanceTimersByTime(1)
     expect(runSearch).toHaveBeenCalledTimes(1)
-    cancel!()
-    scope.stop()
-  })
 
-  it('allows immediate actions to cancel the queued search', () => {
-    vi.useFakeTimers()
-    const scope = effectScope()
-    const search = ref('')
-    const runSearch = vi.fn()
-    let cancel: () => void
+    search.value = '人员'
+    search.value = '人员页'
+    vi.advanceTimersByTime(240)
+    expect(runSearch).toHaveBeenCalledTimes(2)
 
-    scope.run(() => { ({ cancel } = useDebouncedSearch(search, runSearch)) })
-    search.value = '请求'
-    cancel!()
-    vi.runAllTimers()
-
-    expect(runSearch).not.toHaveBeenCalled()
+    search.value = '人员页面'
+    cancel()
+    vi.advanceTimersByTime(240)
+    expect(runSearch).toHaveBeenCalledTimes(2)
     scope.stop()
   })
 })
