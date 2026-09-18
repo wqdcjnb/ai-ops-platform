@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { IconAlertTriangle, IconBrain, IconChevronRight, IconCircleCheck, IconClock, IconCoin, IconFlask, IconGauge, IconRefresh, IconSearch, IconServer2, IconShieldCheck, IconX } from '@tabler/icons-vue'
-import { checkSyntheticChannel, fetchChannels, fetchModels, ModelsApiError, type CatalogSource, type ChannelCheckBody, type ChannelFilters, type ChannelItem, type ChannelsResponse, type ModelFilters, type ModelItem, type ModelsResponse } from '../models-api'
+import { checkSyntheticChannel, fetchChannels, fetchModels, ModelsApiError, type CatalogSource, type ChannelCheckBody, type ChannelCheckResponse, type ChannelFilters, type ChannelItem, type ChannelsResponse, type ModelFilters, type ModelItem, type ModelsResponse } from '../models-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const source = ref<CatalogSource>('demo')
@@ -20,7 +20,7 @@ const errorMessage = ref('')
 const showChannelCheck = ref(false)
 const isCheckingChannel = ref(false)
 const channelCheckError = ref('')
-const channelCheckResult = ref('')
+const channelCheckReceipt = ref<ChannelCheckResponse['operation'] | null>(null)
 const channelCheckForm = ref<ChannelCheckBody>({ idempotencyKey: '', reason: '', acknowledgeSynthetic: true })
 const drawerClose = ref<HTMLButtonElement | null>(null)
 let previousFocus: HTMLElement | null = null
@@ -59,6 +59,7 @@ function openChannelCheck() {
   if (!selectedChannel.value || isLive.value) return
   channelCheckForm.value = { idempotencyKey: `channel-check-${crypto.randomUUID()}`, reason: '', acknowledgeSynthetic: true }
   channelCheckError.value = ''
+  channelCheckReceipt.value = null
   showChannelCheck.value = true
 }
 async function saveChannelCheck() {
@@ -69,7 +70,7 @@ async function saveChannelCheck() {
     const result = await checkSyntheticChannel(selectedChannel.value.id, channelCheckForm.value)
     selectedChannel.value = result.channel
     if (channels.value) channels.value = { ...channels.value, items: channels.value.items.map((item) => item.id === result.channel.id ? result.channel : item) }
-    channelCheckResult.value = result.operation.idempotent ? '此模拟复检已完成，快照保持不变。' : '本地模拟复检已完成；未探测真实渠道或调用 New API。'
+    channelCheckReceipt.value = result.operation
     showChannelCheck.value = false
   } catch (error) {
     const requestId = error instanceof ModelsApiError ? error.requestId : undefined
@@ -80,7 +81,7 @@ async function openDetail(item: ModelItem | ChannelItem, kind: 'model' | 'channe
   previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   selectedModel.value = kind === 'model' ? item as ModelItem : null
   selectedChannel.value = kind === 'channel' ? item as ChannelItem : null
-  channelCheckResult.value = ''
+  channelCheckReceipt.value = null
   await nextTick(); drawerClose.value?.focus()
 }
 function trapFocus(event: KeyboardEvent) {
@@ -179,7 +180,7 @@ onBeforeUnmount(() => request?.abort())
         <section class="drawer-section"><h3>限流与检查</h3><dl class="model-facts"><div><dt>RPM</dt><dd>{{ numberText(selectedChannel.rateLimits.rpm) }}</dd></div><div><dt>TPM</dt><dd>{{ numberText(selectedChannel.rateLimits.tpm) }}</dd></div><div><dt>凭据状态</dt><dd>{{ selectedChannel.credentialConfigured === null ? '未提供' : selectedChannel.credentialConfigured ? '已配置' : '未配置' }}</dd></div><div><dt>最近检查</dt><dd>{{ timeText(selectedChannel.checkedAt) }}</dd></div><div><dt>关联模型</dt><dd>{{ selectedChannel.modelIds.length }} 个</dd></div></dl></section>
         <section class="drawer-section"><h3>最近错误</h3><div v-if="selectedChannel.recentError" class="channel-error-detail"><IconAlertTriangle :size="18" /><div><strong>{{ errorText[selectedChannel.recentError.category] }}</strong><p>{{ selectedChannel.recentError.summary }}</p><small>{{ timeText(selectedChannel.recentError.occurredAt) }}</small></div></div><p v-else class="price-note">{{ isLive ? '调用错误数据尚未接入，暂无检查结论。' : '模拟检查未发现异常。' }}</p></section>
         <section class="safe-probe-note"><IconShieldCheck :size="18" /><span><strong>{{ isLive ? '只读详情' : '本地模拟边界' }}</strong>{{ isLive ? '仅展示配置摘要和已验证字段，管理凭据不会出现在页面中。' : '复检只会更新本地 SQLite 模拟快照，不会访问渠道、使用凭据或变更配置。' }}</span></section>
-        <p v-if="channelCheckResult" class="channel-check-success">{{ channelCheckResult }}</p>
+        <div v-if="channelCheckReceipt" class="channel-check-success" role="status"><span>{{ channelCheckReceipt.idempotent ? '此模拟复检已完成，快照保持不变。' : '本地模拟复检已完成；未探测真实渠道或调用 New API。' }}</span><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(channelCheckReceipt.auditEventId)}&origin=mutation`" :aria-label="`查看 ${channelCheckReceipt.auditEventId} 操作审计`"><IconShieldCheck :size="15" />查看操作审计</a></div>
       </template>
       <footer class="drawer-actions"><a v-if="selectedChannel" class="btn btn-white" :href="`/audit?resource=channel&search=${encodeURIComponent(selectedChannel.name)}`"><IconClock :size="16" />审计日志</a><button v-else class="btn btn-white" disabled title="模型目录不产生独立操作审计；请打开关联渠道详情"><IconClock :size="16" />审计日志</button><button class="btn" :disabled="isLive || !selectedChannel" :title="isLive ? 'New API 目录保持只读' : '更新本地模拟健康快照'" @click="openChannelCheck"><IconRefresh :size="16" />模拟复检</button></footer>
     </aside></div>
@@ -216,7 +217,7 @@ onBeforeUnmount(() => request?.abort())
 .catalog-unknown { color: var(--muted); }
 .catalog-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .model-drawer-hero strong, .model-drawer-hero code { overflow-wrap: anywhere; }
-.channel-check-success { margin: 0 18px 13px; padding: 9px 10px; border: 1px solid #b9dfc0; border-radius: 6px; color: #2f6240; background: #f1faf2; font-size: 12px; line-height: 1.5; }.channel-check-dialog { width: min(500px, 100vw); }.channel-check-form { display: grid; gap: 15px; padding: 18px; }.channel-check-heading { display: grid; gap: 4px; padding: 12px; border: 1px solid #cfe2e4; border-radius: 7px; color: #526a73; background: #f2f9f9; }.channel-check-heading strong { color: #36545e; font-size: 14px; }.channel-check-heading span { font-size: 12px; }.channel-check-heading p { margin: 2px 0 0; font-size: 12px; line-height: 1.55; }.channel-check-form label { display: grid; gap: 7px; }.channel-check-form label > span { color: #687b86; font-size: 12px; font-weight: 650; }.channel-check-form textarea { width: 100%; min-height: 78px; padding: 10px; resize: vertical; border: 1px solid #d8e1e5; border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 13px/1.5 inherit; }.channel-check-form textarea:focus { border-color: #19808a; box-shadow: 0 0 0 2px rgba(25,128,138,.08); }.channel-check-ack { display: flex !important; grid-template-columns: 16px minmax(0, 1fr); align-items: flex-start; gap: 8px !important; color: #536873; font-size: 12px; line-height: 1.5; }.channel-check-ack input { margin: 2px 0 0; accent-color: var(--brand); }.channel-check-error { margin: -3px 0 0; padding: 9px 10px; border-radius: 6px; color: #a33232; background: #fff1f1; font-size: 12px; line-height: 1.5; }.channel-check-form footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
+.channel-check-success { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 18px 13px; padding: 9px 10px; border: 1px solid #b9dfc0; border-radius: 6px; color: #2f6240; background: #f1faf2; font-size: 12px; line-height: 1.5; }.channel-check-success a { flex: 0 0 auto; }.channel-check-dialog { width: min(500px, 100vw); }.channel-check-form { display: grid; gap: 15px; padding: 18px; }.channel-check-heading { display: grid; gap: 4px; padding: 12px; border: 1px solid #cfe2e4; border-radius: 7px; color: #526a73; background: #f2f9f9; }.channel-check-heading strong { color: #36545e; font-size: 14px; }.channel-check-heading span { font-size: 12px; }.channel-check-heading p { margin: 2px 0 0; font-size: 12px; line-height: 1.55; }.channel-check-form label { display: grid; gap: 7px; }.channel-check-form label > span { color: #687b86; font-size: 12px; font-weight: 650; }.channel-check-form textarea { width: 100%; min-height: 78px; padding: 10px; resize: vertical; border: 1px solid #d8e1e5; border-radius: 6px; outline: 0; color: #344754; background: #fff; font: 13px/1.5 inherit; }.channel-check-form textarea:focus { border-color: #19808a; box-shadow: 0 0 0 2px rgba(25,128,138,.08); }.channel-check-ack { display: flex !important; grid-template-columns: 16px minmax(0, 1fr); align-items: flex-start; gap: 8px !important; color: #536873; font-size: 12px; line-height: 1.5; }.channel-check-ack input { margin: 2px 0 0; accent-color: var(--brand); }.channel-check-error { margin: -3px 0 0; padding: 9px 10px; border-radius: 6px; color: #a33232; background: #fff1f1; font-size: 12px; line-height: 1.5; }.channel-check-form footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
 @media (max-width: 850px) { .catalog-source-control { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 480px) { .catalog-source-buttons { width: 100%; } .catalog-source-buttons button { flex: 1; } }
 </style>
