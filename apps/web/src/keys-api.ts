@@ -46,6 +46,7 @@ export const keyCreateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
   key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
   secret: z.string().min(20),
+  operation: z.object({ auditEventId: z.string() }),
 })
 export const keyDisableBodySchema = z.object({
   idempotencyKey: z.string().regex(/^key-disable-[a-z0-9-]{8,96}$/),

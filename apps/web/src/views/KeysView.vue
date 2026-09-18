@@ -29,7 +29,7 @@ const isCreating = ref(false)
 const createdKey = ref<KeyCreateResponse | null>(null)
 const showDisable = ref(false)
 const disableError = ref('')
-const disableSuccess = ref('')
+const disableResult = ref<Awaited<ReturnType<typeof disableKey>> | null>(null)
 const isDisabling = ref(false)
 const disableForm = ref<KeyDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
 const showRotate = ref(false)
@@ -136,17 +136,16 @@ async function copyValue(label: string, value: string) { try { await navigator.c
 function newDisableIdempotencyKey() { return `key-disable-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
 function openDisable() {
   if (!selected.value || selected.value.key.status === 'disabled') return
-  disableError.value = ''; disableSuccess.value = ''
+  disableError.value = ''; disableResult.value = null
   disableForm.value = { idempotencyKey: newDisableIdempotencyKey(), reason: '', acknowledgeImpact: true }
   showDisable.value = true
 }
-function closeDisable() { if (!isDisabling.value) { showDisable.value = false; disableError.value = ''; disableSuccess.value = '' } }
+function closeDisable() { if (!isDisabling.value) { showDisable.value = false; disableError.value = ''; disableResult.value = null } }
 async function submitDisable() {
   if (!selected.value) return
   isDisabling.value = true; disableError.value = ''
   try {
-    const result = await disableKey(selected.value.key.id, disableForm.value)
-    disableSuccess.value = `${result.key.masked} 已停用；${result.meta.notice}`
+    disableResult.value = await disableKey(selected.value.key.id, disableForm.value)
     await loadKeys()
     selected.value = await fetchKeyDetail(selected.value.key.id)
   } catch (error) {
@@ -218,7 +217,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
         <header><div><span class="source-tag demo">SQLITE</span><h2>{{ createdKey ? 'Key 已创建' : '创建 Key' }}</h2></div><button class="icon-button" aria-label="关闭创建 Key" :disabled="isCreating" @click="closeCreate"><IconX :size="20" /></button></header>
         <template v-if="createdKey">
           <section class="created-key-success"><IconCheck :size="22" /><strong>完整 Key 仅展示这一次</strong><p>请立即复制并保存。关闭窗口后平台不会再次返回完整值。</p><div><code>{{ createdKey.secret }}</code><button class="btn btn-white" @click="copyValue('created-secret', createdKey.secret)"><IconCheck v-if="copied === 'created-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'created-secret' ? '已复制' : '复制' }}</button></div><small>{{ createdKey.key.owner.name }} · {{ createdKey.key.purpose }} · {{ dateText(createdKey.key.expiresAt) }} 到期</small></section>
-          <footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeCreate">完成</button></footer>
+          <footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(createdKey.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${createdKey.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" @click="closeCreate">完成</button></footer>
         </template>
         <form v-else class="create-key-form" @submit.prevent="submitCreate">
           <p class="create-person-note">创建本地演示 Key。数据库仅保存掩码标识，完整值只在成功后展示一次。</p>
@@ -250,7 +249,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
     <div v-if="showDisable && selected" class="drawer-backdrop" @click.self="closeDisable">
       <aside class="create-key-dialog disable-key-dialog" role="dialog" aria-modal="true" aria-label="停用 Key">
         <header><div><span class="source-tag demo">SQLITE</span><h2>停用本地演示 Key</h2></div><button class="icon-button" aria-label="关闭停用 Key" :disabled="isDisabling" @click="closeDisable"><IconX :size="20" /></button></header>
-        <template v-if="disableSuccess"><section class="created-key-success"><IconCheck :size="22" /><strong>Key 已停用</strong><p>{{ disableSuccess }}</p></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
+        <template v-if="disableResult"><section class="created-key-success"><IconCheck :size="22" /><strong>Key 已停用</strong><p>{{ disableResult.key.masked }} 已停用；{{ disableResult.meta.notice }}</p></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(disableResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${disableResult.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
         <form v-else class="create-key-form" @submit.prevent="submitDisable"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 将只在本地 SQLite 中标为停用。不会调用 New API、不会撤销真实凭据，当前页面也不提供恢复操作。</p><label><span>停用原因 <em>至少 8 个字符</em></span><textarea v-model="disableForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：复核疑似泄露的本地演示设备" /></label><label class="access-ack"><input v-model="disableForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该操作会立即改变本地演示 Key 状态，并写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="disableError" class="create-person-error"><IconAlertTriangle :size="16" />{{ disableError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDisabling" @click="closeDisable">取消</button><button class="btn danger-outline" type="submit" :disabled="isDisabling || disableForm.reason.trim().length < 8 || !disableForm.acknowledgeImpact">{{ isDisabling ? '停用中…' : '确认停用' }}</button></footer></form>
       </aside>
     </div>
@@ -258,7 +257,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
     <div v-if="showRotate && selected" class="drawer-backdrop" @click.self="closeRotate">
       <aside class="create-key-dialog rotate-key-dialog" role="dialog" aria-modal="true" aria-label="轮换 Key">
         <header><div><span class="source-tag demo">SQLITE</span><h2>{{ rotatedKey ? 'Key 已轮换' : '轮换本地演示 Key' }}</h2></div><button class="icon-button" aria-label="关闭轮换 Key" :disabled="isRotating" @click="closeRotate"><IconX :size="20" /></button></header>
-        <template v-if="rotatedKey"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ rotatedKey.secret ? '完整新 Key 仅展示这一次' : '轮换操作已完成' }}</strong><p>{{ rotatedKey.meta.notice }}</p><div v-if="rotatedKey.secret"><code>{{ rotatedKey.secret }}</code><button class="btn btn-white" @click="copyValue('rotated-secret', rotatedKey.secret)"><IconCheck v-if="copied === 'rotated-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'rotated-secret' ? '已复制' : '复制' }}</button></div><small>旧 Key {{ rotatedKey.oldKey.masked }} 已停用 · 新 Key {{ rotatedKey.key.masked }} · {{ dateText(rotatedKey.key.expiresAt) }} 到期</small></section><footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeRotate">完成</button></footer></template>
+        <template v-if="rotatedKey"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ rotatedKey.secret ? '完整新 Key 仅展示这一次' : '轮换操作已完成' }}</strong><p>{{ rotatedKey.meta.notice }}</p><div v-if="rotatedKey.secret"><code>{{ rotatedKey.secret }}</code><button class="btn btn-white" @click="copyValue('rotated-secret', rotatedKey.secret)"><IconCheck v-if="copied === 'rotated-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'rotated-secret' ? '已复制' : '复制' }}</button></div><small>旧 Key {{ rotatedKey.oldKey.masked }} 已停用 · 新 Key {{ rotatedKey.key.masked }} · {{ dateText(rotatedKey.key.expiresAt) }} 到期</small></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(rotatedKey.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${rotatedKey.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" @click="closeRotate">完成</button></footer></template>
         <form v-else class="create-key-form" @submit.prevent="submitRotate"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 会立即在本地 SQLite 中停用，并生成继承同一人员、用途和允许模型的新 Key。不会调用 New API 或修改真实凭据；完整新 Key 仅在首次成功响应中显示。</p><label><span>新有效期（天）</span><input v-model.number="rotateForm.expiresInDays" required min="1" max="365" type="number" /></label><label><span>轮换原因 <em>至少 8 个字符</em></span><textarea v-model="rotateForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示 Key 即将到期，按周期轮换" /></label><label class="access-ack"><input v-model="rotateForm.acknowledgeImpact" type="checkbox" /><span>我已确认：旧 Key 会立即停用；新 Key 的完整值只展示一次；操作会写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="rotateError" class="create-person-error"><IconAlertTriangle :size="16" />{{ rotateError }}</div><footer><button class="btn btn-white" type="button" :disabled="isRotating" @click="closeRotate">取消</button><button class="btn create-key" type="submit" :disabled="isRotating || rotateForm.reason.trim().length < 8 || !rotateForm.acknowledgeImpact">{{ isRotating ? '轮换中…' : '确认轮换' }}</button></footer></form>
       </aside>
     </div>

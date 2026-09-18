@@ -15,7 +15,7 @@ describe('Key API contracts', () => {
   it('accepts a database list and one-time create response with a masked list value', () => {
     const list = keysResponseSchema.safeParse({ meta: { source: 'database', generatedAt: '', timezone: 'Asia/Shanghai', notice: '' }, summary: { total: 0, active: 0, disabled: 0, expiring: 0 }, options: { owners: [], purposes: [], models: [] }, connection: { baseUrl: 'http://127.0.0.1:3000/v1', note: '' }, items: [], page: 1, pageSize: 20, total: 0 })
     expect(list.success).toBe(true)
-    const created = keyCreateResponseSchema.safeParse({ meta: { source: 'database', createdAt: '', notice: '' }, key: { id: 'key-lin-123', masked: 'sk-ops••••••ABCD', owner: { id: 'person-lin', name: '林筱雨', department: '内容运营' }, purpose: '商品文案', models: ['ecommerce-copy'], expiresAt: '2026-12-31T00:00:00.000Z' }, secret: 'sk-ops-demo-secret-value-123456' })
+    const created = keyCreateResponseSchema.safeParse({ meta: { source: 'database', createdAt: '', notice: '' }, key: { id: 'key-lin-123', masked: 'sk-ops••••••ABCD', owner: { id: 'person-lin', name: '林筱雨', department: '内容运营' }, purpose: '商品文案', models: ['ecommerce-copy'], expiresAt: '2026-12-31T00:00:00.000Z' }, secret: 'sk-ops-demo-secret-value-123456', operation: { auditEventId: 'audit-key-lin-123-create' } })
     expect(created.success).toBe(true)
   })
 

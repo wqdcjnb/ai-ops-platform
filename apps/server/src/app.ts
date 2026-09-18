@@ -431,6 +431,7 @@ export function buildApp(options: BuildAppOptions = {}) {
         meta: { source: 'database' as const, createdAt: created.createdAt, notice: '完整 Key 仅在本次响应中展示一次；数据库只保存掩码标识。' },
         key: { id: created.id, masked: created.maskedValue, owner: { id: created.ownerUserId, name: created.ownerName, department: created.departmentName }, purpose: created.purpose, models: created.models, expiresAt: created.expiresAt },
         secret,
+        operation: { auditEventId: `audit-${id}-create` },
       })
     } catch (error) {
       if (error instanceof Error && /UNIQUE constraint failed: api_keys\.id/i.test(error.message)) {

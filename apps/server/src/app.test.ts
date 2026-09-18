@@ -415,6 +415,7 @@ describe('BFF', () => {
     expect(created.json().secret).toMatch(/^sk-ops-/)
     expect(created.json().key.masked).toContain('••••••')
     expect(created.json().key.masked).not.toContain(created.json().secret)
+    expect(created.json().operation.auditEventId).toBe(`audit-${created.json().key.id}-create`)
 
     const listed = await app.inject({ method: 'GET', url: `/api/keys?search=${encodeURIComponent('大促文案')}`, headers: { cookie } })
     expect(listed.statusCode).toBe(200)
