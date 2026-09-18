@@ -5,7 +5,7 @@ import {
   IconCircleCheck, IconClock, IconFilter, IconFlask, IconLock, IconRefresh, IconRoute, IconSearch,
   IconServer, IconSettings, IconShieldCheck, IconSparkles, IconX,
 } from '@tabler/icons-vue'
-import { fetchRoutes, RoutesApiError, updateLocalRoutePolicy, type RouteFilters, type RouteItem, type RoutePolicyUpdateBody, type RoutesResponse } from '../routes-api'
+import { fetchRoutes, RoutesApiError, updateLocalRoutePolicy, type RouteFilters, type RouteItem, type RoutePolicyUpdateBody, type RoutePolicyUpdateResponse, type RoutesResponse } from '../routes-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const routes = ref<RoutesResponse | null>(null)
@@ -19,7 +19,7 @@ const errorMessage = ref('')
 const showPolicyEdit = ref(false)
 const isSavingPolicy = ref(false)
 const policyError = ref('')
-const policyResult = ref('')
+const policyReceipt = ref<RoutePolicyUpdateResponse['operation'] | null>(null)
 const policyForm = ref<RoutePolicyUpdateBody>({ onTimeout: 'fail', onRateLimit: 'retry', onServerError: 'retry', maxRetries: 0, idempotencyKey: '', reason: '', acknowledgeImpact: true })
 let request: AbortController | null = null
 
@@ -50,6 +50,7 @@ function openPolicyEdit() {
     idempotencyKey: `route-update-${crypto.randomUUID()}`, reason: '', acknowledgeImpact: true,
   }
   policyError.value = ''
+  policyReceipt.value = null
   showPolicyEdit.value = true
 }
 
@@ -61,7 +62,7 @@ async function savePolicy() {
     const result = await updateLocalRoutePolicy(selected.value.id, policyForm.value)
     selected.value = result.route
     if (routes.value) routes.value = { ...routes.value, items: routes.value.items.map((item) => item.id === result.route.id ? result.route : item) }
-    policyResult.value = result.operation.idempotent ? '此操作已完成，本地策略保持不变。' : '本地策略已保存；未调用 New API 或真实路由。'
+    policyReceipt.value = result.operation
     showPolicyEdit.value = false
   } catch (error) {
     const requestId = error instanceof RoutesApiError ? error.requestId : undefined
@@ -117,8 +118,8 @@ onBeforeUnmount(() => request?.abort())
       <section class="drawer-section"><h3>降级与熔断策略</h3><div class="policy-grid"><article><span>超时</span><strong>{{ eventText[selected.policy.onTimeout] }}</strong><small>{{ selected.policy.timeoutSeconds }} 秒</small></article><article><span>上游 429</span><strong>{{ eventText[selected.policy.onRateLimit] }}</strong><small>最多 {{ selected.policy.maxRetries }} 次</small></article><article><span>上游 5xx</span><strong>{{ eventText[selected.policy.onServerError] }}</strong><small>有限重试</small></article><article><span>熔断窗口</span><strong>{{ selected.policy.circuitBreakSeconds }} 秒</strong><small>自动恢复探测</small></article></div></section>
       <section class="drawer-section"><h3>权限与数据边界</h3><dl class="route-facts"><div><dt>数据等级</dt><dd>{{ dataClassText[selected.dataClass] }}</dd></div><div><dt>路由分组</dt><dd>{{ selected.primary.group === 'production' ? '官方正式组' : 'CPA 实验组' }}</dd></div><div><dt>客户端选渠道</dt><dd>禁止</dd></div><div><dt>跨组回退</dt><dd>禁止</dd></div></dl><div class="allowed-role-list"><span v-for="role in selected.allowedRoles" :key="role">{{ role }}</span></div></section>
       <section class="route-safety-note"><IconCircleCheck :size="17" /><span><strong>服务端强制执行</strong>客户端只提交业务别名，不能指定供应商、渠道或绕过隔离规则。</span></section>
-      <p v-if="policyResult" class="route-policy-success">{{ policyResult }}</p>
-      <footer class="drawer-actions"><a class="btn btn-white" :href="`/audit?resource=route&search=${encodeURIComponent(selected.alias)}`"><IconClock :size="16" />审计日志</a><button class="btn" @click="openPolicyEdit"><IconSettings :size="16" />调整本地策略</button></footer>
+      <p v-if="policyReceipt" class="route-policy-success">{{ policyReceipt.idempotent ? '此操作已完成，本地策略保持不变。' : '本地策略已保存；未调用 New API 或真实路由。' }}</p>
+      <footer class="drawer-actions"><a v-if="policyReceipt" class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(policyReceipt.auditEventId)}&origin=mutation`" :aria-label="`查看 ${policyReceipt.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><a class="btn btn-white" :href="`/audit?resource=route&search=${encodeURIComponent(selected.alias)}`"><IconClock :size="16" />审计日志</a><button class="btn" @click="openPolicyEdit"><IconSettings :size="16" />调整本地策略</button></footer>
     </aside></div>
 
     <div v-if="showPolicyEdit && selected" class="drawer-backdrop" @click.self="showPolicyEdit = false"><aside class="create-key-dialog route-policy-dialog" role="dialog" aria-modal="true" aria-label="调整本地路由策略"><header><div><IconSettings :size="18" /><h2>调整本地策略</h2></div><button class="icon-button" aria-label="关闭本地策略调整" :disabled="isSavingPolicy" @click="showPolicyEdit = false"><IconX :size="20" /></button></header>
