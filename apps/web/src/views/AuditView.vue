@@ -24,12 +24,14 @@ function initialResourceFromLocation(): AuditFilters['resource'] {
     ? value as AuditFilters['resource']
     : 'all'
 }
-type LinkedAuditOrigin = 'alert_action' | 'direct'
-function linkedAuditOriginFromLocation(): LinkedAuditOrigin { return initialQuery?.get('origin') === 'alert_action' ? 'alert_action' : 'direct' }
+type LinkedAuditOrigin = 'alert_action' | 'route_detail' | 'direct'
+function linkedAuditOriginFromLocation(): LinkedAuditOrigin { return initialQuery?.get('origin') === 'alert_action' ? 'alert_action' : linkedRouteFilterFromLocation() ? 'route_detail' : 'direct' }
+function linkedRouteFilterFromLocation() { return initialQuery?.get('resource') === 'route' && Boolean(initialQuery?.get('search')?.trim()) }
 const period = ref<AuditFilters['period']>('7d')
 const search = ref(initialSearchFromLocation())
 const eventId = ref(linkedAuditEventFromLocation())
 const linkedAuditOrigin = ref<LinkedAuditOrigin>(linkedAuditOriginFromLocation())
+const linkedRouteFilter = ref(linkedRouteFilterFromLocation())
 const actor = ref('all')
 const action = ref<AuditFilters['action']>('all')
 const resource = ref<AuditFilters['resource']>(initialResourceFromLocation())
@@ -50,7 +52,9 @@ const updatedAt = computed(() => audit.value ? timeText(audit.value.meta.generat
 const sourceLabel = computed(() => audit.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '演示数据')
 const detailSourceLabel = computed(() => detail.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '演示数据')
 const hasLinkedAuditEvent = computed(() => Boolean(eventId.value))
-const linkedAuditMessage = computed(() => linkedAuditOrigin.value === 'alert_action' ? '正在显示本次告警处置的审计记录' : '正在显示关联审计记录')
+const hasLinkedAuditFilter = computed(() => hasLinkedAuditEvent.value || linkedRouteFilter.value)
+const linkedAuditMessage = computed(() => linkedRouteFilter.value ? `正在显示“${search.value}”的路由审计记录` : linkedAuditOrigin.value === 'alert_action' ? '正在显示本次告警处置的审计记录' : '正在显示关联审计记录')
+const linkedAuditClearLabel = computed(() => linkedRouteFilter.value ? '清除路由审计关联' : '清除告警处置审计关联')
 const summaryCards = computed(() => {
   const value = audit.value?.summary
   return [
@@ -71,8 +75,8 @@ function removeLinkedAuditQuery() {
   params.delete('eventId'); params.delete('origin'); params.delete('search'); params.delete('resource')
   window.history.replaceState({}, '', `${window.location.pathname}${params.size ? `?${params}` : ''}${window.location.hash}`)
 }
-function clearLinkedAuditFilter() { eventId.value = ''; linkedAuditOrigin.value = 'direct'; removeLinkedAuditQuery(); applyFilters() }
-function clearFilters() { period.value = '7d'; search.value = ''; eventId.value = ''; linkedAuditOrigin.value = 'direct'; actor.value = 'all'; action.value = 'all'; resource.value = 'all'; result.value = 'all'; source.value = 'all'; removeLinkedAuditQuery(); applyFilters() }
+function clearLinkedAuditFilter() { eventId.value = ''; linkedAuditOrigin.value = 'direct'; linkedRouteFilter.value = false; removeLinkedAuditQuery(); applyFilters() }
+function clearFilters() { period.value = '7d'; search.value = ''; eventId.value = ''; linkedAuditOrigin.value = 'direct'; linkedRouteFilter.value = false; actor.value = 'all'; action.value = 'all'; resource.value = 'all'; result.value = 'all'; source.value = 'all'; removeLinkedAuditQuery(); applyFilters() }
 function changePage(next: number) { if (!audit.value || next < 1 || next > audit.value.pagination.totalPages) return; page.value = next; void loadData() }
 
 async function loadData() {
@@ -103,7 +107,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
   <div class="dashboard audit-dashboard">
     <section class="page-heading"><div><div class="eyebrow">AUDIT TRAIL</div><h1>审计日志</h1><p>按请求 ID 复核管理员操作、配置变化、权限拒绝与执行结果。</p></div><div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadData"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" disabled title="异步导出、授权和导出审计完成后开放"><IconDownload :size="16" />导出审计</button></div></section>
     <div v-if="audit" class="source-banner"><span>{{ sourceLabel }}</span>{{ audit.meta.notice }}</div>
-    <div v-if="hasLinkedAuditEvent" class="audit-related-filter" role="status"><span><IconFingerprint :size="15" />{{ linkedAuditMessage }}</span><button class="text-button" type="button" aria-label="清除告警处置审计关联" @click="clearLinkedAuditFilter">清除关联</button></div>
+    <div v-if="hasLinkedAuditFilter" class="audit-related-filter" role="status"><span><IconFingerprint :size="15" />{{ linkedAuditMessage }}</span><button class="text-button" type="button" :aria-label="linkedAuditClearLabel" @click="clearLinkedAuditFilter">清除关联</button></div>
     <section class="audit-summary-grid" aria-label="审计汇总"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }}</strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
     <div v-if="!audit && !errorMessage" class="panel data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取审计事件</strong><p>正在加载操作者、资源、请求链路与字段变化摘要…</p></div></div>
