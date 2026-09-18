@@ -24,8 +24,8 @@ function initialResourceFromLocation(): AuditFilters['resource'] {
     ? value as AuditFilters['resource']
     : 'all'
 }
-type LinkedAuditOrigin = 'alert_action' | 'route_detail' | 'direct'
-function linkedAuditOriginFromLocation(): LinkedAuditOrigin { return initialQuery?.get('origin') === 'alert_action' ? 'alert_action' : linkedRouteFilterFromLocation() ? 'route_detail' : 'direct' }
+type LinkedAuditOrigin = 'alert_action' | 'route_detail' | 'usage_request' | 'direct'
+function linkedAuditOriginFromLocation(): LinkedAuditOrigin { return initialQuery?.get('origin') === 'alert_action' ? 'alert_action' : initialQuery?.get('origin') === 'usage_request' && Boolean(initialQuery?.get('search')?.trim()) ? 'usage_request' : linkedRouteFilterFromLocation() ? 'route_detail' : 'direct' }
 function linkedRouteFilterFromLocation() { return ['route', 'channel', 'upstream', 'key', 'person', 'quota'].includes(initialQuery?.get('resource') ?? '') && Boolean(initialQuery?.get('search')?.trim()) }
 const period = ref<AuditFilters['period']>('7d')
 const search = ref(initialSearchFromLocation())
@@ -52,10 +52,10 @@ const updatedAt = computed(() => audit.value ? timeText(audit.value.meta.generat
 const sourceLabel = computed(() => audit.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '演示数据')
 const detailSourceLabel = computed(() => detail.value?.meta.source === 'database' ? 'SQLite · 模拟数据' : '演示数据')
 const hasLinkedAuditEvent = computed(() => Boolean(eventId.value))
-const hasLinkedAuditFilter = computed(() => hasLinkedAuditEvent.value || linkedRouteFilter.value)
+const hasLinkedAuditFilter = computed(() => hasLinkedAuditEvent.value || linkedRouteFilter.value || linkedAuditOrigin.value === 'usage_request')
 const linkedAuditResourceLabel = computed(() => resource.value === 'channel' ? '模型渠道' : resource.value === 'upstream' ? '上游账号' : resource.value === 'key' ? 'Key' : resource.value === 'person' ? '人员' : resource.value === 'quota' ? '额度' : '路由')
-const linkedAuditMessage = computed(() => linkedRouteFilter.value ? `正在显示“${search.value}”的${linkedAuditResourceLabel.value}审计记录` : linkedAuditOrigin.value === 'alert_action' ? '正在显示本次告警处置的审计记录' : '正在显示关联审计记录')
-const linkedAuditClearLabel = computed(() => linkedRouteFilter.value ? `清除${linkedAuditResourceLabel.value}审计关联` : '清除告警处置审计关联')
+const linkedAuditMessage = computed(() => linkedRouteFilter.value ? `正在显示“${search.value}”的${linkedAuditResourceLabel.value}审计记录` : linkedAuditOrigin.value === 'alert_action' ? '正在显示本次告警处置的审计记录' : linkedAuditOrigin.value === 'usage_request' ? `正在显示请求 ID“${search.value}”的审计记录` : '正在显示关联审计记录')
+const linkedAuditClearLabel = computed(() => linkedRouteFilter.value ? `清除${linkedAuditResourceLabel.value}审计关联` : linkedAuditOrigin.value === 'usage_request' ? '清除请求审计关联' : '清除告警处置审计关联')
 const summaryCards = computed(() => {
   const value = audit.value?.summary
   return [

@@ -47,4 +47,12 @@ describe('audit view local alert action handoff', () => {
     host.querySelector<HTMLButtonElement>('[aria-label="清除额度审计关联"]')!.click()
     await vi.waitFor(() => expect(window.location.search).toBe(''))
   })
+
+  it('supports a usage request handoff and labels the request-linked audit filter', async () => {
+    window.history.replaceState({}, '', '/audit?search=req-demo-007&origin=usage_request')
+    app = createApp(AuditView); app.mount(host)
+    await vi.waitFor(() => expect(fetchAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ search: 'req-demo-007', resource: 'all', page: 1 }), expect.any(AbortSignal)))
+    expect(host.textContent).toContain('正在显示请求 ID“req-demo-007”的审计记录')
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="清除请求审计关联"]')).not.toBeNull()
+  })
 })

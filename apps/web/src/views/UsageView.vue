@@ -148,7 +148,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
       <section v-if="detail.item.error" class="drawer-section"><h3>错误摘要</h3><div class="channel-error-detail"><IconAlertTriangle :size="18" /><div><strong>{{ errorText[detail.item.error.category] }}</strong><p>{{ detail.item.error.summary }}</p><small>不返回上游完整错误正文</small></div></div></section>
       <section class="usage-content-boundary"><IconShieldCheck :size="19" /><div><strong>无对话正文</strong><p>{{ detail.content.reason }}</p><small>请求 ID 已{{ detail.route.requestIdPropagated ? '透传' : '未验证' }}；对话审计必须通过独立授权页面访问。</small></div></section>
       <section v-if="detail.conversationAudit.accessible" class="usage-conversation-link"><IconShieldCheck :size="18" /><div><strong>已关联合成对话审计记录</strong><p>{{ detail.conversationAudit.notice }}</p></div><a class="btn btn-white" :href="detail.conversationAudit.href ?? undefined" aria-label="进入关联的对话审计">进入对话审计</a></section>
-      <footer class="drawer-actions"><button class="btn" disabled><IconFileAnalytics :size="16" />导出记录</button></footer>
+      <footer class="drawer-actions"><a class="btn btn-white" :href="`/audit?search=${encodeURIComponent(detail.item.requestId)}&origin=usage_request`" :aria-label="`查看 ${detail.item.requestId} 关联审计`"><IconShieldCheck :size="16" />查看关联审计</a><button class="btn" disabled><IconFileAnalytics :size="16" />导出记录</button></footer>
     </aside></div>
   </div>
 </template>
