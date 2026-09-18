@@ -79,6 +79,17 @@ export const personCreateResponseSchema = z.object({
   operation: z.object({ auditEventId: z.string() }),
 })
 
+export const personBatchCreateBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^people-import-[a-z0-9-]{8,96}$/),
+  items: z.array(personCreateBodySchema).min(1).max(200),
+})
+
+export const personBatchCreateResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), createdAt: z.string().datetime(), notice: z.string(), createdCount: z.number().int().positive() }),
+  people: z.array(z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) })),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
+
 export const personDisableBodySchema = z.object({
   idempotencyKey: z.string().regex(/^person-disable-[a-z0-9-]{8,96}$/),
   reason: z.string().trim().min(8).max(200),
@@ -144,6 +155,8 @@ export type PeopleQuery = z.infer<typeof peopleQuerySchema>
 export type PeopleResponse = z.infer<typeof peopleResponseSchema>
 export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
 export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
+export type PersonBatchCreateBody = z.infer<typeof personBatchCreateBodySchema>
+export type PersonBatchCreateResponse = z.infer<typeof personBatchCreateResponseSchema>
 export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
 export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>

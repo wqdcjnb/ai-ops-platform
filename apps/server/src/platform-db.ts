@@ -1113,6 +1113,31 @@ export class PlatformDatabase {
     return this.listPeople().find((item) => item.id === person.id) ?? null
   }
 
+  createPeopleBatch(people: PlatformPersonCreate[], auditEvent: PlatformAuditEventSeed, now = this.now()) {
+    const previous = this.db.prepare('SELECT summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { summaryJson: string } | undefined
+    if (previous) {
+      const summary = JSON.parse(previous.summaryJson) as { createdPeople?: Array<{ id: string }> }
+      const ids = new Set((summary.createdPeople ?? []).map((item) => item.id))
+      return { people: this.listPeople().filter((item) => ids.has(item.id)), idempotent: true }
+    }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const insert = this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, created_at, updated_at)
+        VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?)`)
+      for (const person of people) {
+        insert.run(person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, timestamp, timestamp)
+      }
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const ids = new Set(people.map((person) => person.id))
+    return { people: this.listPeople().filter((item) => ids.has(item.id)), idempotent: false }
+  }
+
   disablePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonDisableResult | null {
     const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
     const current = () => this.listPeople().find((item) => item.id === personId) ?? null

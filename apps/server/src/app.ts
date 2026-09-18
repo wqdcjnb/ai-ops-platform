@@ -9,7 +9,7 @@ import { createDatabaseOverview, overviewResponseSchema, periodSchema } from './
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
-import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
+import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
 import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
 import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
@@ -293,6 +293,50 @@ export function buildApp(options: BuildAppOptions = {}) {
     } catch (error) {
       if (error instanceof Error && /UNIQUE constraint failed: users\.username/i.test(error.message)) {
         return reply.status(409).send({ error: { code: 'USERNAME_CONFLICT', message: '用户名已存在，请更换后重试', requestId: request.id } })
+      }
+      throw error
+    }
+  })
+
+  app.post('/api/people/batch', {
+    schema: {
+      body: personBatchCreateBodySchema,
+      response: { 201: personBatchCreateResponseSchema, 400: errorResponseSchema, 409: errorResponseSchema },
+    },
+  }, async (request, reply) => {
+    const invalidDepartment = request.body.items.find((item) => !database.departmentExists(item.departmentId))
+    if (invalidDepartment) return reply.status(400).send({ error: { code: 'DEPARTMENT_NOT_FOUND', message: '批量文件包含无效部门，请修正后重试', requestId: request.id } })
+    const batchId = `people-batch-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    const people = request.body.items.map((item) => ({ id: `person-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, username: item.username, displayName: item.displayName, departmentId: item.departmentId, password: item.password }))
+    const auditEventId = `audit-${request.body.idempotencyKey}`
+    try {
+      const result = database.createPeopleBatch(people, {
+        id: auditEventId,
+        actorUserId: request.authUser?.id ?? null,
+        action: 'create',
+        resourceType: 'person',
+        resourceId: batchId,
+        result: 'success',
+        requestId: request.id,
+        summary: {
+          message: `已批量添加本地演示人员 ${people.length} 条；初始密码仅保存摘要。`,
+          resourceName: `批量添加人员（${people.length} 条）`,
+          createdPeople: people.map((person) => ({ id: person.id, username: person.username, displayName: person.displayName, departmentId: person.departmentId })),
+          changes: [
+            { field: 'count', label: '导入人数', before: null, after: String(people.length), sensitive: false },
+            { field: 'password', label: '初始密码', before: null, after: '已设置（不记录值）', sensitive: true },
+          ],
+        },
+      })
+      if (result.people.length !== people.length || result.people.some((person) => !person.departmentId || !person.departmentName)) throw new Error('PERSON_BATCH_CREATE_FAILED')
+      return reply.status(201).send({
+        meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次批量导入结果；未重复创建人员。' : '批量人员已写入本地 SQLite；职位、用途和真实 New API 映射将在后续接入', createdCount: result.people.length },
+        people: result.people.map((person) => ({ id: person.id, username: person.username, displayName: person.displayName, department: { id: person.departmentId as string, name: person.departmentName as string } })),
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      })
+    } catch (error) {
+      if (error instanceof Error && /UNIQUE constraint failed: users\.username/i.test(error.message)) {
+        return reply.status(409).send({ error: { code: 'BATCH_USERNAME_CONFLICT', message: '批量文件中的登录用户名已存在，整批未写入', requestId: request.id } })
       }
       throw error
     }

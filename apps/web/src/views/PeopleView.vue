@@ -19,7 +19,7 @@ import {
   IconUserPlus,
   IconUsers,
 } from '@tabler/icons-vue'
-import { createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
+import { createPeopleBatch, createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonBatchCreateResponse, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 import { preflightPeopleImport, type PeopleImportRow } from '../people-import'
 
@@ -42,6 +42,8 @@ const importFileName = ref('')
 const importError = ref('')
 const importRows = ref<PeopleImportRow[]>([])
 const importInput = ref<HTMLInputElement | null>(null)
+const batchResult = ref<PersonBatchCreateResponse | null>(null)
+const isImporting = ref(false)
 let activeRequest: AbortController | null = null
 
 const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '离职待回收' }
@@ -57,6 +59,7 @@ const updatedAt = computed(() => {
   if (!people.value) return '等待数据'
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(people.value.meta.generatedAt))
 })
+const canImport = computed(() => importRows.value.length > 0 && !importRows.value.some((row) => row.error) && !importError.value && !isImporting.value)
 
 const summaryCards = computed(() => {
   const value = people.value?.summary
@@ -140,6 +143,7 @@ function openImport() {
   importFileName.value = ''
   importError.value = ''
   importRows.value = []
+  batchResult.value = null
   showImport.value = true
 }
 
@@ -148,6 +152,7 @@ function closeImport() {
   importFileName.value = ''
   importError.value = ''
   importRows.value = []
+  batchResult.value = null
 }
 
 function downloadImportTemplate() {
@@ -179,7 +184,27 @@ async function handleImportFile(event: Event) {
   importFileName.value = file.name
   const result = preflightPeopleImport(await file.text(), people.value?.departments ?? [])
   importRows.value = result.rows
-  if (result.truncated) importError.value = '文件超过 200 行，仅预检前 200 行；批量写入暂未开放。'
+  if (result.truncated) importError.value = '文件超过 200 行，仅预检前 200 行，请拆分文件后重试。'
+}
+
+async function submitImport() {
+  if (!canImport.value) return
+  isImporting.value = true
+  importError.value = ''
+  try {
+    batchResult.value = await createPeopleBatch({
+      idempotencyKey: `people-import-${crypto.randomUUID()}`,
+      items: importRows.value.map(({ username, displayName, departmentId, password }) => ({ username, displayName, departmentId, password })),
+    })
+    importRows.value = []
+    page.value = 1
+    await loadPeople()
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    importError.value = `${error instanceof Error ? error.message : '批量导入人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally {
+    isImporting.value = false
+  }
 }
 
 async function submitCreate() {
@@ -309,8 +334,13 @@ onBeforeUnmount(() => activeRequest?.abort())
     <div v-if="showImport" class="drawer-backdrop" @click.self="closeImport">
       <aside class="create-person-dialog people-import-dialog" role="dialog" aria-modal="true" aria-label="批量导入人员">
         <header><div><span class="source-tag demo">CSV</span><h2>批量导入人员</h2></div><button class="icon-button" aria-label="关闭批量导入" @click="closeImport">×</button></header>
+        <template v-if="batchResult">
+          <section class="created-key-success"><IconUserCheck :size="22" /><strong>已导入 {{ batchResult.meta.createdCount }} 名人员</strong><p>{{ batchResult.meta.notice }}</p><small>批次幂等号：{{ batchResult.operation.idempotencyKey }} · 初始密码仅保存摘要</small></section>
+          <footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(batchResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${batchResult.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" type="button" @click="closeImport">完成</button></footer>
+        </template>
+        <template v-else>
         <section class="people-import-content">
-          <p class="create-person-note">下载模板后填写人员信息。文件只允许姓名、登录名、部门和初始密码，不接受完整 Key；当前仅做本地预检，不会写入数据库。</p>
+          <p class="create-person-note">下载模板后填写人员信息。文件只允许姓名、登录名、部门和初始密码，不接受完整 Key；预检通过后会一次性写入本地 SQLite，不会调用 New API。</p>
           <div class="people-import-actions"><button class="btn btn-white" type="button" @click="downloadImportTemplate"><IconDownload :size="15" />下载 CSV 模板</button><label class="btn btn-white" for="people-import-file"><IconUpload :size="15" />选择 CSV 文件</label><input id="people-import-file" ref="importInput" class="visually-hidden" type="file" accept=".csv,text/csv" @change="handleImportFile" /></div>
           <div v-if="importFileName" class="people-import-file"><IconFileText :size="16" /><span>{{ importFileName }}</span><strong>{{ importRows.length }} 行已预检</strong></div>
           <div v-if="importError" class="create-person-error"><IconAlertTriangle :size="16" />{{ importError }}</div>
@@ -319,7 +349,8 @@ onBeforeUnmount(() => activeRequest?.abort())
           </div>
           <div v-else class="people-import-empty"><IconUpload :size="24" /><strong>还没有选择文件</strong><span>先下载模板或选择已有 CSV 文件。</span></div>
         </section>
-        <footer class="create-key-dialog-footer"><button class="btn btn-white" type="button" @click="closeImport">关闭</button><button class="btn" type="button" disabled title="批量事务写入和审计接口完成后开放">确认导入</button></footer>
+        <footer class="create-key-dialog-footer"><button class="btn btn-white" type="button" @click="closeImport">关闭</button><button class="btn create-key" type="button" :disabled="!canImport" @click="submitImport">{{ isImporting ? '导入中…' : '确认导入' }}</button></footer>
+        </template>
       </aside>
     </div>
   </div>

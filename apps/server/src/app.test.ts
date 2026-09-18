@@ -359,6 +359,41 @@ describe('BFF', () => {
     expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
   })
 
+  it('imports people atomically, supports idempotent replay, and rolls back username conflicts', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const payload = {
+      idempotencyKey: 'people-import-1a2b3c4d',
+      items: [
+        { username: 'batch-one', displayName: '批量一号', departmentId: 'content', password: 'batch-pass-1' },
+        { username: 'batch-two', displayName: '批量二号', departmentId: 'ads', password: 'batch-pass-2' },
+      ],
+    }
+    const created = await app.inject({ method: 'POST', url: '/api/people/batch', headers: { cookie, 'x-csrf-token': csrfToken }, payload })
+    expect(created.statusCode).toBe(201)
+    expect(created.json()).toMatchObject({ meta: { createdCount: 2 }, operation: { idempotencyKey: payload.idempotencyKey, idempotent: false } })
+    expect(JSON.stringify(created.json())).not.toContain('batch-pass-1')
+    expect(JSON.stringify(created.json())).not.toContain('batch-pass-2')
+
+    const replay = await app.inject({ method: 'POST', url: '/api/people/batch', headers: { cookie, 'x-csrf-token': csrfToken }, payload })
+    expect(replay.statusCode).toBe(201)
+    expect(replay.json()).toMatchObject({ meta: { createdCount: 2 }, operation: { idempotent: true, auditEventId: created.json().operation.auditEventId } })
+
+    const audit = await app.inject({ method: 'GET', url: `/api/audit-events?period=7d&eventId=${created.json().operation.auditEventId}`, headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toHaveLength(1)
+    expect(audit.json().items[0]).toMatchObject({ resource: { type: 'person', name: '批量添加人员（2 条）' }, changes: expect.arrayContaining([expect.objectContaining({ field: 'password', sensitive: true })]) })
+
+    const conflict = await app.inject({ method: 'POST', url: '/api/people/batch', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { idempotencyKey: 'people-import-5e6f7g8h', items: [{ username: 'batch-three', displayName: '批量三号', departmentId: 'content', password: 'batch-pass-3' }, { username: 'batch-one', displayName: '冲突人员', departmentId: 'content', password: 'batch-pass-4' }] } })
+    expect(conflict.statusCode).toBe(409)
+    expect(conflict.json().error.code).toBe('BATCH_USERNAME_CONFLICT')
+    const rolledBack = await app.inject({ method: 'GET', url: '/api/people?search=batch-three', headers: { cookie } })
+    expect(rolledBack.json().items).toHaveLength(0)
+  })
+
   it('disables a local person and atomically revokes their active Keys without retaining the reason', async () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)

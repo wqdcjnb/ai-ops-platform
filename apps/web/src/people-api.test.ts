@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { peopleFilterSchema, peopleResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema } from './people-api'
+import { peopleFilterSchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema } from './people-api'
 
 describe('people API contracts', () => {
   it('rejects unsafe pagination values', () => {
@@ -35,5 +35,11 @@ describe('people API contracts', () => {
     expect(personDisableBodySchema.safeParse({ idempotencyKey: 'person-disable-1a2b3c4d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true }).success).toBe(true)
     expect(personDisableBodySchema.safeParse({ idempotencyKey: 'short', reason: '太短', acknowledgeImpact: false }).success).toBe(false)
     expect(personDisableResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地演示' }, person: { id: 'person-lin', name: '林筱雨', status: 'disabled' }, keysDisabled: 2, operation: { idempotencyKey: 'person-disable-1a2b3c4d', idempotent: false, auditEventId: 'audit-person-disable-1a2b3c4d' } }).success).toBe(true)
+  })
+
+  it('requires a bounded idempotency key for batch person creation', () => {
+    expect(personBatchCreateBodySchema.safeParse({ idempotencyKey: 'people-import-1a2b3c4d', items: [{ username: 'new.user', displayName: '王小明', departmentId: 'content', password: 'local-pass-1' }] }).success).toBe(true)
+    expect(personBatchCreateBodySchema.safeParse({ idempotencyKey: 'batch', items: [] }).success).toBe(false)
+    expect(personBatchCreateResponseSchema.safeParse({ meta: { source: 'database', createdAt: '2026-09-18T10:00:00.000Z', notice: '本地演示', createdCount: 1 }, people: [{ id: 'person-demo', username: 'new.user', displayName: '王小明', department: { id: 'content', name: '内容运营' } }], operation: { idempotencyKey: 'people-import-1a2b3c4d', idempotent: false, auditEventId: 'audit-people-import-1a2b3c4d' } }).success).toBe(true)
   })
 })
