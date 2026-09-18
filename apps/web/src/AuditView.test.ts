@@ -37,4 +37,14 @@ describe('audit view local alert action handoff', () => {
     await vi.waitFor(() => expect(host.querySelector('[aria-label="查看 alert-error-global 关联告警"]')).not.toBeNull())
     expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 alert-error-global 关联告警"]')?.getAttribute('href')).toBe('/alerts?alertId=alert-error-global')
   })
+
+  it('supports a quota detail handoff and can clear the linked scope', async () => {
+    window.history.replaceState({}, '', '/audit?resource=quota&search=内容运营%20%C2%B7%20月度软目标')
+    app = createApp(AuditView); app.mount(host)
+    await vi.waitFor(() => expect(fetchAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ resource: 'quota', search: '内容运营 · 月度软目标', page: 1 }), expect.any(AbortSignal)))
+    expect(host.textContent).toContain('正在显示“内容运营 · 月度软目标”的额度审计记录')
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="清除额度审计关联"]')).not.toBeNull()
+    host.querySelector<HTMLButtonElement>('[aria-label="清除额度审计关联"]')!.click()
+    await vi.waitFor(() => expect(window.location.search).toBe(''))
+  })
 })
