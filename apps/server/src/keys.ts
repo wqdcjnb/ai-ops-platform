@@ -3,6 +3,8 @@ import type { NewApiStatus } from './new-api-status.js'
 import { isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
+export const KEY_MODEL_OPTIONS = ['ecommerce-general', 'ecommerce-copy', 'ecommerce-analysis', 'ecommerce-translate', 'ecommerce-service', 'ecommerce-image-check', 'ecommerce-pro-lab'] as const
+
 export const keysQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
   owner: z.string().trim().max(64).default('all'),
@@ -20,6 +22,7 @@ const keyListItemSchema = z.object({
   masked: z.string(),
   owner: z.object({ id: z.string(), name: z.string(), department: z.string(), initials: z.string() }),
   purpose: z.string(),
+  model: z.string(),
   models: z.array(z.string()),
   status: z.enum(['active', 'disabled']),
   expiryState: z.enum(['normal', 'expiring', 'expired']),
@@ -62,14 +65,14 @@ export const keyDetailResponseSchema = z.object({
 export const keyCreateBodySchema = z.object({
   ownerId: z.string().regex(/^person-[a-z0-9-]+$/).max(96),
   purpose: z.string().trim().min(2).max(40),
-  models: z.array(z.string().trim().min(2).max(64)).min(1).max(8),
+  model: z.string().trim().refine((value) => (KEY_MODEL_OPTIONS as readonly string[]).includes(value), '请选择有效的业务模型别名'),
   expiresInDays: z.coerce.number().int().min(1).max(365),
   deviceNote: z.string().trim().max(120).default('本地演示设备'),
 })
 
 export const keyCreateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), createdAt: z.string().datetime(), notice: z.string() }),
-  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string().datetime() }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), model: z.string(), models: z.array(z.string()), expiresAt: z.string().datetime() }),
   secret: z.string().min(20),
   operation: z.object({ auditEventId: z.string() }),
 })
@@ -96,7 +99,7 @@ export const keyRotateBodySchema = z.object({
 export const keyRotateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string(), secretAvailable: z.boolean() }),
   oldKey: z.object({ id: z.string(), masked: z.string(), status: z.literal('disabled') }),
-  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string().datetime() }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), model: z.string(), models: z.array(z.string()), expiresAt: z.string().datetime() }),
   secret: z.string().min(20).nullable(),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
@@ -129,13 +132,13 @@ interface KeySeed {
 }
 
 const demoKeys: KeySeed[] = [
-  { id: 'key-lin-1', suffix: '7F2A', ownerId: 'person-lin', ownerName: '林筱雨', initials: 'LY', department: '内容运营', purpose: '商品文案', models: ['ecommerce-copy', 'ecommerce-general'], status: 'active', expiresInDays: 120, lastUsedMinutes: 6, requests: 1684, points: 542, deviceNote: 'Codex Desktop · 内容工作站' },
+  { id: 'key-lin-1', suffix: '7F2A', ownerId: 'person-lin', ownerName: '林筱雨', initials: 'LY', department: '内容运营', purpose: '商品文案', models: ['ecommerce-copy'], status: 'active', expiresInDays: 120, lastUsedMinutes: 6, requests: 1684, points: 542, deviceNote: 'Codex Desktop · 内容工作站' },
   { id: 'key-lin-2', suffix: '3C91', ownerId: 'person-lin', ownerName: '林筱雨', initials: 'LY', department: '内容运营', purpose: '临时项目', models: ['ecommerce-copy'], status: 'active', expiresInDays: 85, lastUsedMinutes: 42, requests: 526, points: 200, deviceNote: 'WorkBuddy · 选品项目' },
-  { id: 'key-zhou-1', suffix: '8B14', ownerId: 'person-zhou', ownerName: '周明远', initials: 'ZM', department: '广告投放', purpose: '策略分析', models: ['ecommerce-analysis', 'ecommerce-general'], status: 'active', expiresInDays: 26, lastUsedMinutes: 18, requests: 976, points: 681, deviceNote: 'Codex Desktop · 投放工作站' },
-  { id: 'key-chen-1', suffix: 'C620', ownerId: 'person-chen', ownerName: '陈安琪', initials: 'CA', department: '跨境运营', purpose: '多语翻译', models: ['ecommerce-translate', 'ecommerce-general'], status: 'active', expiresInDays: 103, lastUsedMinutes: 33, requests: 1720, points: 412, deviceNote: 'WorkBuddy · 跨境工作站' },
+  { id: 'key-zhou-1', suffix: '8B14', ownerId: 'person-zhou', ownerName: '周明远', initials: 'ZM', department: '广告投放', purpose: '策略分析', models: ['ecommerce-analysis'], status: 'active', expiresInDays: 26, lastUsedMinutes: 18, requests: 976, points: 681, deviceNote: 'Codex Desktop · 投放工作站' },
+  { id: 'key-chen-1', suffix: 'C620', ownerId: 'person-chen', ownerName: '陈安琪', initials: 'CA', department: '跨境运营', purpose: '多语翻译', models: ['ecommerce-translate'], status: 'active', expiresInDays: 103, lastUsedMinutes: 33, requests: 1720, points: 412, deviceNote: 'WorkBuddy · 跨境工作站' },
   { id: 'key-chen-2', suffix: 'E15D', ownerId: 'person-chen', ownerName: '陈安琪', initials: 'CA', department: '跨境运营', purpose: '临时项目', models: ['ecommerce-translate'], status: 'active', expiresInDays: 14, lastUsedMinutes: 165, requests: 490, points: 131, deviceNote: 'Codex Desktop · 欧洲站项目' },
-  { id: 'key-xu-1', suffix: '92AC', ownerId: 'person-xu', ownerName: '许嘉禾', initials: 'XJ', department: '客户服务', purpose: '回复建议', models: ['ecommerce-service', 'ecommerce-general'], status: 'active', expiresInDays: 66, lastUsedMinutes: 51, requests: 2538, points: 438, deviceNote: 'WorkBuddy · 客服主管席' },
-  { id: 'key-tang-1', suffix: '41D8', ownerId: 'person-tang', ownerName: '唐语宁', initials: 'TY', department: '商品运营', purpose: '图片检查', models: ['ecommerce-copy', 'ecommerce-general'], status: 'active', expiresInDays: 44, lastUsedMinutes: 77, requests: 744, points: 361, deviceNote: 'Codex Desktop · 商品工作站' },
+  { id: 'key-xu-1', suffix: '92AC', ownerId: 'person-xu', ownerName: '许嘉禾', initials: 'XJ', department: '客户服务', purpose: '回复建议', models: ['ecommerce-service'], status: 'active', expiresInDays: 66, lastUsedMinutes: 51, requests: 2538, points: 438, deviceNote: 'WorkBuddy · 客服主管席' },
+  { id: 'key-tang-1', suffix: '41D8', ownerId: 'person-tang', ownerName: '唐语宁', initials: 'TY', department: '商品运营', purpose: '图片检查', models: ['ecommerce-copy'], status: 'active', expiresInDays: 44, lastUsedMinutes: 77, requests: 744, points: 361, deviceNote: 'Codex Desktop · 商品工作站' },
   { id: 'key-he-1', suffix: 'B73E', ownerId: 'person-he', ownerName: '何沐晨', initials: 'HM', department: '内容运营', purpose: '标题优化', models: ['ecommerce-copy'], status: 'active', expiresInDays: 92, lastUsedMinutes: 125, requests: 680, points: 286, deviceNote: 'WorkBuddy · 内容编辑席' },
   { id: 'key-luo-1', suffix: '5A09', ownerId: 'person-luo', ownerName: '罗一帆', initials: 'LF', department: '广告投放', purpose: '素材分析', models: ['ecommerce-analysis'], status: 'active', expiresInDays: 9, lastUsedMinutes: 210, requests: 521, points: 152, deviceNote: 'Codex Desktop · 素材分析' },
   { id: 'key-luo-2', suffix: 'D04C', ownerId: 'person-luo', ownerName: '罗一帆', initials: 'LF', department: '广告投放', purpose: '临时项目', models: ['ecommerce-pro-lab'], status: 'disabled', expiresInDays: -2, lastUsedMinutes: 1860, requests: 146, points: 73, deviceNote: '隔离实验设备 · 已停用' },
@@ -174,6 +177,7 @@ function mapKey(seed: KeySeed, now: Date): z.infer<typeof keyListItemSchema> {
     masked: `sk-ops••••••${seed.suffix}`,
     owner: { id: seed.ownerId, name: seed.ownerName, department: seed.department, initials: seed.initials },
     purpose: seed.purpose,
+    model: seed.models[0] ?? 'ecommerce-general',
     models: seed.models,
     status: seed.status,
     expiryState: seed.expiresInDays < 0 ? 'expired' : seed.expiresInDays <= 30 ? 'expiring' : 'normal',
@@ -207,7 +211,7 @@ export function createDemoKeys(query: KeysQuery, newApi: NewApiStatus, now = new
     options: {
       owners: [...uniqueOwners.values()],
       purposes: [...new Set(items.map((key) => key.purpose))],
-      models: [...new Set(items.flatMap((key) => key.models))],
+      models: [...new Set([...KEY_MODEL_OPTIONS, ...items.flatMap((key) => key.models)])],
     },
     connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '员工只使用平台地址和个人 Key；不得接触管理凭据或上游密钥。' },
     items: filtered.slice(start, start + query.pageSize),
@@ -232,7 +236,7 @@ export function createDemoKeyDetail(id: string, now = new Date()): KeyDetailResp
     connection: {
       baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL),
       note: '复制非敏感配置后，由员工自行填写仅属于本人的 Key。',
-      instructions: ['Base URL 指向统一 New API 入口', '模型填写已授权的业务别名', 'API Key 仅在员工自己的客户端中保存', '认证失败时先确认 Key 状态与到期时间'],
+      instructions: ['Base URL 指向统一 New API 入口', '模型填写该 Key 的绑定业务别名', 'API Key 仅在员工自己的客户端中保存', '认证失败时先确认 Key 状态、绑定模型与到期时间'],
     },
   }
 }
@@ -264,7 +268,8 @@ export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery,
       masked: row.maskedValue,
       owner: { id: row.ownerUserId, name: row.ownerName, department: row.departmentName ?? '待分配部门', initials: existing?.owner.initials ?? row.ownerName.slice(-2) },
       purpose: row.purpose,
-      models: row.models.length ? row.models : existing?.models ?? ['ecommerce-general'],
+      model: row.models[0] ?? existing?.model ?? 'ecommerce-general',
+      models: [row.models[0] ?? existing?.model ?? 'ecommerce-general'],
       status,
       expiryState: keyExpiryState(expiresAt, now),
       expiresAt,
@@ -284,12 +289,18 @@ export function createDatabaseKeys(database: PlatformDatabase, query: KeysQuery,
     const matchesStatus = query.status === 'all' || (query.status === 'expiring' ? key.expiryState === 'expiring' : key.status === query.status)
     return matchesSearch && matchesOwner && matchesPurpose && matchesModel && matchesStatus
   })
-  const owners = [...new Map(visibleKeys.map((key) => [key.owner.id, { id: key.owner.id, name: key.owner.name }])).values()]
+  const owners = database.listPeople()
+    .filter((person) => person.status === 'active' && isDepartmentVisible(scope, person.departmentId))
+    .map((person) => ({ id: person.id, name: person.displayName }))
   const start = (query.page - 1) * query.pageSize
   return {
     meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: `${databaseNotice(newApi)}${scopeNotice(scope)}` },
     summary: { total: visibleKeys.length, active: visibleKeys.filter((key) => key.status === 'active').length, disabled: visibleKeys.filter((key) => key.status === 'disabled').length, expiring: visibleKeys.filter((key) => key.expiryState === 'expiring').length },
-    options: { owners, purposes: [...new Set(visibleKeys.map((key) => key.purpose))], models: [...new Set(visibleKeys.flatMap((key) => key.models))] },
+    options: {
+      owners,
+      purposes: [...new Set(visibleKeys.map((key) => key.purpose))],
+      models: [...new Set([...KEY_MODEL_OPTIONS, ...visibleKeys.flatMap((key) => key.models)])],
+    },
     connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '员工只使用平台地址和个人 Key；不得接触管理凭据或上游密钥。' },
     items: filtered.slice(start, start + query.pageSize), page: query.page, pageSize: query.pageSize, total: filtered.length,
   }
@@ -302,6 +313,6 @@ export function createDatabaseKeyDetail(database: PlatformDatabase, id: string, 
   return {
     meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai' },
     key: { ...key, createdAt: row?.createdAt ?? now.toISOString(), deviceNote: '本地演示设备', allowedIps: ['未限制'], limits: { rpm: 60, tpm: 120_000, concurrent: 4 } },
-    connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '复制非敏感配置后，由员工自行填写仅属于本人的 Key。', instructions: ['Base URL 指向统一 New API 入口', '模型填写已授权的业务别名', 'API Key 仅在员工自己的客户端中保存', '认证失败时先确认 Key 状态与到期时间'] },
+    connection: { baseUrl: safeClientBaseUrl(process.env.NEW_API_BASE_URL), note: '复制非敏感配置后，由员工自行填写仅属于本人的 Key。', instructions: ['Base URL 指向统一 New API 入口', '模型填写该 Key 的绑定业务别名', 'API Key 仅在员工自己的客户端中保存', '认证失败时先确认 Key 状态、绑定模型与到期时间'] },
   }
 }

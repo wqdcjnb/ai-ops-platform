@@ -43,7 +43,7 @@ export const usageItemSchema = z.object({
   conversationContentAvailable: z.literal(false),
 })
 
-const metaSchema = z.object({ source: metadataSourceSchema, simulated: z.literal(true), generatedAt: z.string().datetime(), notice: z.string() })
+const metaSchema = z.object({ source: metadataSourceSchema, simulated: z.boolean(), generatedAt: z.string().datetime(), notice: z.string() })
 
 export const usageResponseSchema = z.object({
   meta: metaSchema.extend({ period: z.enum(['today', '7d', '30d']) }),
@@ -99,9 +99,11 @@ function toItem(record: UsageRecord): UsageItem {
   }
 }
 
-function noticeFor(newApi: NewApiStatus) {
+function noticeFor(newApi: NewApiStatus, simulated: boolean) {
   const connection = newApi.state === 'ready' ? 'New API 管理连接已验证' : newApi.state === 'reachable' ? 'New API 可达，管理认证待验证' : 'New API 当前不可用'
-  return `当前读取 SQLite 中可重复生成的模拟调用元数据；${connection}，但真实调用日志、账单与对话正文均未接入。`
+  return simulated
+    ? `当前读取 SQLite 中可重复生成的模拟调用元数据；${connection}，真实网关调用会在数据库 Key 请求完成后追加。`
+    : `当前读取 SQLite 中的网关调用元数据；${connection}，仅保留请求、Token、耗时、成本和状态，不保存对话正文。`
 }
 
 function optionsFor(all: UsageItem[]) {
@@ -118,6 +120,7 @@ function optionsFor(all: UsageItem[]) {
 
 export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): UsageResponse {
   const all = database.listUsageRequests().map(toItem).filter((item) => isDepartmentVisible(scope, item.person.department.id))
+  const simulated = all.every((item) => item.requestId.startsWith('req-demo-'))
   const cutoff = now.getTime() - periodMinutes(query.period) * 60_000
   const search = query.search.toLocaleLowerCase('zh-CN')
   const filtered = all.filter((item) => {
@@ -137,7 +140,7 @@ export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuer
   const start = (query.page - 1) * query.pageSize
   const costs = (type: UsageItem['cost']['type']) => round(filtered.filter((item) => item.cost.type === type).reduce((sum, item) => sum + item.cost.amountUsd, 0), 5)
   return usageResponseSchema.parse({
-    meta: { source: 'database', simulated: true, generatedAt: now.toISOString(), period: query.period, notice: `${noticeFor(newApi)}${scopeNotice(scope)}` },
+    meta: { source: 'database', simulated, generatedAt: now.toISOString(), period: query.period, notice: `${noticeFor(newApi, simulated)}${scopeNotice(scope)}` },
     summary: {
       requests: filtered.length,
       tokens: filtered.reduce((sum, item) => sum + item.tokens.total, 0),
@@ -155,6 +158,7 @@ export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuer
 export function createDatabaseUsageDetail(database: PlatformDatabase, requestId: string, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }, canAccessConversationAudit = false): UsageDetailResponse | null {
   const record = database.listUsageRequests().find((item) => item.requestId === requestId)
   if (!record || !isDepartmentVisible(scope, record.departmentId)) return null
+  const simulated = record.requestId.startsWith('req-demo-')
   const conversationLink = canAccessConversationAudit ? database.getUsageConversationLink(record.requestId) : null
   const conversationAudit = !canAccessConversationAudit
     ? { accessible: false, recordId: null, href: null, source: 'not_authorized' as const, notice: '当前角色没有对话审计权限，因此不返回可能关联的对话审计记录。' }
@@ -162,7 +166,7 @@ export function createDatabaseUsageDetail(database: PlatformDatabase, requestId:
       ? { accessible: true, recordId: conversationLink.recordId, href: `/conversation-audit?recordId=${encodeURIComponent(conversationLink.recordId)}`, source: conversationLink.linkSource, notice: '已关联 SQLite 中明确保存的合成对话审计映射；不代表真实网关链路。' }
       : { accessible: false, recordId: null, href: null, source: 'unavailable' as const, notice: '当前模拟调用未关联对话审计记录。' }
   return usageDetailResponseSchema.parse({
-    meta: { source: 'database', simulated: true, generatedAt: now.toISOString(), notice: `${noticeFor(newApi)}${scopeNotice(scope)}` },
+    meta: { source: 'database', simulated, generatedAt: now.toISOString(), notice: `${noticeFor(newApi, simulated)}${scopeNotice(scope)}` },
     item: toItem(record),
     route: { alias: record.routeAlias, retryCount: record.retryCount, requestIdPropagated: Boolean(record.requestIdPropagated) },
     client: { name: record.clientName, mode: record.clientMode },

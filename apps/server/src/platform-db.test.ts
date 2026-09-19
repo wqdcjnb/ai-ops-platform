@@ -1,13 +1,27 @@
 import { describe, expect, it } from 'vitest'
 import { createPlatformDatabase, databaseStatusSchema, seedDemoData } from './platform-db.js'
+import { createDatabasePeople } from './people.js'
 
 describe('platform database migrations', () => {
+  it('keeps an empty organization catalog until a department name is entered', () => {
+    const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
+    expect(database.getOrganizationSummary()).toMatchObject({ company: '未配置组织', departments: 0, people: 0 })
+    const customId = database.ensureDepartment('研发实验室')
+    expect(customId).toMatch(/^department-[a-f0-9]{16}$/)
+    expect(database.findActiveDepartmentByName('研发实验室')).toEqual({ id: customId, name: '研发实验室' })
+    expect(database.getOrganizationSummary()).toMatchObject({ company: '新知科技', departments: 1, people: 0 })
+    const response = createDatabasePeople(database, { search: '', department: 'all', status: 'all', goal: 'all', page: 1, pageSize: 20 }, { state: 'offline', authConfigured: false, checkedAt: '2026-09-17T10:00:00.000Z' })
+    expect(response).toMatchObject({ summary: { total: 0, departments: 0 }, items: [] })
+    expect(response.departments).toEqual([])
+    database.close()
+  })
+
   it('creates the core schema in an isolated in-memory database', () => {
     const database = createPlatformDatabase({ filename: ':memory:', now: () => new Date('2026-09-17T10:00:00.000Z') })
-    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 23, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
+    expect(databaseStatusSchema.parse(database.status())).toMatchObject({ state: 'ready', migrationVersion: 24, checkedAt: '2026-09-17T10:00:00.000Z', sessionCleanup: { revokedRetentionHours: 24, lastRun: null }, auditChain: { algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, eventCount: 0, firstInvalidEventId: null } })
     expect(database.status().tables).toEqual(expect.arrayContaining(['departments', 'users', 'api_keys', 'quota_policies', 'temporary_quota_requests', 'quota_reservations', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'alert_rules', 'alert_events', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'business_rule_versions', 'system_feature_flags', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     database.migrate()
-    expect(database.status().migrationVersion).toBe(23)
+    expect(database.status().migrationVersion).toBe(24)
     database.close()
   })
 
@@ -77,7 +91,7 @@ describe('platform database migrations', () => {
     expect(database.listConversationAccessEvents()[0]).not.toHaveProperty('reason')
     expect(database.listConversationAccessEvents('conv-audit-copy-01')).toHaveLength(1)
     expect(database.listConversationAccessEvents('conv-audit-support-02')).toEqual([])
-    expect(database.status().migrationVersion).toBe(23)
+    expect(database.status().migrationVersion).toBe(24)
     database.close()
   })
 

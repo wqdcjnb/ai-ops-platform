@@ -14,12 +14,12 @@ import {
   IconClock,
   IconCoins,
   IconCommand,
-  IconFingerprint,
   IconKey,
   IconRefresh,
 } from '@tabler/icons-vue'
 import { fetchCurrentUser, type AuthUser } from '../auth-api'
 import { fetchOverview, OverviewApiError, type OverviewResponse, type Period } from '../overview-api'
+import { surnameInitial } from '../modules/people/person-display'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -65,17 +65,13 @@ const lastUpdated = computed(() => {
   const time = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(overview.value.meta.generatedAt))
   return `今天 ${time}`
 })
-const monthUsagePercent = computed(() => {
-  const metrics = overview.value?.metrics
-  return metrics ? Math.round(metrics.monthPoints / metrics.monthPointLimit * 100) : 0
-})
 const kpis = computed(() => {
   const metrics = overview.value?.metrics
   if (!metrics) return []
   return [
     { label: '今日请求', value: metrics.todayRequests.toLocaleString('zh-CN'), delta: signed(metrics.todayRequestDeltaPercent, '%'), hint: '较昨日同期', icon: IconActivityHeartbeat, tone: 'teal' },
     { label: '今日 Token', value: compact(metrics.inputTokens + metrics.outputTokens), delta: signed(metrics.tokenDeltaPercent, '%'), hint: `输入 ${compact(metrics.inputTokens)} · 输出 ${compact(metrics.outputTokens)}`, icon: IconCommand, tone: 'blue' },
-    { label: '本月成本点数', value: metrics.monthPoints.toLocaleString('zh-CN'), delta: `${monthUsagePercent.value}%`, hint: `目标 ${metrics.monthPointLimit.toLocaleString('zh-CN')} 点`, icon: IconCoins, tone: 'amber' },
+    { label: '本月成本点数', value: metrics.monthPoints.toLocaleString('zh-CN'), delta: '内部计量', hint: '仅用于本地用量统计', icon: IconCoins, tone: 'amber' },
     { label: '调用成功率', value: `${metrics.successRate}%`, delta: signed(metrics.successDeltaPercent, '%'), hint: '过去 24 小时', icon: IconCircleCheckFilled, tone: 'green' },
     { label: 'P95 延迟', value: seconds(metrics.p95LatencyMs), delta: signed(metrics.p95LatencyDeltaMs / 1000, 's'), hint: `首 Token ${seconds(metrics.firstTokenLatencyMs)}`, icon: IconClock, tone: 'violet' },
   ]
@@ -186,7 +182,6 @@ onBeforeUnmount(() => {
           <div class="metric-top"><span class="metric-label">{{ kpi.label }}</span><span class="metric-icon" :class="`tone-${kpi.tone}`"><component :is="kpi.icon" :size="20" /></span></div>
           <strong class="metric-value">{{ kpi.value }}</strong>
           <div class="metric-foot"><span :class="{ positive: kpi.delta.startsWith('+') || kpi.delta.startsWith('-') }">{{ kpi.delta }}</span> {{ kpi.hint }}</div>
-          <div v-if="kpi.label === '本月成本点数'" class="metric-progress"><i :style="{ width: `${monthUsagePercent}%` }" /></div>
         </article>
       </section>
 
@@ -212,22 +207,20 @@ onBeforeUnmount(() => {
               <RouterLink class="row-action enabled" :to="`/alerts?search=${encodeURIComponent(alert.title)}`" :aria-label="`${alert.action}：前往告警中心`" :title="`${alert.action}：前往告警中心`"><IconChevronRight :size="18" /></RouterLink>
             </div>
           </div>
-          <div class="soft-limit-note"><IconFingerprint :size="18" /><span><strong>试点阶段为软额度</strong>达到 100% 仅产生提醒，当前不会阻断请求。</span></div>
         </article>
       </section>
 
       <section class="content-grid detail-grid">
         <article class="panel people-panel">
-          <div class="panel-header"><div><h2>人员消耗排行</h2><p>按本月成本点数排序；未配置个人目标时不估算比例</p></div><RouterLink class="text-button" to="/people">人员与部门 <IconChevronRight :size="16" /></RouterLink></div>
+          <div class="panel-header"><div><h2>人员消耗排行</h2><p>按本月成本点数排序；仅展示本地用量统计</p></div><RouterLink class="text-button" to="/people">人员与部门 <IconChevronRight :size="16" /></RouterLink></div>
           <div class="table-responsive">
             <table class="data-table">
-              <thead><tr><th>人员</th><th>主要用途</th><th class="number-cell">请求数</th><th>个人目标</th><th class="number-cell">成本点数</th></tr></thead>
+              <thead><tr><th>人员</th><th>Key 用途</th><th class="number-cell">请求数</th><th class="number-cell">成本点数</th></tr></thead>
               <tbody>
                 <tr v-for="person in people" :key="person.id">
-                  <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ person.initials }}</span><span><strong>{{ person.name }}</strong><small>{{ person.department }}</small></span></div></td>
+                  <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ surnameInitial(person.name) }}</span><span><strong>{{ person.name }}</strong><small>{{ person.department }}</small></span></div></td>
                   <td><span class="purpose-tag">{{ person.purpose }}</span></td>
                   <td class="number-cell">{{ person.requests.toLocaleString() }}</td>
-                  <td><div v-if="person.targetConfigured" class="usage-cell"><div><i :class="{ warning: person.usagePercent >= 80 }" :style="{ width: `${Math.min(person.usagePercent, 100)}%` }" /></div><span :class="{ warning: person.usagePercent >= 80 }">{{ person.usagePercent }}%</span></div><span v-else class="muted-cell">未配置</span></td>
                   <td class="number-cell"><strong>{{ person.points.toLocaleString() }}</strong></td>
                 </tr>
               </tbody>

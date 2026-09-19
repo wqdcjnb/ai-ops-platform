@@ -2,8 +2,8 @@ import { z } from 'zod'
 import type { AuditChainVerification, PlatformDatabase } from './platform-db.js'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
-const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'rotate', 'export', 'acknowledge', 'verify', 'view'])
-const resourceTypeSchema = z.enum(['session', 'authorization', 'person', 'key', 'quota', 'route', 'channel', 'upstream', 'export', 'settings', 'alert', 'conversation'])
+const actionSchema = z.enum(['login', 'logout', 'access', 'create', 'update', 'disable', 'delete', 'rotate', 'export', 'acknowledge', 'verify', 'view'])
+const resourceTypeSchema = z.enum(['session', 'authorization', 'gateway_request', 'person', 'key', 'quota', 'route', 'channel', 'upstream', 'export', 'settings', 'alert', 'conversation'])
 const resultStatusSchema = z.enum(['success', 'failed', 'denied'])
 const sourceTypeSchema = z.enum(['web', 'api', 'system'])
 const integritySchema = z.object({
@@ -120,8 +120,8 @@ export function createDemoAuditDetail(id: string, now = new Date()) {
   }
 }
 
-const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', logout: '退出登录', access: '访问被拒绝', create: '创建', update: '更新', disable: '停用', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', verify: '验证连接', view: '查看' }
-const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', authorization: '权限校验', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', channel: '模型渠道', upstream: '上游账号', export: '数据导出', settings: '系统设置', alert: '告警事件', conversation: '对话审计记录' }
+const actionLabels: Record<AuditEvent['action'], string> = { login: '登录', logout: '退出登录', access: '访问被拒绝', create: '创建', update: '更新', disable: '停用', delete: '删除', rotate: '轮换 Key', export: '导出', acknowledge: '确认告警', verify: '验证连接', view: '查看' }
+const resourceLabels: Record<AuditEvent['resource']['type'], string> = { session: '管理端会话', authorization: '权限校验', gateway_request: '网关请求', person: '人员记录', key: '访问 Key', quota: '额度策略', route: '用途路由', channel: '模型渠道', upstream: '上游账号', export: '数据导出', settings: '系统设置', alert: '告警事件', conversation: '对话审计记录' }
 
 function csvCell(value: string | number | null | undefined) {
   const text = value == null ? '' : String(value)
@@ -180,6 +180,7 @@ function databaseResourceName(type: AuditEvent['resource']['type'], id: string, 
 
 function databaseSource(type: AuditEvent['resource']['type'], action: AuditEvent['action']) {
   if (action === 'login' || action === 'logout' || type === 'authorization') return { type: 'web' as const, label: '管理控制台', ipMasked: null, client: '客户端信息未采集' }
+  if (type === 'gateway_request') return { type: 'api' as const, label: 'AI OPS 独立网关', ipMasked: null, client: '兼容客户端' }
   if (type === 'conversation') return { type: 'web' as const, label: '对话审计', ipMasked: null, client: '客户端信息未采集' }
   if (type === 'export') return { type: 'web' as const, label: '用量与日志', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
   if (type === 'quota') return { type: 'web' as const, label: '额度与限流', ipMasked: '10.10.8.*', client: 'Edge · Windows' }
@@ -204,6 +205,7 @@ function databaseChanges(row: ReturnType<PlatformDatabase['listAuditEvents']>[nu
 function databaseEvent(row: ReturnType<PlatformDatabase['listAuditEvents']>[number]): AuditEvent {
   const action = row.action as AuditEvent['action']
   const resourceType = row.resourceType as AuditEvent['resource']['type']
+  const actionLabel = action === 'access' && resourceType === 'gateway_request' ? '网关调用' : actionLabels[action]
   const actorRole = row.actorRole ?? 'system'
   const auditSummary = safeAuditSummary(row)
   const summary = auditSummary.message ? redactAuditText(auditSummary.message) : '已记录字段级操作摘要。'
@@ -214,7 +216,7 @@ function databaseEvent(row: ReturnType<PlatformDatabase['listAuditEvents']>[numb
     occurredAt: row.occurredAt,
     actor: { id: isAnonymous ? 'anonymous' : row.actorUserId ?? 'system', name: isAnonymous ? '未识别身份' : row.actorName ?? '平台任务', role: actorRole },
     action,
-    actionLabel: actionLabels[action],
+    actionLabel,
     resource: { type: resourceType, id: row.resourceId ?? `${resourceType}-unknown`, name: databaseResourceName(resourceType, row.resourceId ?? '', auditSummary) },
     result: { status: row.result, code: auditSummary.code ?? (row.result === 'success' ? (action === 'login' ? 'AUTH_OK' : `${actionCode}_OK`) : row.result === 'denied' ? 'SCOPE_DENIED' : 'DEPENDENCY_UNAVAILABLE') },
     source: databaseSource(resourceType, action),

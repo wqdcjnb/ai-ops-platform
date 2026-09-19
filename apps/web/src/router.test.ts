@@ -3,19 +3,11 @@ import { createMemoryHistory } from 'vue-router'
 import { createAppRouter } from './router'
 
 describe('application routing', () => {
-  it('redirects unauthenticated users to the public login page', async () => {
+  it('keeps the single-admin shell on the root route when a session is unavailable', async () => {
     const router = createAppRouter({ history: createMemoryHistory(), role: 'super_admin', authenticated: false })
     await router.push('/settings')
     await router.isReady()
-    expect(router.currentRoute.value.name).toBe('login')
-    expect(router.currentRoute.value.query.redirect).toBe('/settings')
-  })
-
-  it('keeps the login page public before a session exists', async () => {
-    const router = createAppRouter({ history: createMemoryHistory(), role: 'super_admin', authenticated: false })
-    await router.push('/login')
-    await router.isReady()
-    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.name).toBe('home')
   })
 
   it('opens the unified entry page at the root route', async () => {
@@ -26,11 +18,11 @@ describe('application routing', () => {
     expect(router.currentRoute.value.path).toBe('/')
   })
 
-  it('keeps employees out of administrator routes', async () => {
+  it('redirects employee roles to the administrator entry while employee mode is removed', async () => {
     const router = createAppRouter({ history: createMemoryHistory(), role: 'employee' })
     await router.push('/overview')
     await router.isReady()
-    expect(router.currentRoute.value.name).toBe('employee-home')
+    expect(router.currentRoute.value.name).toBe('home')
   })
 
   it('keeps administrators out of the employee-only layout', async () => {
@@ -61,7 +53,7 @@ describe('application routing', () => {
     const employeeRouter = createAppRouter({ history: createMemoryHistory(), role: 'employee' })
     await employeeRouter.push('/people/person-lin')
     await employeeRouter.isReady()
-    expect(employeeRouter.currentRoute.value.name).toBe('employee-home')
+    expect(employeeRouter.currentRoute.value.name).toBe('home')
   })
 
   it('allows department leads to inspect masked Keys but keeps finance out', async () => {
@@ -85,7 +77,7 @@ describe('application routing', () => {
     const employeeRouter = createAppRouter({ history: createMemoryHistory(), role: 'employee' })
     await employeeRouter.push('/limits')
     await employeeRouter.isReady()
-    expect(employeeRouter.currentRoute.value.name).toBe('employee-home')
+    expect(employeeRouter.currentRoute.value.name).toBe('home')
   })
 
   it('limits purpose routes to super administrators and administrators', async () => {
@@ -145,7 +137,7 @@ describe('application routing', () => {
     const employeeRouter = createAppRouter({ history: createMemoryHistory(), role: 'employee' })
     await employeeRouter.push('/alerts')
     await employeeRouter.isReady()
-    expect(employeeRouter.currentRoute.value.name).toBe('employee-home')
+    expect(employeeRouter.currentRoute.value.name).toBe('home')
   })
 
   it('limits audit logs to super administrators and administrators', async () => {

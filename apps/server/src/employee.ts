@@ -88,12 +88,12 @@ export function createDatabaseEmployeeKeys(database: PlatformDatabase, userId: s
   return {
     meta: databaseMeta(now, '仅从 SQLite 返回当前登录员工的 Key 掩码与授权摘要；完整 Key、其他人员数据和上游配置不会返回。'),
     scope: selfScope,
-    items: database.listApiKeysForOwner(userId).map((item) => ({
+    items: database.listApiKeysForOwner(userId).filter((item): item is typeof item & { status: 'active' | 'expiring' } => item.status !== 'revoked').map((item) => ({
       id: item.id,
       masked: item.maskedValue,
       purpose: item.purpose,
-      alias: item.models[0] ?? '未分配业务别名',
-      allowedModels: item.models,
+      alias: item.model,
+      allowedModels: [item.model],
       status: item.status,
       createdAt: item.createdAt,
       expiresAt: item.expiresAt ?? item.createdAt,

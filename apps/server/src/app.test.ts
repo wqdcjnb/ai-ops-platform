@@ -37,7 +37,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(23)
+    expect(body.migrationVersion).toBe(24)
     expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'temporary_quota_requests', 'quota_reservations', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'business_rule_versions', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     expect(body.sessionCleanup).toMatchObject({ revokedRetentionHours: 24, lastRun: { triggeredBy: 'startup' } })
     expect(body.auditChain).toMatchObject({ algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, firstInvalidEventId: null })
@@ -49,6 +49,16 @@ describe('BFF', () => {
     const response = await app.inject({ method: 'GET', url: '/api/overview' })
     expect(response.statusCode).toBe(401)
     expect(response.json().error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it('bootstraps the local super-admin session without exposing credentials to the browser', async () => {
+    const app = createApp()
+    const bootstrap = await app.inject({ method: 'POST', url: '/api/auth/bootstrap' })
+    expect(bootstrap.statusCode).toBe(200)
+    expect(bootstrap.json()).toMatchObject({ authenticated: true, user: { role: 'super_admin' } })
+    const cookie = cookieHeader(bootstrap.headers['set-cookie'])
+    const overview = await app.inject({ method: 'GET', url: '/api/overview', headers: { cookie } })
+    expect(overview.statusCode).toBe(200)
   })
 
   it('issues an HttpOnly session cookie and enforces role boundaries', async () => {
@@ -307,6 +317,11 @@ describe('BFF', () => {
     expect(body.profile.name).toBe('林筱雨')
     expect(body.keys).toHaveLength(body.profile.keyCount)
     expect(body.keys.every((key: { masked: string }) => key.masked.includes('••••••'))).toBe(true)
+    expect(body.metrics.monthTokens).toBe(body.metrics.monthInputTokens + body.metrics.monthOutputTokens)
+    expect(body.keys.find((key: { id: string }) => key.id === 'key-lin-1').usage).toMatchObject({ requests: 2, inputTokens: 4250, outputTokens: 1716, totalTokens: 5966 })
+    expect(body.keys.find((key: { id: string }) => key.id === 'key-lin-2').usage).toMatchObject({ requests: 1, inputTokens: 3260, outputTokens: 1420, totalTokens: 4680 })
+    expect(body.metrics.monthTokens).toBe(10646)
+    expect(body.keys.reduce((total: number, key: { usage: { totalTokens: number } }) => total + key.usage.totalTokens, 0)).toBe(body.metrics.monthTokens)
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey/i)
   })
 
@@ -369,14 +384,14 @@ describe('BFF', () => {
       idempotencyKey: 'people-import-1a2b3c4d',
       items: [
         { username: 'batch-one', displayName: '批量一号', departmentId: 'content', password: 'batch-pass-1' },
-        { username: 'batch-two', displayName: '批量二号', departmentId: 'ads', password: 'batch-pass-2' },
+        { displayName: '批量二号', departmentId: 'ads' },
       ],
     }
     const created = await app.inject({ method: 'POST', url: '/api/people/batch', headers: { cookie, 'x-csrf-token': csrfToken }, payload })
     expect(created.statusCode).toBe(201)
     expect(created.json()).toMatchObject({ meta: { createdCount: 2 }, operation: { idempotencyKey: payload.idempotencyKey, idempotent: false } })
     expect(JSON.stringify(created.json())).not.toContain('batch-pass-1')
-    expect(JSON.stringify(created.json())).not.toContain('batch-pass-2')
+    expect(created.json().people[1].username).toMatch(/^person-/)
 
     const replay = await app.inject({ method: 'POST', url: '/api/people/batch', headers: { cookie, 'x-csrf-token': csrfToken }, payload })
     expect(replay.statusCode).toBe(201)
@@ -430,6 +445,50 @@ describe('BFF', () => {
     expect(withoutCsrf.statusCode).toBe(403)
   })
 
+  it('deletes only a disabled person, hides the directory records, and replays idempotently', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+
+    const disabled = await app.inject({
+      method: 'POST',
+      url: '/api/people/person-lin/disable',
+      headers: { cookie, 'x-csrf-token': csrfToken },
+      payload: { idempotencyKey: 'person-disable-7a8b9c0d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true },
+    })
+    expect(disabled.statusCode).toBe(200)
+
+    const body = { idempotencyKey: 'person-delete-1a2b3c4d', reason: '本地演示人员已完成测试，需要从目录移除', acknowledgeImpact: true }
+    const deleted = await app.inject({ method: 'POST', url: '/api/people/person-lin/delete', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(deleted.statusCode).toBe(200)
+    expect(deleted.json()).toMatchObject({ meta: { source: 'database' }, person: { id: 'person-lin', name: '林筱雨', status: 'deleted' }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-person-delete-1a2b3c4d' } })
+
+    const person = await app.inject({ method: 'GET', url: '/api/people/person-lin', headers: { cookie } })
+    expect(person.statusCode).toBe(404)
+    expect(person.json().error.code).toBe('PERSON_NOT_FOUND')
+    const people = await app.inject({ method: 'GET', url: `/api/people?search=${encodeURIComponent('林筱雨')}`, headers: { cookie } })
+    expect(people.statusCode).toBe(200)
+    expect(people.json().items).toHaveLength(0)
+    const keys = await app.inject({ method: 'GET', url: '/api/keys?owner=person-lin', headers: { cookie } })
+    expect(keys.statusCode).toBe(200)
+    expect(keys.json().items).toHaveLength(0)
+
+    const replay = await app.inject({ method: 'POST', url: '/api/people/person-lin/delete', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({ person: { status: 'deleted' }, operation: { idempotent: true, auditEventId: deleted.json().operation.auditEventId } })
+
+    const activeDelete = await app.inject({ method: 'POST', url: '/api/people/person-zhou/delete', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, idempotencyKey: 'person-delete-5e6f7g8h' } })
+    expect(activeDelete.statusCode).toBe(409)
+    expect(activeDelete.json().error.code).toBe('PERSON_MUST_BE_DISABLED')
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=delete&resource=person', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'delete', resource: expect.objectContaining({ id: 'person-lin', name: '林筱雨' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'directory', before: '已停用', after: '已删除' })]) })]))
+    expect(JSON.stringify({ deleted: deleted.json(), audit: audit.json() })).not.toContain(body.reason)
+  })
+
   it('returns a filterable masked Key list without secret material', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/keys?owner=person-lin&status=active&pageSize=10' })
     const body = response.json()
@@ -446,7 +505,7 @@ describe('BFF', () => {
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
     const cookie = cookieHeader(login.headers['set-cookie'])
     const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
-    const created = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ownerId: 'person-lin', purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'], expiresInDays: 30, deviceNote: '本地演示设备' } })
+    const created = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ownerId: 'person-lin', purpose: '大促文案', model: 'ecommerce-copy', expiresInDays: 30, deviceNote: '本地演示设备' } })
     expect(created.statusCode).toBe(201)
     expect(created.json().secret).toMatch(/^sk-ops-/)
     expect(created.json().key.masked).toContain('••••••')
@@ -455,7 +514,7 @@ describe('BFF', () => {
 
     const listed = await app.inject({ method: 'GET', url: `/api/keys?search=${encodeURIComponent('大促文案')}`, headers: { cookie } })
     expect(listed.statusCode).toBe(200)
-    expect(listed.json().items[0]).toMatchObject({ purpose: '大促文案', models: ['ecommerce-copy', 'ecommerce-general'] })
+    expect(listed.json().items[0]).toMatchObject({ purpose: '大促文案', model: 'ecommerce-copy', models: ['ecommerce-copy'] })
     expect(JSON.stringify(listed.json())).not.toContain(created.json().secret)
 
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=create&resource=key', headers: { cookie } })
@@ -473,7 +532,7 @@ describe('BFF', () => {
     expect(JSON.stringify(audit.json())).not.toContain(created.json().secret)
 
     const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) }, payload: { ownerId: 'person-lin', purpose: '越权 Key', models: ['ecommerce-general'], expiresInDays: 30, deviceNote: '测试' } })
+    const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) }, payload: { ownerId: 'person-lin', purpose: '越权 Key', model: 'ecommerce-general', expiresInDays: 30, deviceNote: '测试' } })
     expect(employeeCreate.statusCode).toBe(403)
   })
 

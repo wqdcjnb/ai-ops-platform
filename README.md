@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-仓库目前处于原型开发与基础真实化阶段。需求、架构、安全规则、UI 方案与验收标准已经建立；运营控制台已具备“统一入口”本机只读版、“运营总览”演示数据版，以及人员、人员详情、Key 管理、额度与限流、用途与路由、模型与渠道、上游账号、用量与日志、告警中心、审计日志、对话审计和系统设置页面；员工端已具备独立的本人自助演示页。BFF 已能探测基础服务，并已接入 SQLite、密码摘要登录、仅保存哈希的持久化会话、HttpOnly + SameSite=Strict Cookie、CSRF 校验、自动清理过期/超期撤销会话、服务端 RBAC 和部门负责人本部门数据范围；人员、Key、月度软目标、调用元数据、告警事件/规则、审计事件及合成对话审计元数据已读取平台数据库。模型与渠道支持默认模拟模式和管理员主动切换的 New API 只读配置目录；当前真实目录为空，非空字段映射通过模拟接口验证。真实用量、健康指标、计费与完整生产权限仍待验收。文档中标注为“待验证”或“计划开发”的能力不代表已经实现。
+仓库目前处于原型开发与基础真实化阶段。需求、架构、安全规则、UI 方案与验收标准已经建立；运营控制台已具备“统一入口”本机只读版、“运营总览”演示数据版，以及人员、人员详情、Key 管理、额度与限流、用途与路由、模型与渠道、上游账号、用量与日志、告警中心、审计日志、对话审计和系统设置页面；员工端已具备独立的本人自助演示页。BFF 已能探测基础服务，并已接入 SQLite、单管理员自动会话（多账号兼容模式仍支持密码摘要登录）、仅保存哈希的持久化会话、HttpOnly + SameSite=Strict Cookie、CSRF 校验、自动清理过期/超期撤销会话、服务端 RBAC 和部门负责人本部门数据范围；人员、Key、月度软目标、调用元数据、告警事件/规则、审计事件及合成对话审计元数据已读取平台数据库。模型与渠道支持默认模拟模式和管理员主动切换的 New API 只读配置目录；当前真实目录为空，非空字段映射通过模拟接口验证。真实用量、健康指标、计费与完整生产权限仍待验收。文档中标注为“待验证”或“计划开发”的能力不代表已经实现。
 
 已确认的方向：
 
@@ -122,7 +122,22 @@ npm.cmd run dev:web
 
 访问 <http://127.0.0.1:4174>。前端通过开发代理访问 BFF，不在浏览器中保存管理凭据。
 
-New API 默认探测 `http://127.0.0.1:3000`。本地连接配置可参照 `apps/server/.env.example`，只将所需的 `NEW_API_BASE_URL`、`NEW_API_ACCESS_TOKEN` 写入 `apps/server/.env.local`；此文件已被 Git 忽略。`npm.cmd run dev:server` 和服务端 `npm.cmd run start` 会自动加载该文件，已有进程环境变量优先，修改后需要重启 BFF。请勿直接复制示例中的账号密码配置，以免影响本地演示账号。旧版 New API 如需用户标识头，可同时设置 `NEW_API_USER_ID`。状态接口只返回连接状态，不返回凭据或上游响应正文。
+### Docker 一键启动
+
+已提供前后端 Compose 编排，Docker Desktop 启动后，在项目根目录执行：
+
+```powershell
+Copy-Item docker-compose.env.example .env
+docker-compose up --build
+```
+
+Windows 下也可以直接双击项目根目录的 `start-docker.cmd`，脚本会自动创建缺失的 `.env`、构建并启动容器，然后打开管理页面。Docker Desktop 需要保持运行。
+
+访问 <http://127.0.0.1:4174>。停止服务使用 `Ctrl+C`，后台启动可加 `-d`，停止并移除容器使用 `docker-compose down`。SQLite 数据保存在 Docker 命名卷 `ai-ops-platform_platform-data` 中；删除容器不会删除数据，只有显式执行 `docker-compose down -v` 才会删除该卷。Docker 使用独立数据卷，不会改写本机 `apps/server/data`。
+
+Docker 中默认使用独立网关 `standalone` 模式、空业务数据库和本机单管理员模式。单管理员模式不需要管理员密码，打开 4174 后由 BFF 自动创建管理会话；如需连接宿主机上的 New API，将 `NEW_API_BASE_URL` 设置为 `http://host.docker.internal:3000`，不要写 `127.0.0.1`。
+
+New API 默认探测 `http://127.0.0.1:3000`。本地连接配置可参照 `apps/server/.env.example`，只将所需的 `NEW_API_BASE_URL`、`NEW_API_ACCESS_TOKEN` 写入 `apps/server/.env.local`；此文件已被 Git 忽略。`npm.cmd run dev:server` 和服务端 `npm.cmd run start` 会自动加载该文件，已有进程环境变量优先，修改后需要重启 BFF。单管理员本地模式不需要填写管理员密码；只有明确关闭 `AI_OPS_ADMIN_ONLY`、启用多账号兼容登录时才需要旧版密码配置。旧版 New API 如需用户标识头，可同时设置 `NEW_API_USER_ID`。状态接口只返回连接状态，不返回凭据或上游响应正文。
 
 ## 安全边界
 

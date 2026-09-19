@@ -20,7 +20,7 @@ export const alertEventSchema = z.object({
   silence: z.object({ active: z.boolean(), until: z.string().datetime().nullable() }), relatedRequestIds: z.array(z.string().regex(/^req-[a-z0-9-]+$/)),
 })
 
-const metaSchema = z.object({ source: z.literal('database'), simulated: z.literal(true), generatedAt: z.string().datetime(), notice: z.string() })
+const metaSchema = z.object({ source: z.literal('database'), simulated: z.boolean(), generatedAt: z.string().datetime(), notice: z.string() })
 const notificationConfigSchema = z.object({ configured: z.literal(false), channels: z.array(z.object({ type: z.enum(['wecom', 'dingtalk']), state: z.literal('not_configured') })), notice: z.string() })
 
 export const alertSummaryResponseSchema = z.object({ meta: metaSchema, summary: z.object({ open: z.number().int().nonnegative(), critical: z.number().int().nonnegative(), warning: z.number().int().nonnegative(), experiment: z.number().int().nonnegative(), acknowledged: z.number().int().nonnegative(), closed: z.number().int().nonnegative() }), notificationConfig: notificationConfigSchema })

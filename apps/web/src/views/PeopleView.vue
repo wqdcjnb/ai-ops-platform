@@ -21,7 +21,8 @@ import {
 } from '@tabler/icons-vue'
 import { createPeopleBatch, createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonBatchCreateResponse, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
-import { preflightPeopleImport, type PeopleImportRow } from '../people-import'
+import { preflightPeopleImport, type PeopleImportRow, PEOPLE_IMPORT_HEADERS_ZH } from '../people-import'
+import { surnameInitial } from '../modules/people/person-display'
 
 const people = ref<PeopleResponse | null>(null)
 const isLoading = ref(false)
@@ -36,7 +37,7 @@ const showCreate = ref(false)
 const createError = ref('')
 const isCreating = ref(false)
 const createdPerson = ref<PersonCreateResponse | null>(null)
-const createForm = ref<PersonCreateBody>({ username: '', displayName: '', departmentId: 'content', password: '' })
+const createForm = ref<PersonCreateBody>({ displayName: '', departmentId: 'content' })
 const showImport = ref(false)
 const importFileName = ref('')
 const importError = ref('')
@@ -46,7 +47,7 @@ const batchResult = ref<PersonBatchCreateResponse | null>(null)
 const isImporting = ref(false)
 let activeRequest: AbortController | null = null
 
-const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '离职待回收' }
+const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '待回收' }
 const goalLabels: Record<Person['goal']['state'], string> = { normal: '正常', near: '接近目标', reached: '已达目标' }
 const totalPages = computed(() => Math.max(1, Math.ceil((people.value?.total ?? 0) / pageSize)))
 const rangeText = computed(() => {
@@ -66,7 +67,6 @@ const summaryCards = computed(() => {
   return [
     { label: '全部人员', value: value?.total ?? '—', hint: `${value?.departments ?? '—'} 个部门`, icon: IconUsers, tone: 'teal' },
     { label: '在职人员', value: value?.active ?? '—', hint: '可正常使用授权 Key', icon: IconUserCheck, tone: 'green' },
-    { label: '离职待回收', value: value?.offboarding ?? '—', hint: '需要检查并停用 Key', icon: IconAlertTriangle, tone: 'amber' },
     { label: '已停用', value: value?.disabled ?? '—', hint: '当前不可继续调用', icon: IconUserOff, tone: 'violet' },
   ]
 })
@@ -107,11 +107,6 @@ function applyFilters() {
   void loadPeople()
 }
 
-function selectDepartment(id: string) {
-  department.value = department.value === id ? 'all' : id
-  applyFilters()
-}
-
 function clearFilters() {
   search.value = ''
   department.value = 'all'
@@ -129,7 +124,7 @@ function goToPage(nextPage: number) {
 function openCreate() {
   createError.value = ''
   createdPerson.value = null
-  createForm.value = { username: '', displayName: '', departmentId: people.value?.departments[0]?.id ?? 'content', password: '' }
+  createForm.value = { displayName: '', departmentId: '' }
   showCreate.value = true
 }
 
@@ -156,7 +151,7 @@ function closeImport() {
 }
 
 function downloadImportTemplate() {
-  const csv = '\uFEFFusername,displayName,departmentId,password\nwang.xiaoming,王小明,content,local-pass-1\n'
+  const csv = `\uFEFF${PEOPLE_IMPORT_HEADERS_ZH.join(',')}\n`
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
@@ -194,7 +189,7 @@ async function submitImport() {
   try {
     batchResult.value = await createPeopleBatch({
       idempotencyKey: `people-import-${crypto.randomUUID()}`,
-      items: importRows.value.map(({ username, displayName, departmentId, password }) => ({ username, displayName, departmentId, password })),
+      items: importRows.value.map(({ username, displayName, departmentId, password }) => ({ ...(username ? { username } : {}), displayName, departmentId, ...(password ? { password } : {}) })),
     })
     importRows.value = []
     page.value = 1
@@ -237,7 +232,7 @@ onBeforeUnmount(() => activeRequest?.abort())
       <div>
         <div class="eyebrow">PEOPLE & ORGANIZATION</div>
         <h1>人员与部门</h1>
-        <p>按组织归属查看人员状态、访问凭据和月度软目标。</p>
+        <p>按组织归属查看人员状态和访问凭据。</p>
       </div>
       <div class="heading-actions">
         <span class="updated-at">更新于 {{ updatedAt }}</span>
@@ -258,20 +253,11 @@ onBeforeUnmount(() => activeRequest?.abort())
       </article>
     </section>
 
-    <section v-if="people" class="department-strip" aria-label="部门概览">
-      <button v-for="item in people.departments" :key="item.id" :class="{ active: department === item.id }" @click="selectDepartment(item.id)">
-        <span class="department-icon"><IconBuilding :size="17" /></span>
-        <span><strong>{{ item.name }}</strong><small>{{ item.people }} 人 · {{ item.activeKeys }} 个 Key</small></span>
-        <em>{{ item.usagePercent }}%</em>
-      </button>
-    </section>
-
     <section class="panel people-panel-main">
       <form class="people-filters" @submit.prevent="applyFilters">
-        <label class="people-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索人员" type="search" maxlength="60" placeholder="搜索姓名、岗位、负责人或用途" /></label>
+        <label class="people-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索人员" type="search" maxlength="60" placeholder="搜索姓名、岗位或负责人" /></label>
         <label><IconBuilding :size="16" /><select v-model="department" @change="applyFilters"><option value="all">全部部门</option><option v-for="item in people?.departments ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <label><IconUsers :size="16" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">在职</option><option value="offboarding">离职待回收</option><option value="disabled">已停用</option></select></label>
-        <label><IconFilter :size="16" /><select v-model="goal" @change="applyFilters"><option value="all">全部目标状态</option><option value="normal">正常</option><option value="near">接近目标</option><option value="reached">已达目标</option></select></label>
+        <label><IconUsers :size="16" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">在职</option><option value="disabled">已停用</option></select></label>
         <span class="realtime-search-hint" aria-live="polite">输入即搜索</span>
         <button class="text-button clear-filter" type="button" @click="clearFilters">清除</button>
       </form>
@@ -281,15 +267,12 @@ onBeforeUnmount(() => activeRequest?.abort())
       <template v-else-if="people">
         <div v-if="people.items.length" class="table-responsive">
           <table class="data-table people-table">
-            <thead><tr><th>人员</th><th>部门 / 岗位</th><th>负责人</th><th>访问 Key</th><th>主要用途</th><th>月度软目标</th><th>状态</th><th>最近调用</th><th /></tr></thead>
+            <thead><tr><th>人员</th><th>部门</th><th>访问 Key</th><th>状态</th><th>最近调用</th><th /></tr></thead>
             <tbody>
               <tr v-for="person in people.items" :key="person.id">
-                <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ person.initials }}</span><span><strong>{{ person.name }}</strong><small>ID · {{ person.id.replace('person-', '') }}</small></span></div></td>
-                <td><div class="table-stack"><strong>{{ person.department.name }}</strong><small>{{ person.title }}</small></div></td>
-                <td>{{ person.manager }}</td>
+                <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ surnameInitial(person.name) }}</span><span><strong>{{ person.name }}</strong></span></div></td>
+                <td>{{ person.department.name }}</td>
                 <td><span class="key-count"><IconKey :size="13" />{{ person.keyCount }}</span></td>
-                <td><span class="purpose-tag">{{ person.purpose }}</span></td>
-                <td><div class="goal-cell"><div><i :class="`goal-${person.goal.state}`" :style="{ width: `${Math.min(person.goal.percent, 100)}%` }" /></div><span :class="`goal-${person.goal.state}`">{{ person.goal.percent }}%</span><small>{{ person.goal.used }}/{{ person.goal.limit }}</small></div></td>
                 <td><span class="person-status" :class="`status-${person.status}`"><i />{{ statusLabels[person.status] }}</span></td>
                 <td class="last-active">{{ relativeTime(person.lastActiveAt) }}</td>
                 <td><RouterLink class="row-action enabled" :to="`/people/${person.id}`" :aria-label="`查看${person.name}详情`"><IconChevronRight :size="17" /></RouterLink></td>
@@ -302,7 +285,7 @@ onBeforeUnmount(() => activeRequest?.abort())
       </template>
     </section>
 
-    <footer class="page-footer">数据来源：{{ people?.meta.source.toUpperCase() ?? '等待数据' }} · 添加人员已开放（本地 SQLite），职位、用途和 Key 管理仍待接入</footer>
+    <footer class="page-footer">数据来源：{{ people?.meta.source.toUpperCase() ?? '等待数据' }} · 添加人员已开放（本地 SQLite），Key 用途在 Key 管理中维护</footer>
 
     <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
       <aside class="create-person-dialog" role="dialog" aria-modal="true" aria-label="添加人员">
@@ -312,7 +295,7 @@ onBeforeUnmount(() => activeRequest?.abort())
             <IconUserCheck :size="22" />
             <strong>{{ createdPerson.person.displayName }} 已添加</strong>
             <p>{{ createdPerson.meta.notice }}</p>
-            <small>{{ createdPerson.person.department.name }} · {{ createdPerson.person.username }} · 初始密码仅保存摘要</small>
+            <small>{{ createdPerson.person.department.name }} · 登录名和初始密码由系统自动生成</small>
           </section>
           <footer class="create-key-dialog-footer">
             <a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(createdPerson.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${createdPerson.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a>
@@ -320,11 +303,9 @@ onBeforeUnmount(() => activeRequest?.abort())
           </footer>
         </template>
         <form v-else class="create-person-form" @submit.prevent="submitCreate">
-          <p class="create-person-note">创建本地演示账号并绑定部门。密码只用于本地登录测试，不会在列表或日志中展示。</p>
-          <label><span>姓名</span><input v-model="createForm.displayName" required minlength="2" maxlength="40" placeholder="例如：王小明" /></label>
-          <label><span>登录用户名</span><input v-model="createForm.username" required pattern="[A-Za-z][A-Za-z0-9._-]{2,39}" maxlength="40" placeholder="例如：wang.xiaoming" /></label>
-          <label><span>所属部门</span><select v-model="createForm.departmentId" required><option v-for="item in people?.departments ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-          <label><span>初始密码</span><input v-model="createForm.password" required minlength="8" maxlength="200" type="password" placeholder="至少 8 位" /></label>
+          <p class="create-person-note">创建本地演示账号并绑定部门。登录名和初始密码由系统自动生成，仅保存安全摘要。</p>
+          <label><span>姓名</span><input v-model="createForm.displayName" required minlength="2" maxlength="40" placeholder="例如：王庆典" /></label>
+          <label><span>所属部门</span><input v-model="createForm.departmentId" required minlength="1" maxlength="40" placeholder="例如：技术部" /><small class="create-person-field-hint">直接填写部门名称即可，不需要选择部门编号。</small></label>
           <div v-if="createError" class="create-person-error"><IconAlertTriangle :size="16" />{{ createError }}</div>
           <footer><button class="btn btn-white" type="button" :disabled="isCreating" @click="closeCreate">取消</button><button class="btn create-key" type="submit" :disabled="isCreating">{{ isCreating ? '保存中…' : '保存人员' }}</button></footer>
         </form>
@@ -335,17 +316,17 @@ onBeforeUnmount(() => activeRequest?.abort())
       <aside class="create-person-dialog people-import-dialog" role="dialog" aria-modal="true" aria-label="批量导入人员">
         <header><div><span class="source-tag demo">CSV</span><h2>批量导入人员</h2></div><button class="icon-button" aria-label="关闭批量导入" @click="closeImport">×</button></header>
         <template v-if="batchResult">
-          <section class="created-key-success"><IconUserCheck :size="22" /><strong>已导入 {{ batchResult.meta.createdCount }} 名人员</strong><p>{{ batchResult.meta.notice }}</p><small>批次幂等号：{{ batchResult.operation.idempotencyKey }} · 初始密码仅保存摘要</small></section>
+          <section class="created-key-success"><IconUserCheck :size="22" /><strong>已导入 {{ batchResult.meta.createdCount }} 名人员</strong><p>{{ batchResult.meta.notice }}</p><small>批次幂等号：{{ batchResult.operation.idempotencyKey }} · 系统凭据已生成，仅保存哈希</small></section>
           <footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(batchResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${batchResult.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" type="button" @click="closeImport">完成</button></footer>
         </template>
         <template v-else>
         <section class="people-import-content">
-          <p class="create-person-note">下载模板后填写人员信息。文件只允许姓名、登录名、部门和初始密码，不接受完整 Key；预检通过后会一次性写入本地 SQLite，不会调用 New API。</p>
+          <p class="create-person-note">下载模板后填写人员信息。部门直接填写名称即可，已有部门会自动匹配，新部门会写入本地目录；登录名及初始密码由系统自动生成，预检通过后会一次性写入本地 SQLite，不会调用 New API。</p>
           <div class="people-import-actions"><button class="btn btn-white" type="button" @click="downloadImportTemplate"><IconDownload :size="15" />下载 CSV 模板</button><label class="btn btn-white" for="people-import-file"><IconUpload :size="15" />选择 CSV 文件</label><input id="people-import-file" ref="importInput" class="visually-hidden" type="file" accept=".csv,text/csv" @change="handleImportFile" /></div>
           <div v-if="importFileName" class="people-import-file"><IconFileText :size="16" /><span>{{ importFileName }}</span><strong>{{ importRows.length }} 行已预检</strong></div>
           <div v-if="importError" class="create-person-error"><IconAlertTriangle :size="16" />{{ importError }}</div>
           <div v-if="importRows.length" class="people-import-table-wrap">
-            <table class="data-table people-import-table"><thead><tr><th>行</th><th>人员</th><th>登录名</th><th>部门</th><th>预检结果</th></tr></thead><tbody><tr v-for="row in importRows" :key="row.line"><td>{{ row.line }}</td><td>{{ row.displayName || '—' }}</td><td>{{ row.username || '—' }}</td><td>{{ row.departmentName || '—' }}</td><td><span :class="row.error ? 'people-import-invalid' : 'people-import-valid'">{{ row.error || '可导入' }}</span></td></tr></tbody></table>
+            <table class="data-table people-import-table"><thead><tr><th>行</th><th>人员</th><th>部门</th><th>预检结果</th></tr></thead><tbody><tr v-for="row in importRows" :key="row.line"><td>{{ row.line }}</td><td>{{ row.displayName || '—' }}</td><td>{{ row.departmentName || '—' }}</td><td><span :class="row.error ? 'people-import-invalid' : 'people-import-valid'">{{ row.error || '可导入' }}</span></td></tr></tbody></table>
           </div>
           <div v-else class="people-import-empty"><IconUpload :size="24" /><strong>还没有选择文件</strong><span>先下载模板或选择已有 CSV 文件。</span></div>
         </section>

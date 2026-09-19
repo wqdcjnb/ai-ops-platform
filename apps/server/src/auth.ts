@@ -61,6 +61,7 @@ export interface AuthService {
   getSession(request: FastifyRequest): { user: AuthUser; expiresAt: string } | null
   verifyCsrf(request: FastifyRequest): boolean
   login(username: string, password: string): { token: string; csrfToken: string; user: AuthUser; expiresAt: string } | null
+  bootstrapAdmin?(): { token: string; csrfToken: string; user: AuthUser; expiresAt: string } | null
   revoke(request: FastifyRequest): void
   setSessionCookie(reply: FastifyReply, token: string, csrfToken: string, expiresAt: string): void
   clearSessionCookie(reply: FastifyReply): void
@@ -88,6 +89,9 @@ function csrfHeader(request: FastifyRequest) {
 
 function accountFromEnvironment(role: AppRole, fallback: { username: string; password: string; displayName: string; roleLabel: string }): DemoAccount {
   const prefix = role === 'super_admin' ? 'ADMIN' : 'EMPLOYEE'
+  const password = process.env.AI_OPS_ADMIN_ONLY === 'true' && role === 'super_admin'
+    ? 'local-admin-password-disabled'
+    : process.env[`AUTH_${prefix}_PASSWORD`] ?? fallback.password
   return {
     user: {
       id: role === 'super_admin' ? 'user-super-admin' : 'person-lin',
@@ -97,7 +101,7 @@ function accountFromEnvironment(role: AppRole, fallback: { username: string; pas
       roleLabel: fallback.roleLabel,
       departmentId: role === 'employee' ? 'content' : null,
     },
-    password: process.env[`AUTH_${prefix}_PASSWORD`] ?? fallback.password,
+    password,
   }
 }
 
@@ -124,11 +128,12 @@ export function seedDemoUsers(database: PlatformDatabase) {
   database.seedUser({
     id: 'user-super-admin',
     username: process.env.AUTH_ADMIN_USERNAME ?? 'admin',
-    password: process.env.AUTH_ADMIN_PASSWORD ?? 'admin-demo',
+    password: process.env.AI_OPS_ADMIN_ONLY === 'true' ? 'local-admin-password-disabled' : process.env.AUTH_ADMIN_PASSWORD ?? 'admin-demo',
     displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
     role: 'super_admin',
     roleLabel: roleLabels.super_admin,
   })
+  if (process.env.AI_OPS_ADMIN_ONLY === 'true') return
   database.seedUser({
     id: 'person-lin',
     username: process.env.AUTH_EMPLOYEE_USERNAME ?? 'employee',
@@ -171,6 +176,28 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
     return { user: session.user, expiresAt: new Date(session.expiresAt).toISOString() }
   }
 
+  function createSession(user: AuthUser) {
+    if (options.database) options.database.cleanupAuthSessions('login')
+    const token = randomBytes(32).toString('base64url')
+    const csrfToken = randomBytes(32).toString('base64url')
+    const expiresAt = Date.now() + SESSION_TTL_MS
+    const expiresAtIso = new Date(expiresAt).toISOString()
+    const tokenHash = hashSessionValue(token)
+    const csrfTokenHash = hashSessionValue(csrfToken)
+    if (options.database) {
+      options.database.createAuthSession({
+        id: `session-${randomBytes(16).toString('hex')}`,
+        userId: user.id,
+        tokenHash,
+        csrfTokenHash,
+        expiresAt: expiresAtIso,
+      })
+    } else {
+      sessions.set(token, { user, expiresAt, csrfTokenHash })
+    }
+    return { token, csrfToken, user, expiresAt: expiresAtIso }
+  }
+
   return {
     authenticate(request) {
       return getSession(request)?.user ?? null
@@ -189,6 +216,10 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
       return Boolean(session && session.expiresAt > Date.now() && matchesToken(session.csrfTokenHash, csrfTokenHash))
     },
     login(username, password) {
+      // Local single-admin mode has no password login surface. The browser
+      // receives a session through bootstrapAdmin instead; keep this route for
+      // explicit credentials only when a multi-account mode is enabled.
+      if (process.env.AI_OPS_ADMIN_ONLY === 'true') return null
       const databaseUser = options.database?.passwordMatches(username, password)
         ? options.database.findUserByUsername(username)
         : null
@@ -198,25 +229,19 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
           ? null
           : accounts.find((item) => item.user.username === username && item.password === password)
       if (!account) return null
-      if (options.database) options.database.cleanupAuthSessions('login')
-      const token = randomBytes(32).toString('base64url')
-      const csrfToken = randomBytes(32).toString('base64url')
-      const expiresAt = Date.now() + SESSION_TTL_MS
-      const expiresAtIso = new Date(expiresAt).toISOString()
-      const tokenHash = hashSessionValue(token)
-      const csrfTokenHash = hashSessionValue(csrfToken)
-      if (options.database) {
-        options.database.createAuthSession({
-          id: `session-${randomBytes(16).toString('hex')}`,
-          userId: account.user.id,
-          tokenHash,
-          csrfTokenHash,
-          expiresAt: expiresAtIso,
-        })
-      } else {
-        sessions.set(token, { user: account.user, expiresAt, csrfTokenHash })
-      }
-      return { token, csrfToken, user: account.user, expiresAt: expiresAtIso }
+      return createSession(account.user)
+    },
+    bootstrapAdmin() {
+      const configuredUsername = process.env.AUTH_ADMIN_USERNAME ?? 'admin'
+      const configuredDatabaseUser = options.database?.findUserByUsername(configuredUsername)
+      const databaseUser = configuredDatabaseUser?.role === 'super_admin'
+        ? configuredDatabaseUser
+        : options.database?.findUserByRole('super_admin') ?? null
+      const user = databaseUser
+        ? databaseUser.role === 'super_admin' && databaseUser.status === 'active' ? toAuthUser(databaseUser) : null
+        : accounts.find((item) => item.user.role === 'super_admin' && item.user.username === configuredUsername)?.user
+          ?? accounts.find((item) => item.user.role === 'super_admin')?.user
+      return user ? createSession(user) : null
     },
     revoke(request) {
       const token = cookieValue(request, SESSION_COOKIE)

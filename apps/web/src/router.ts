@@ -1,6 +1,5 @@
 import { createRouter, createWebHistory, type RouterHistory } from 'vue-router'
 import AdminLayout from './layouts/AdminLayout.vue'
-import EmployeeLayout from './layouts/EmployeeLayout.vue'
 import HomeView from './views/HomeView.vue'
 import OverviewView from './views/OverviewView.vue'
 import PeopleView from './views/PeopleView.vue'
@@ -15,8 +14,6 @@ import AlertsView from './views/AlertsView.vue'
 import AuditView from './views/AuditView.vue'
 import ConversationAuditView from './views/ConversationAuditView.vue'
 import SettingsView from './views/SettingsView.vue'
-import EmployeeHomeView from './views/EmployeeHomeView.vue'
-import LoginView from './views/LoginView.vue'
 import type { AppRole } from './auth-api'
 
 declare module 'vue-router' {
@@ -40,12 +37,6 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
   const router = createRouter({
     history: options.history ?? createWebHistory(),
     routes: [
-      {
-        path: '/login',
-        name: 'login',
-        component: LoginView,
-        meta: { title: '登录', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'], public: true },
-      },
       {
         path: '/',
         component: AdminLayout,
@@ -138,21 +129,8 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
         ],
       },
       {
-        path: '/me',
-        component: EmployeeLayout,
-        meta: { title: '员工自助', roles: ['employee'] },
-        children: [
-          {
-            path: '',
-            name: 'employee-home',
-            component: EmployeeHomeView,
-            meta: { title: '员工自助', roles: ['employee'], stage: 'P3' },
-          },
-        ],
-      },
-      {
         path: '/:pathMatch(.*)*',
-        redirect: role === 'employee' ? '/me' : '/',
+        redirect: '/',
         meta: { title: '页面未找到', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'] },
       },
     ],
@@ -160,9 +138,9 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
 
   router.beforeEach((to) => {
     if (to.meta.public) return true
-    if (!authenticated) return { name: 'login', query: { redirect: to.fullPath } }
+    if (!authenticated) return to.path === '/' ? true : '/'
     if (to.meta.roles.includes(role)) return true
-    return role === 'employee' ? '/me' : '/'
+    return to.path === '/' ? true : '/'
   })
 
   router.afterEach((to) => {

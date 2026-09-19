@@ -8,7 +8,7 @@ import { fetchUpstreams, type UpstreamItem, type UpstreamsResponse } from './ups
 vi.mock('./upstreams-api', async (importOriginal) => ({ ...await importOriginal<typeof import('./upstreams-api')>(), fetchUpstreams: vi.fn() }))
 
 const item: UpstreamItem = {
-  id: 'upstream-cpa-lab-2', name: 'CPA Pro · 实验账号 02', provider: 'CLIProxyAPI', type: 'cpa_oauth', environment: 'experiment', status: 'auth_required', credentialConfigured: true, credentialValidation: 'failed', models: ['pro-oauth-lab'],
+  id: 'upstream-official-1', name: 'Official Global · 01', provider: 'Official API', type: 'official_api', environment: 'production', status: 'auth_required', credentialConfigured: true, credentialValidation: 'failed', models: ['official-model'],
   health: { successRate: 81.2, latencyMs: 7340, checkedAt: '2026-09-17T10:00:00.000Z' }, balance: { state: 'unknown', label: '认证后更新', updatedAt: null }, capacity: null,
   auth: { expiresAt: '2026-09-17T11:00:00.000Z', lastRefreshedAt: '2026-09-17T09:00:00.000Z' }, windows: [{ id: 'five_hour', label: '5 小时窗口', usedPercent: 92, resetsAt: '2026-09-17T11:00:00.000Z' }], cooldown: { active: true, until: '2026-09-17T10:30:00.000Z', reason: '刷新失败后进入短时冷却' },
   recentError: { category: 'authentication', summary: 'OAuth 刷新未完成，需要通过受保护部署流程重新授权', firstSeenAt: '2026-09-17T09:20:00.000Z', lastSeenAt: '2026-09-17T10:00:00.000Z' },
@@ -17,7 +17,7 @@ const item: UpstreamItem = {
 function response(): UpstreamsResponse {
   return {
     meta: { source: 'demo', generatedAt: '2026-09-17T10:00:00.000Z', notice: '模拟账号明细', live: { newApi: 'healthy', cpa: 'reachable', checkedAt: '2026-09-17T10:00:00.000Z' } },
-    summary: { total: 1, available: 0, needsAttention: 1, official: 0, experiment: 1, configured: 1 },
+    summary: { total: 1, available: 0, needsAttention: 1, official: 1, experiment: 0, configured: 1 },
     isolation: { enforced: true, productionToExperimentFallback: false, statement: '正式与实验隔离' }, items: [item], total: 1,
   }
 }
@@ -45,14 +45,15 @@ beforeEach(() => {
 afterEach(() => { app?.unmount(); host.remove() })
 
 describe('upstream alert handoff', () => {
-  it('opens an exact simulated-alert filter from an account with a current exception', async () => {
+  it('opens an exact alert filter from a formal account with a current exception', async () => {
     await mount()
-    await vi.waitFor(() => expect(host.textContent).toContain('CPA Pro · 实验账号 02'))
-    host.querySelector<HTMLButtonElement>('[aria-label="查看 CPA Pro · 实验账号 02 账号详情"]')!.click()
+    await vi.waitFor(() => expect(host.textContent).toContain('Official Global · 01'))
+    expect(host.textContent).not.toContain('实时服务连通性')
+    host.querySelector<HTMLButtonElement>('[aria-label="查看 Official Global · 01 账号详情"]')!.click()
     await nextTick()
-    const related = host.querySelector<HTMLButtonElement>('[aria-label="查看 CPA Pro · 实验账号 02 的关联模拟告警"]')
+    const related = host.querySelector<HTMLButtonElement>('[aria-label="查看 Official Global · 01 的关联模拟告警"]')
     expect(related?.textContent).toContain('查看关联模拟告警')
     related!.click()
-    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/alerts?subjectId=upstream-cpa-lab-2'))
+    await vi.waitFor(() => expect(router.currentRoute.value.fullPath).toBe('/alerts?subjectId=upstream-official-1'))
   })
 })

@@ -44,14 +44,14 @@ beforeEach(() => {
 afterEach(() => { app?.unmount(); window.history.replaceState({}, '', '/'); host.remove() })
 
 describe('usage view database simulation', () => {
-  it('marks SQLite records as simulated, applies a result filter, and opens metadata-only detail', async () => {
+  it('marks SQLite records as a redacted snapshot, applies a result filter, and opens metadata-only detail', async () => {
     mount()
-    await vi.waitFor(() => expect(host.textContent).toContain('SQLite · 模拟数据'))
+    await vi.waitFor(() => expect(host.textContent).toContain('SQLite · 脱敏快照'))
     expect(fetchUsage).toHaveBeenCalledWith(expect.objectContaining({ period: '7d', status: 'all' }), expect.any(AbortSignal))
     const status = host.querySelector<HTMLSelectElement>('[aria-label="结果"]')!
     status.value = 'failed'; status.dispatchEvent(new Event('change'))
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed', page: 1 }), expect.any(AbortSignal)))
-    host.querySelector<HTMLButtonElement>('[aria-label="查看 req-demo-001 调用详情"]')!.click()
+    host.querySelector<HTMLButtonElement>('[aria-label*="调用详情"]')!.click()
     await vi.waitFor(() => expect(fetchUsageDetail).toHaveBeenCalledWith('req-demo-001', expect.any(AbortSignal)))
     await vi.waitFor(() => expect(host.querySelector('[role="dialog"]')).not.toBeNull())
     expect(host.querySelector('[role="dialog"]')!.textContent).toContain('无对话正文')
@@ -71,8 +71,8 @@ describe('usage view database simulation', () => {
   it('accepts a safe synthetic request ID from conversation audit and allows clearing it', async () => {
     mount('/usage?requestId=req-demo-001&origin=conversation_audit')
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledWith(expect.objectContaining({ search: 'req-demo-001', page: 1 }), expect.any(AbortSignal)))
-    expect(host.textContent).toContain('来自对话审计的模拟用量关联')
-    expect(host.textContent).toContain('不代表真实网关请求链路')
+    expect(host.textContent).toContain('来自对话审计的关联用量')
+    expect(host.textContent).toContain('不代表完整网关请求链路')
     button('清除对话审计关联筛选').click()
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenLastCalledWith(expect.objectContaining({ search: '', page: 1 }), expect.any(AbortSignal)))
     expect(window.location.search).toBe('')
@@ -81,7 +81,7 @@ describe('usage view database simulation', () => {
   it('labels a safe alert-to-usage handoff without treating it as a real upstream request', async () => {
     mount('/usage?requestId=req-demo-001&origin=alert')
     await vi.waitFor(() => expect(fetchUsage).toHaveBeenCalledWith(expect.objectContaining({ search: 'req-demo-001', page: 1 }), expect.any(AbortSignal)))
-    expect(host.textContent).toContain('来自告警事件的模拟调用关联')
+    expect(host.textContent).toContain('来自告警事件的关联调用')
     expect(host.textContent).toContain('不代表真实上游请求链路')
     button('清除告警关联筛选').click()
     await vi.waitFor(() => expect(window.location.search).toBe(''))

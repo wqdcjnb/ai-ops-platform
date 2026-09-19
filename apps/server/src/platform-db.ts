@@ -352,6 +352,8 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS quota_reservations_node_idx ON quota_reservations(node_id, requested_at DESC);
   CREATE INDEX IF NOT EXISTS quota_reservations_status_idx ON quota_reservations(status, requested_at DESC);`,
+  `ALTER TABLE api_keys ADD COLUMN secret_hash TEXT;
+  CREATE INDEX IF NOT EXISTS api_keys_secret_hash_idx ON api_keys(secret_hash);`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -418,6 +420,7 @@ export interface PlatformApiKeySeed {
   id: string
   ownerUserId: string
   maskedValue: string
+  secretHash?: string | null
   purpose: string
   status: 'active' | 'expiring' | 'revoked'
   expiresAt?: string | null
@@ -681,13 +684,34 @@ export interface PlatformPersonDisableResult {
   keysDisabled: number
 }
 
+export interface PlatformPersonDeleteResult {
+  state: 'deleted' | 'not_disabled'
+  idempotent: boolean
+  person: { id: string; displayName: string }
+}
+
 export interface PlatformApiKeyCreate {
   id: string
   ownerUserId: string
   maskedValue: string
+  secretHash: string
   purpose: string
   expiresAt: string
+  model?: string
   models: string[]
+}
+
+export interface PlatformGatewayKey {
+  id: string
+  ownerUserId: string
+  ownerName: string
+  departmentName: string
+  maskedValue: string
+  purpose: string
+  model: string
+  models: string[]
+  status: 'active' | 'expiring'
+  expiresAt: string | null
 }
 
 export interface PlatformApiKeyDisableResult {
@@ -896,6 +920,10 @@ export function hashPlatformPassword(value: string) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+export function hashPlatformApiKey(value: string) {
+  return createHash('sha256').update(`ai-ops-gateway:${value}`).digest('hex')
+}
+
 export interface PlatformDatabaseOptions {
   filename?: string
   now?: () => Date
@@ -985,6 +1013,11 @@ export class PlatformDatabase {
     this.writeAuditChainCheckpoint(rows.length, head?.id ?? null, head?.eventHash ?? null, now.toISOString())
   }
 
+  private isPersonDeleted(personId: string) {
+    return Boolean(this.db.prepare(`SELECT 1 FROM audit_events
+      WHERE action = 'delete' AND resource_type = 'person' AND resource_id = ? AND result = 'success' LIMIT 1`).get(personId))
+  }
+
   verifyAuditChain(now = this.now()): AuditChainVerification {
     let previousHash: string | null = null
     const rows = this.auditChainRows()
@@ -998,6 +1031,18 @@ export class PlatformDatabase {
     }
     const checkpoint = this.auditChainCheckpoint()
     const head = rows.at(-1)
+    // A fresh/cleared local database legitimately has no audit rows yet. Older
+    // databases may also have an empty checkpoint table because the business
+    // demo data was removed after the checkpoint migration ran. Treat that
+    // empty chain as valid; the first appended event will create the checkpoint
+    // atomically in appendAuditEvent(). A missing checkpoint is only invalid
+    // once there is at least one event to verify.
+    if (rows.length === 0 && !checkpoint) {
+      return {
+        algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true,
+        checkedAt: now.toISOString(), checkpointUpdatedAt: null, eventCount: 0, firstInvalidEventId: null,
+      }
+    }
     const checkpointVerified = Boolean(checkpoint
       && checkpoint.eventCount === rows.length
       && checkpoint.headEventId === (head?.id ?? null)
@@ -1010,6 +1055,7 @@ export class PlatformDatabase {
   }
 
   seedUser(seed: PlatformUserSeed, now = this.now()) {
+    if (this.isPersonDeleted(seed.id)) return
     const timestamp = now.toISOString()
     this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, employee_code, manager_name, joined_at, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1031,16 +1077,25 @@ export class PlatformDatabase {
   }
 
   seedApiKey(seed: PlatformApiKeySeed, now = this.now()) {
+    if (this.isPersonDeleted(seed.ownerUserId)) return
+    const model = seed.models?.[0] ?? 'ecommerce-general'
     const timestamp = now.toISOString()
-    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, purpose, status, expires_at, models_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET owner_user_id = excluded.owner_user_id, masked_value = excluded.masked_value,
-      purpose = excluded.purpose, status = excluded.status, expires_at = excluded.expires_at, models_json = excluded.models_json, updated_at = excluded.updated_at`).run(
-      seed.id, seed.ownerUserId, seed.maskedValue, seed.purpose, seed.status, seed.expiresAt ?? null, JSON.stringify(seed.models ?? ['ecommerce-general']), timestamp, timestamp,
+      secret_hash = COALESCE(excluded.secret_hash, api_keys.secret_hash), purpose = excluded.purpose, status = excluded.status,
+      expires_at = excluded.expires_at, models_json = excluded.models_json, updated_at = excluded.updated_at`).run(
+      seed.id, seed.ownerUserId, seed.maskedValue, seed.secretHash ?? null, seed.purpose, seed.status, seed.expiresAt ?? null,
+      JSON.stringify([model]), timestamp, timestamp,
     )
   }
 
   seedQuotaPolicy(seed: PlatformQuotaPolicySeed, now = this.now()) {
+    if (seed.level === 'person' && this.isPersonDeleted(seed.subjectId)) return
+    if (seed.level === 'key') {
+      const owner = this.db.prepare('SELECT owner_user_id AS ownerUserId FROM api_keys WHERE id = ? LIMIT 1').get(seed.subjectId) as { ownerUserId: string } | undefined
+      if (!owner || this.isPersonDeleted(owner.ownerUserId)) return
+    }
     const timestamp = now.toISOString()
     this.db.prepare(`INSERT INTO quota_policies(id, level, subject_id, period, target_points, mode, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1050,6 +1105,7 @@ export class PlatformDatabase {
   }
 
   seedTemporaryQuotaRequest(seed: PlatformTemporaryQuotaRequestCreate, now = this.now()) {
+    if (this.isPersonDeleted(seed.requesterUserId)) return
     if (this.db.prepare('SELECT 1 FROM temporary_quota_requests WHERE id = ? LIMIT 1').get(seed.id)) return
     this.createTemporaryQuotaRequest(seed, {
       id: `audit-${seed.idempotencyKey}`, actorUserId: seed.requesterUserId, action: 'create', resourceType: 'quota', resourceId: seed.id,
@@ -1089,6 +1145,25 @@ export class PlatformDatabase {
   }
 
   seedUsageRequest(seed: PlatformUsageRequestSeed) {
+    if (this.isPersonDeleted(seed.ownerUserId)) return
+    this.insertUsageRequest(seed)
+  }
+
+  recordGatewayUsage(seed: PlatformUsageRequestSeed, auditEvent: PlatformAuditEventSeed, now = this.now()) {
+    if (this.db.prepare('SELECT 1 FROM usage_requests WHERE request_id = ? LIMIT 1').get(seed.requestId)) return false
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.insertUsageRequest(seed)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+      return true
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  private insertUsageRequest(seed: PlatformUsageRequestSeed) {
     this.db.prepare(`INSERT INTO usage_requests(
       request_id, occurred_at, owner_user_id, api_key_id, purpose_id, purpose_name, purpose_alias,
       model_id, model_display_name, actual_model, channel_id, channel_name, channel_type, protocol,
@@ -1117,6 +1192,7 @@ export class PlatformDatabase {
   }
 
   seedConversationAuditRecord(seed: ConversationAuditMetadataSeed) {
+    if (this.isPersonDeleted(seed.personId)) return
     this.db.prepare(`INSERT INTO conversation_audit_records(
       id, request_id, captured_at, person_id, key_id, key_masked, purpose_id, purpose_label,
       model_id, model_label, policy_id, policy_label, policy_scope, policy_expires_at,
@@ -1142,6 +1218,8 @@ export class PlatformDatabase {
   }
 
   seedConversationUsageLink(seed: ConversationUsageLinkSeed) {
+    if (!this.db.prepare('SELECT 1 FROM conversation_audit_records WHERE id = ? LIMIT 1').get(seed.recordId)) return
+    if (!this.db.prepare('SELECT 1 FROM usage_requests WHERE request_id = ? LIMIT 1').get(seed.usageRequestId)) return
     this.db.prepare(`INSERT INTO conversation_usage_links(record_id, usage_request_id, link_source)
       VALUES (?, ?, ?)
       ON CONFLICT(record_id) DO UPDATE SET usage_request_id = excluded.usage_request_id, link_source = excluded.link_source`).run(
@@ -1303,7 +1381,12 @@ export class PlatformDatabase {
     return this.db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.status,
       d.id AS departmentId, d.name AS departmentName
       FROM users u LEFT JOIN departments d ON d.id = u.department_id
-      WHERE u.role = 'employee' ORDER BY u.created_at, u.display_name`).all() as Array<{
+      WHERE u.role = 'employee' AND NOT EXISTS (
+        SELECT 1 FROM audit_events deleted
+        WHERE deleted.action = 'delete' AND deleted.resource_type = 'person'
+          AND deleted.resource_id = u.id AND deleted.result = 'success'
+      )
+      ORDER BY u.created_at, u.display_name`).all() as Array<{
         id: string
         username: string
         displayName: string
@@ -1333,6 +1416,31 @@ export class PlatformDatabase {
 
   departmentExists(departmentId: string) {
     return Boolean(this.db.prepare('SELECT 1 FROM departments WHERE id = ? AND status = \'active\' LIMIT 1').get(departmentId))
+  }
+
+  findActiveDepartmentByName(name: string) {
+    const normalizedName = name.trim()
+    if (!normalizedName) return null
+    return this.db.prepare(`SELECT id, name
+      FROM departments
+      WHERE status = 'active' AND lower(trim(name)) = lower(?)
+      ORDER BY parent_id IS NULL DESC, created_at, id
+      LIMIT 1`).get(normalizedName) as { id: string; name: string } | undefined ?? null
+  }
+
+  ensureDepartment(nameOrId: string, now = this.now()) {
+    const normalized = nameOrId.trim()
+    if (!normalized) throw new Error('DEPARTMENT_NAME_REQUIRED')
+    if (this.departmentExists(normalized)) return normalized
+    const existing = this.findActiveDepartmentByName(normalized)
+    if (existing) return existing.id
+
+    if (!this.departmentExists('company-xinzhi')) {
+      this.seedDepartment({ id: 'company-xinzhi', name: '新知科技' }, now)
+    }
+    const id = `department-${createHash('sha256').update(`local:${normalized.toLocaleLowerCase('zh-CN')}`).digest('hex').slice(0, 16)}`
+    this.seedDepartment({ id, name: normalized, parentId: 'company-xinzhi' }, now)
+    return id
   }
 
   createPerson(person: PlatformPersonCreate, auditEvent?: PlatformAuditEventSeed, now = this.now()) {
@@ -1382,6 +1490,21 @@ export class PlatformDatabase {
     return row ? JSON.parse(row.modelsJson) as string[] : null
   }
 
+  getPersonModelAllowlist(personId: string) {
+    const policy = this.getPersonModelPolicy(personId)
+    if (policy?.length) return policy
+    const rows = this.db.prepare("SELECT models_json AS modelsJson FROM api_keys WHERE owner_user_id = ? AND status <> 'revoked'").all(personId) as Array<{ modelsJson: string }>
+    const boundModels = rows.map((row) => {
+      try {
+        const stored = JSON.parse(row.modelsJson) as unknown
+        return Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : null
+      } catch {
+        return null
+      }
+    }).filter((model): model is string => Boolean(model))
+    return boundModels.length ? [...new Set(boundModels)] : ['ecommerce-general']
+  }
+
   updatePersonModelPolicy(personId: string, models: string[], auditEvent: PlatformAuditEventSeed, now = this.now()) {
     const previous = this.db.prepare('SELECT summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { summaryJson: string } | undefined
     if (previous) {
@@ -1401,8 +1524,16 @@ export class PlatformDatabase {
     try {
       this.db.prepare(`INSERT INTO person_model_policies(person_id, models_json, updated_at) VALUES (?, ?, ?)
         ON CONFLICT(person_id) DO UPDATE SET models_json = excluded.models_json, updated_at = excluded.updated_at`).run(personId, JSON.stringify(models), timestamp)
-      const keysUpdated = Number(this.db.prepare("UPDATE api_keys SET models_json = ?, updated_at = ? WHERE owner_user_id = ? AND status <> 'revoked'").run(JSON.stringify(models), timestamp, personId).changes)
-      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, modelsBefore: previousModels, modelsAfter: models, keysUpdated } }, now)
+      const keyRows = this.db.prepare("SELECT id, models_json AS modelsJson FROM api_keys WHERE owner_user_id = ? AND status <> 'revoked'").all(personId) as Array<{ id: string; modelsJson: string }>
+      const restrictedKeyIds = keyRows.filter((key) => {
+        const stored = JSON.parse(key.modelsJson) as unknown
+        const model = Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : null
+        return !model || !models.includes(model)
+      }).map((key) => key.id)
+      const disableKey = this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ? AND status <> 'revoked'")
+      for (const keyId of restrictedKeyIds) disableKey.run(timestamp, keyId)
+      const keysUpdated = restrictedKeyIds.length
+      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, modelsBefore: previousModels, modelsAfter: models, keysUpdated, restrictedKeyIds } }, now)
       this.db.exec('COMMIT')
       return { models, keysUpdated, idempotent: false }
     } catch (error) {
@@ -1440,12 +1571,56 @@ export class PlatformDatabase {
     return disabledPerson ? { state: 'disabled', idempotent: false, person: disabledPerson, keysDisabled } : null
   }
 
+  deletePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonDeleteResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    if (previousOperation) {
+      if (previousOperation.resourceId !== personId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      let summary: { resourceName?: unknown } = {}
+      try { summary = JSON.parse(previousOperation.summaryJson) as { resourceName?: unknown } } catch { /* use the stable fallback below */ }
+      const displayName = typeof summary.resourceName === 'string' && summary.resourceName ? summary.resourceName : '已删除人员'
+      return { state: 'deleted', idempotent: true, person: { id: personId, displayName } }
+    }
+
+    const person = this.db.prepare(`SELECT id, display_name AS displayName, status
+      FROM users WHERE id = ? AND role = 'employee' LIMIT 1`).get(personId) as { id: string; displayName: string; status: 'active' | 'disabled' } | undefined
+    if (!person || this.isPersonDeleted(personId)) return null
+    if (person.status !== 'disabled') return { state: 'not_disabled', idempotent: false, person: { id: person.id, displayName: person.displayName } }
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.appendAuditEvent({
+        ...auditEvent,
+        summary: {
+          ...auditEvent.summary,
+          code: 'PERSON_DELETED',
+          message: '已从人员目录移除本地 SQLite 人员；历史审计与用量记录保留，关联 Key 继续保持已回收状态。',
+          resourceName: person.displayName,
+        },
+      }, now)
+      this.db.prepare(`DELETE FROM quota_policies
+        WHERE (level = 'person' AND subject_id = ?)
+           OR (level = 'key' AND subject_id IN (SELECT id FROM api_keys WHERE owner_user_id = ?))`).run(personId, personId)
+      this.db.prepare('DELETE FROM person_model_policies WHERE person_id = ?').run(personId)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { state: 'deleted', idempotent: false, person: { id: person.id, displayName: person.displayName } }
+  }
+
   listApiKeys() {
-    const rows = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
+      const rows = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
       k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson, k.created_at AS createdAt,
       u.display_name AS ownerName, d.id AS departmentId, d.name AS departmentName
       FROM api_keys k JOIN users u ON u.id = k.owner_user_id
-      LEFT JOIN departments d ON d.id = u.department_id ORDER BY k.created_at DESC, k.id`).all() as Array<{
+      LEFT JOIN departments d ON d.id = u.department_id
+      WHERE NOT EXISTS (
+        SELECT 1 FROM audit_events deleted
+        WHERE deleted.action = 'delete' AND deleted.resource_type = 'person'
+          AND deleted.resource_id = u.id AND deleted.result = 'success'
+      )
+      ORDER BY k.created_at DESC, k.id`).all() as Array<{
         id: string
         ownerUserId: string
         maskedValue: string
@@ -1458,7 +1633,11 @@ export class PlatformDatabase {
         departmentId: string | null
         departmentName: string | null
       }>
-    return rows.map((row) => ({ ...row, models: JSON.parse(row.modelsJson) as string[] }))
+    return rows.map((row) => {
+      const stored = JSON.parse(row.modelsJson) as unknown
+      const model = Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : 'ecommerce-general'
+      return { ...row, model, models: [model] }
+    })
   }
 
   listApiKeysForOwner(ownerUserId: string) {
@@ -1466,19 +1645,81 @@ export class PlatformDatabase {
       k.expires_at AS expiresAt, k.models_json AS modelsJson, k.created_at AS createdAt,
       MAX(r.occurred_at) AS lastUsedAt
       FROM api_keys k LEFT JOIN usage_requests r ON r.api_key_id = k.id AND r.owner_user_id = k.owner_user_id
-      WHERE k.owner_user_id = ? AND k.status IN ('active', 'expiring')
+      WHERE k.owner_user_id = ?
       GROUP BY k.id, k.masked_value, k.purpose, k.status, k.expires_at, k.models_json, k.created_at
       ORDER BY k.created_at DESC, k.id`).all(ownerUserId) as Array<{
         id: string
         maskedValue: string
         purpose: string
-        status: 'active' | 'expiring'
+        status: 'active' | 'expiring' | 'revoked'
         expiresAt: string | null
         modelsJson: string
         createdAt: string
         lastUsedAt: string | null
       }>
-    return rows.map((row) => ({ ...row, models: JSON.parse(row.modelsJson) as string[] }))
+    return rows.map((row) => {
+      const stored = JSON.parse(row.modelsJson) as unknown
+      const model = Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : 'ecommerce-general'
+      return { ...row, model, models: [model] }
+    })
+  }
+
+  listPersonKeyTokenUsage(ownerUserId: string, since: string) {
+    return this.db.prepare(`SELECT k.id AS keyId,
+      COUNT(r.request_id) AS requests,
+      COALESCE(SUM(r.input_tokens), 0) AS inputTokens,
+      COALESCE(SUM(r.output_tokens), 0) AS outputTokens
+      FROM api_keys k
+      LEFT JOIN usage_requests r ON r.api_key_id = k.id
+        AND r.owner_user_id = k.owner_user_id
+        AND r.occurred_at >= ?
+      WHERE k.owner_user_id = ?
+      GROUP BY k.id
+      ORDER BY k.created_at DESC, k.id`).all(since, ownerUserId) as Array<{
+        keyId: string
+        requests: number
+        inputTokens: number
+        outputTokens: number
+      }>
+  }
+
+  findGatewayKey(secret: string, now = this.now()): PlatformGatewayKey | null {
+    const row = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
+      k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson,
+      u.display_name AS ownerName, d.name AS departmentName
+      FROM api_keys k JOIN users u ON u.id = k.owner_user_id
+      LEFT JOIN departments d ON d.id = u.department_id
+      WHERE k.secret_hash = ? AND k.status IN ('active', 'expiring') AND u.status = 'active'
+      LIMIT 1`).get(hashPlatformApiKey(secret)) as {
+        id: string
+        ownerUserId: string
+        maskedValue: string
+        purpose: string
+        status: 'active' | 'expiring'
+        expiresAt: string | null
+      modelsJson: string
+        ownerName: string
+        departmentName: string | null
+      } | undefined
+    if (!row || (row.expiresAt !== null && row.expiresAt <= now.toISOString())) return null
+    return {
+      id: row.id,
+      ownerUserId: row.ownerUserId,
+      ownerName: row.ownerName,
+      departmentName: row.departmentName ?? '未分配部门',
+      maskedValue: row.maskedValue,
+      purpose: row.purpose,
+      model: (() => {
+        const stored = JSON.parse(row.modelsJson) as unknown
+        return Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : 'ecommerce-general'
+      })(),
+      models: [(() => {
+        const stored = JSON.parse(row.modelsJson) as unknown
+        return Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : 'ecommerce-general'
+      })()],
+      status: row.status,
+      expiresAt: row.expiresAt,
+    }
   }
 
   findPersonDepartmentId(personId: string) {
@@ -1497,12 +1738,14 @@ export class PlatformDatabase {
   }
 
   createApiKey(key: PlatformApiKeyCreate, auditEvent?: PlatformAuditEventSeed, now = this.now()) {
+    const model = key.model ?? (key.models.length === 1 ? key.models[0] : null)
+    if (!model) throw new Error('KEY_SINGLE_MODEL_REQUIRED')
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
-        key.id, key.ownerUserId, key.maskedValue, key.purpose, key.expiresAt, JSON.stringify(key.models), timestamp, timestamp,
+      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, purpose, status, expires_at, models_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
+        key.id, key.ownerUserId, key.maskedValue, key.secretHash, key.purpose, key.expiresAt, JSON.stringify([model]), timestamp, timestamp,
       )
       if (auditEvent) this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
@@ -1538,6 +1781,8 @@ export class PlatformDatabase {
   }
 
   rotateApiKey(keyId: string, replacement: PlatformApiKeyCreate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyRotateResult | null {
+    const model = replacement.model ?? (replacement.models.length === 1 ? replacement.models[0] : null)
+    if (!model) throw new Error('KEY_SINGLE_MODEL_REQUIRED')
     const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
     const current = (id: string) => this.listApiKeys().find((item) => item.id === id) ?? null
     if (previousOperation) {
@@ -1553,9 +1798,9 @@ export class PlatformDatabase {
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, purpose, status, expires_at, models_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
-        replacement.id, replacement.ownerUserId, replacement.maskedValue, replacement.purpose, replacement.expiresAt, JSON.stringify(replacement.models), timestamp, timestamp,
+      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, purpose, status, expires_at, models_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
+        replacement.id, replacement.ownerUserId, replacement.maskedValue, replacement.secretHash, replacement.purpose, replacement.expiresAt, JSON.stringify([model]), timestamp, timestamp,
       )
       this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ?").run(timestamp, keyId)
       this.appendAuditEvent(auditEvent, now)
@@ -2493,6 +2738,12 @@ export class PlatformDatabase {
     return row ?? null
   }
 
+  findUserByRole(role: PlatformUserRole) {
+    const row = this.db.prepare(`SELECT id, username, display_name AS displayName, role, status, department_id AS departmentId
+      FROM users WHERE role = ? AND status = 'active' ORDER BY id LIMIT 1`).get(role) as (PlatformUser & { status: PlatformUser['status'] }) | undefined
+    return row ?? null
+  }
+
   userExists(userId: string) {
     return Boolean(this.db.prepare('SELECT 1 FROM users WHERE id = ? LIMIT 1').get(userId))
   }
@@ -2537,7 +2788,7 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
     displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
     role: 'super_admin',
     roleLabel: '超级管理员',
-    password: process.env.AUTH_ADMIN_PASSWORD ?? 'admin-demo',
+    password: process.env.AI_OPS_ADMIN_ONLY === 'true' ? 'local-admin-password-disabled' : process.env.AUTH_ADMIN_PASSWORD ?? 'admin-demo',
   })
   database.seedUser({
     id: 'person-lin',
@@ -2577,10 +2828,10 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
   database.setUserDepartment('person-lin', 'content')
 
   const keys: PlatformApiKeySeed[] = [
-    { id: 'key-lin-1', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••7F2A', purpose: '商品文案', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-copy', 'ecommerce-general'] },
+    { id: 'key-lin-1', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••7F2A', purpose: '商品文案', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-copy'] },
     { id: 'key-lin-2', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••3C91', purpose: '临时项目', status: 'expiring', expiresAt: '2026-10-15T15:59:59.000Z', models: ['ecommerce-copy'] },
-    { id: 'key-zhou-1', ownerUserId: 'person-zhou', maskedValue: 'sk-ops••••••8B14', purpose: '策略分析', status: 'active', expiresAt: '2027-01-31T15:59:59.000Z', models: ['ecommerce-analysis', 'ecommerce-general'] },
-    { id: 'key-chen-1', ownerUserId: 'person-chen', maskedValue: 'sk-ops••••••6D20', purpose: '多语翻译', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-translate', 'ecommerce-general'] },
+    { id: 'key-zhou-1', ownerUserId: 'person-zhou', maskedValue: 'sk-ops••••••8B14', purpose: '策略分析', status: 'active', expiresAt: '2027-01-31T15:59:59.000Z', models: ['ecommerce-analysis'] },
+    { id: 'key-chen-1', ownerUserId: 'person-chen', maskedValue: 'sk-ops••••••6D20', purpose: '多语翻译', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-translate'] },
     { id: 'key-xu-1', ownerUserId: 'person-xu', maskedValue: 'sk-ops••••••A921', purpose: '回复建议', status: 'revoked', expiresAt: '2026-09-01T15:59:59.000Z', models: ['ecommerce-service'] },
   ]
   for (const key of keys) database.seedApiKey(key)

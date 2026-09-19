@@ -1,0 +1,68 @@
+services:
+  server:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 4175
+      PLATFORM_DB_PATH: /app/data/platform.sqlite
+      AUTH_MODE: ${AUTH_MODE:-required}
+      AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:-admin}
+      AUTH_ADMIN_DISPLAY_NAME: ${AUTH_ADMIN_DISPLAY_NAME:-超级管理员}
+      AI_OPS_ADMIN_ONLY: ${AI_OPS_ADMIN_ONLY:-true}
+      AI_OPS_SEED_DEMO_DATA: ${AI_OPS_SEED_DEMO_DATA:-false}
+      AI_OPS_SOFT_QUOTA_ENABLED: ${AI_OPS_SOFT_QUOTA_ENABLED:-false}
+      NEW_API_BASE_URL: ${NEW_API_BASE_URL:-}
+      NEW_API_ACCESS_TOKEN: ${NEW_API_ACCESS_TOKEN:-}
+      NEW_API_USER_ID: ${NEW_API_USER_ID:-}
+      AI_OPS_GATEWAY_MODE: ${AI_OPS_GATEWAY_MODE:-standalone}
+      AI_OPS_GATEWAY_PROVIDER: ${AI_OPS_GATEWAY_PROVIDER:-openai_compatible}
+      AI_OPS_GATEWAY_UPSTREAM_BASE_URL: ${AI_OPS_GATEWAY_UPSTREAM_BASE_URL:-}
+      AI_OPS_GATEWAY_UPSTREAM_API_KEY: ${AI_OPS_GATEWAY_UPSTREAM_API_KEY:-}
+      AI_OPS_GATEWAY_NEW_API_BASE_URL: ${AI_OPS_GATEWAY_NEW_API_BASE_URL:-}
+      AI_OPS_GATEWAY_NEW_API_API_KEY: ${AI_OPS_GATEWAY_NEW_API_API_KEY:-}
+      AI_OPS_GATEWAY_CPA_BASE_URL: ${AI_OPS_GATEWAY_CPA_BASE_URL:-}
+      AI_OPS_GATEWAY_CPA_API_KEY: ${AI_OPS_GATEWAY_CPA_API_KEY:-}
+      AI_OPS_GATEWAY_DEFAULT_MODEL: ${AI_OPS_GATEWAY_DEFAULT_MODEL:-}
+      AI_OPS_GATEWAY_FALLBACK_MODEL: ${AI_OPS_GATEWAY_FALLBACK_MODEL:-}
+      AI_OPS_GATEWAY_ALLOW_FALLBACK: ${AI_OPS_GATEWAY_ALLOW_FALLBACK:-false}
+      AI_OPS_GATEWAY_CLIENT_API_KEY: ${AI_OPS_GATEWAY_CLIENT_API_KEY:-}
+      AI_OPS_GATEWAY_MODEL_ALIASES: ${AI_OPS_GATEWAY_MODEL_ALIASES:-}
+    ports:
+      - "127.0.0.1:4175:4175"
+    volumes:
+      - platform-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4175/gateway/health').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  web:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    environment:
+      NODE_ENV: production
+      VITE_BFF_URL: http://server:4175
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4174:4174"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4174/').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  platform-data:

@@ -15,15 +15,15 @@ import {
   IconCheck,
   IconChevronRight,
   IconClock,
-  IconCoins,
   IconKey,
   IconRefresh,
-  IconRoute,
   IconShieldLock,
   IconSparkles,
+  IconTrash,
   IconUser,
 } from '@tabler/icons-vue'
-import { disablePerson, fetchPersonDetail, fetchPersonUsage, PeopleApiError, type PersonDetailResponse, type PersonDisableBody, type PersonDisableResponse, type PersonGoalUpdateBody, type PersonGoalUpdateResponse, type PersonModelsUpdateBody, type PersonModelsUpdateResponse, type PersonUsagePeriod, type PersonUsageResponse, updatePersonModels, updatePersonMonthlyGoal } from '../people-api'
+import { deletePerson, disablePerson, fetchPersonDetail, fetchPersonUsage, PeopleApiError, type PersonDeleteBody, type PersonDeleteResponse, type PersonDetailResponse, type PersonDisableBody, type PersonDisableResponse, type PersonGoalUpdateBody, type PersonGoalUpdateResponse, type PersonUsagePeriod, type PersonUsageResponse, updatePersonMonthlyGoal } from '../people-api'
+import { surnameInitial } from '../modules/people/person-display'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -40,26 +40,25 @@ const disableError = ref('')
 const isDisabling = ref(false)
 const disableResult = ref<PersonDisableResponse | null>(null)
 const disableForm = ref<PersonDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
+const showDelete = ref(false)
+const deleteError = ref('')
+const isDeleting = ref(false)
+const deleteResult = ref<PersonDeleteResponse | null>(null)
+const deleteForm = ref<PersonDeleteBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
 const showGoalAdjust = ref(false)
 const goalAdjustError = ref('')
 const isGoalAdjusting = ref(false)
 const goalAdjustResult = ref<PersonGoalUpdateResponse | null>(null)
 const goalAdjustForm = ref<PersonGoalUpdateBody>({ targetPoints: 1, idempotencyKey: '', reason: '', acknowledgeImpact: true })
-const showModelPolicy = ref(false)
-const modelPolicyError = ref('')
-const isModelPolicyUpdating = ref(false)
-const modelPolicyResult = ref<PersonModelsUpdateResponse | null>(null)
-const modelPolicyForm = ref<PersonModelsUpdateBody>({ models: [], idempotencyKey: '', reason: '', acknowledgeImpact: true })
 const chartElement = ref<HTMLElement | null>(null)
 let activeRequest: AbortController | null = null
 let usageRequest: AbortController | null = null
 let chart: ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
 
-const statusLabels = { active: '在职', disabled: '已停用', offboarding: '离职待回收' } as const
+const statusLabels = { active: '在职', disabled: '已停用', offboarding: '待回收' } as const
 const updatedAt = computed(() => detail.value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(detail.value.meta.generatedAt)) : '等待数据')
 const remainingPoints = computed(() => detail.value ? Math.max(0, detail.value.metrics.monthPointLimit - detail.value.metrics.monthPoints) : 0)
-const allowedModels = computed(() => detail.value?.models.filter((model) => model.allowed) ?? [])
 const goalProjectedPercent = computed(() => {
   if (!detail.value || !Number.isFinite(goalAdjustForm.value.targetPoints) || goalAdjustForm.value.targetPoints < 1) return 0
   return Number((detail.value.metrics.monthPoints / goalAdjustForm.value.targetPoints * 100).toFixed(1))
@@ -88,8 +87,7 @@ const metrics = computed(() => {
   if (!detail.value) return []
   return [
     { label: '今日请求', value: detail.value.metrics.todayRequests.toLocaleString('zh-CN'), hint: '当前人员全部 Key', icon: IconActivityHeartbeat, tone: 'teal' },
-    { label: '本月 Token', value: compact(detail.value.metrics.monthTokens), hint: '输入与输出合计', icon: IconSparkles, tone: 'blue' },
-    { label: '本月成本点数', value: detail.value.metrics.monthPoints.toLocaleString('zh-CN'), hint: `剩余 ${remainingPoints.value} 点`, icon: IconCoins, tone: 'amber' },
+    { label: '本月 Token', value: compact(detail.value.metrics.monthTokens), hint: `输入 ${compact(detail.value.metrics.monthInputTokens)} · 输出 ${compact(detail.value.metrics.monthOutputTokens)}`, icon: IconSparkles, tone: 'blue' },
     { label: '调用质量', value: `${detail.value.metrics.successRate}%`, hint: `P95 ${(detail.value.metrics.p95LatencyMs / 1000).toFixed(1)}s`, icon: IconClock, tone: 'green' },
   ]
 })
@@ -101,13 +99,9 @@ function chartOptions(): EChartsCoreOption {
     grid: { left: 42, right: 12, top: 24, bottom: 28 },
     tooltip: { trigger: 'axis', backgroundColor: '#182433', borderWidth: 0, textStyle: { color: '#fff', fontSize: 11 } },
     xAxis: { type: 'category', boundaryGap: false, data: items.map((item) => item.date), axisLine: { lineStyle: { color: '#dce3ea' } }, axisTick: { show: false }, axisLabel: { color: '#7a8795', fontSize: 10, interval: period.value === '30d' ? 4 : 0 } },
-    yAxis: [
-      { type: 'value', splitNumber: 4, axisLabel: { color: '#7a8795', fontSize: 9 }, splitLine: { lineStyle: { color: '#edf1f5', type: 'dashed' } } },
-      { type: 'value', show: false },
-    ],
+    yAxis: { type: 'value', splitNumber: 4, axisLabel: { color: '#7a8795', fontSize: 9 }, splitLine: { lineStyle: { color: '#edf1f5', type: 'dashed' } } },
     series: [
       { name: '请求数', type: 'line', smooth: .35, showSymbol: period.value === '7d', symbolSize: 6, data: items.map((item) => item.requests), lineStyle: { color: '#146c70', width: 2.5 }, itemStyle: { color: '#146c70' }, areaStyle: { color: 'rgba(20,108,112,.09)' } },
-      { name: '成本点数', type: 'bar', yAxisIndex: 1, barMaxWidth: 10, data: items.map((item) => item.points), itemStyle: { color: 'rgba(245,159,0,.25)', borderRadius: [3, 3, 0, 0] } },
     ],
   }
 }
@@ -165,8 +159,8 @@ async function changePeriod(nextPeriod: PersonUsagePeriod) {
 }
 
 function newDisableIdempotencyKey() { return `person-disable-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function newDeleteIdempotencyKey() { return `person-delete-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
 function newGoalIdempotencyKey() { return `quota-update-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
-function newModelsIdempotencyKey() { return `person-models-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
 function openGoalAdjust() {
   if (!detail.value || detail.value.profile.status === 'disabled') return
   goalAdjustError.value = ''; goalAdjustResult.value = null
@@ -185,24 +179,6 @@ async function submitGoalAdjust() {
     goalAdjustError.value = `${error instanceof Error ? error.message : '调整人员月度软目标失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
   } finally { isGoalAdjusting.value = false }
 }
-function openModelPolicy() {
-  if (!detail.value || detail.value.profile.status === 'disabled') return
-  modelPolicyError.value = ''; modelPolicyResult.value = null
-  modelPolicyForm.value = { models: detail.value.models.filter((model) => model.allowed).map((model) => model.alias), idempotencyKey: newModelsIdempotencyKey(), reason: '', acknowledgeImpact: true }
-  showModelPolicy.value = true
-}
-function closeModelPolicy() { if (!isModelPolicyUpdating.value) { showModelPolicy.value = false; modelPolicyError.value = ''; modelPolicyResult.value = null } }
-async function submitModelPolicy() {
-  if (!detail.value) return
-  isModelPolicyUpdating.value = true; modelPolicyError.value = ''
-  try {
-    modelPolicyResult.value = await updatePersonModels(detail.value.profile.id, modelPolicyForm.value)
-    await loadPerson()
-  } catch (error) {
-    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
-    modelPolicyError.value = `${error instanceof Error ? error.message : '更新人员模型白名单失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
-  } finally { isModelPolicyUpdating.value = false }
-}
 function openDisable() {
   if (!detail.value || detail.value.profile.status === 'disabled') return
   disableError.value = ''; disableResult.value = null
@@ -220,6 +196,23 @@ async function submitDisable() {
     const requestId = error instanceof PeopleApiError ? error.requestId : undefined
     disableError.value = `${error instanceof Error ? error.message : '停用人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
   } finally { isDisabling.value = false }
+}
+function openDelete() {
+  if (!detail.value || detail.value.profile.status !== 'disabled') return
+  deleteError.value = ''; deleteResult.value = null
+  deleteForm.value = { idempotencyKey: newDeleteIdempotencyKey(), reason: '', acknowledgeImpact: true }
+  showDelete.value = true
+}
+function closeDelete() { if (!isDeleting.value) { showDelete.value = false; deleteError.value = ''; deleteResult.value = null } }
+async function submitDelete() {
+  if (!detail.value || detail.value.profile.status !== 'disabled') return
+  isDeleting.value = true; deleteError.value = ''
+  try {
+    deleteResult.value = await deletePerson(detail.value.profile.id, deleteForm.value)
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    deleteError.value = `${error instanceof Error ? error.message : '删除人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isDeleting.value = false }
 }
 
 onMounted(() => void loadPerson())
@@ -243,11 +236,11 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <section class="person-hero panel">
-        <div class="person-hero-avatar" :class="`avatar-${detail.profile.tone}`">{{ detail.profile.initials }}</div>
+        <div class="person-hero-avatar" :class="`avatar-${detail.profile.tone}`">{{ surnameInitial(detail.profile.name) }}</div>
         <div class="person-hero-copy">
           <div class="person-hero-name"><h1>{{ detail.profile.name }}</h1><span class="person-status" :class="`status-${detail.profile.status}`"><i />{{ statusLabels[detail.profile.status] }}</span></div>
-          <p>{{ detail.profile.department.name }} · {{ detail.profile.title }} · 负责人 {{ detail.profile.manager }}</p>
-          <div><span><IconRoute :size="14" />{{ detail.profile.purpose }}</span><span><IconKey :size="14" />{{ detail.profile.keyCount }} 个访问 Key</span><span><IconClock :size="14" />{{ relativeTime(detail.profile.lastActiveAt) }}</span></div>
+          <p>{{ detail.profile.department.name }}</p>
+          <div><span><IconKey :size="14" />{{ detail.profile.keyCount }} 个访问 Key</span><span><IconClock :size="14" />{{ relativeTime(detail.profile.lastActiveAt) }}</span></div>
         </div>
         <div class="person-hero-actions"><span>更新于 {{ updatedAt }}</span><button class="btn btn-white" :disabled="isLoading" @click="loadPerson"><IconRefresh :size="16" :class="{ spinning: isLoading }" />刷新</button><button class="btn danger-outline" :disabled="detail.profile.status === 'disabled'" @click="openDisable"><IconBan :size="16" />{{ detail.profile.status === 'disabled' ? '人员已停用' : '停用人员' }}</button></div>
       </section>
@@ -263,32 +256,28 @@ onBeforeUnmount(() => {
 
       <section class="person-detail-grid">
         <article class="panel person-trend-panel">
-          <div class="panel-header"><div><h2>个人用量趋势</h2><p>请求数与内部成本点数；数据时区 Asia/Shanghai</p></div><div class="period-switch"><button :class="{ active: period === '7d' }" :disabled="isUsageLoading" @click="changePeriod('7d')">7 天</button><button :class="{ active: period === '30d' }" :disabled="isUsageLoading" @click="changePeriod('30d')">30 天</button></div></div>
-          <div class="chart-legend"><span class="line-key" />请求数 <span class="bar-key" />成本点数</div>
+          <div class="panel-header"><div><h2>个人用量趋势</h2><p>请求数；数据时区 Asia/Shanghai</p></div><div class="period-switch"><button :class="{ active: period === '7d' }" :disabled="isUsageLoading" @click="changePeriod('7d')">7 天</button><button :class="{ active: period === '30d' }" :disabled="isUsageLoading" @click="changePeriod('30d')">30 天</button></div></div>
+          <div class="chart-legend"><span class="line-key" />请求数</div>
           <div ref="chartElement" class="person-trend-chart" role="img" :aria-label="`${detail.profile.name}用量趋势图`" />
         </article>
 
         <article class="panel profile-panel">
-          <div class="panel-header"><div><h2>基础档案</h2><p>组织归属与软目标状态</p></div><IconUser :size="18" /></div>
+          <div class="panel-header"><div><h2>基础档案</h2><p>组织归属与访问权限</p></div><IconUser :size="18" /></div>
           <dl class="profile-facts">
             <div><dt>人员 ID</dt><dd>{{ detail.profile.id }}</dd></div><div><dt>所属部门</dt><dd><IconBuilding :size="13" />{{ detail.profile.department.name }}</dd></div>
-            <div><dt>岗位</dt><dd>{{ detail.profile.title }}</dd></div><div><dt>负责人</dt><dd>{{ detail.profile.manager }}</dd></div>
-            <div><dt>主要用途</dt><dd>{{ detail.profile.purpose }}</dd></div><div><dt>允许模型</dt><dd>{{ allowedModels.length }} 个业务别名</dd></div>
           </dl>
-          <div class="detail-goal"><div><span>月度软目标</span><strong>{{ detail.profile.goal.percent }}%</strong></div><div><i :class="`goal-${detail.profile.goal.state}`" :style="{ width: `${Math.min(detail.profile.goal.percent, 100)}%` }" /></div><small>已用 {{ detail.profile.goal.used }} 点 · 目标 {{ detail.profile.goal.limit }} 点 · 达到 100% 当前仅提醒</small></div>
         </article>
       </section>
 
       <section class="panel person-keys-panel">
-        <div class="panel-header"><div><h2>访问 Key</h2><p>固定返回掩码；完整 Key 不进入浏览器、日志或导出</p></div><RouterLink class="key-summary" :to="`/keys?owner=${detail.profile.id}`">查看 {{ detail.keys.length }} 个</RouterLink></div>
-        <div v-if="detail.keys.length" class="table-responsive"><table class="data-table detail-key-table"><thead><tr><th>Key 掩码</th><th>用途</th><th>允许模型</th><th>状态</th><th>到期时间</th><th>最后使用</th></tr></thead><tbody><tr v-for="key in detail.keys" :key="key.id"><td><code>{{ key.masked }}</code></td><td>{{ key.purpose }}</td><td><div class="model-tags"><span v-for="model in key.models" :key="model">{{ model }}</span></div></td><td><span class="person-status" :class="`status-${key.status}`"><i />{{ key.status === 'active' ? '启用' : '停用' }}</span></td><td>{{ dateText(key.expiresAt) }}</td><td>{{ relativeTime(key.lastUsedAt) }}</td></tr></tbody></table></div>
+        <div class="panel-header"><div><h2>访问 Key</h2><p>每个 Key 按绑定模型统计本自然月输入、输出和合计 Token；完整 Key 不进入浏览器、日志或导出</p></div><div class="key-summary-actions"><strong>本月合计 {{ compact(detail.metrics.monthTokens) }} Token</strong><RouterLink class="key-summary" :to="`/keys?owner=${detail.profile.id}`">查看 {{ detail.keys.length }} 个</RouterLink></div></div>
+            <div v-if="detail.keys.length" class="table-responsive"><table class="data-table detail-key-table"><thead><tr><th>Key 掩码</th><th>用途</th><th>绑定模型</th><th>本月 Token</th><th>状态</th><th>到期时间</th><th>最后使用</th></tr></thead><tbody><tr v-for="key in detail.keys" :key="key.id"><td><code>{{ key.masked }}</code></td><td>{{ key.purpose }}</td><td><div class="model-tags"><span>{{ key.model }}</span></div></td><td><div class="key-token-cell"><strong>{{ compact(key.usage.totalTokens) }} Token</strong><small>{{ key.usage.requests }} 次 · 输入 {{ compact(key.usage.inputTokens) }} · 输出 {{ compact(key.usage.outputTokens) }}</small></div></td><td><span class="person-status" :class="`status-${key.status}`"><i />{{ key.status === 'active' ? '启用' : '停用' }}</span></td><td>{{ dateText(key.expiresAt) }}</td><td>{{ relativeTime(key.lastUsedAt) }}</td></tr></tbody></table></div>
         <div v-else class="panel-empty">该人员当前没有访问 Key</div>
       </section>
 
-      <section class="person-bottom-grid">
-        <article class="panel allowed-models-panel"><div class="panel-header"><div><h2>允许模型</h2><p>客户端使用业务别名，不接触实际渠道</p></div><IconSparkles :size="18" /></div><div class="allowed-model-list"><div v-for="model in detail.models" :key="model.alias" :class="{ blocked: !model.allowed }"><span><IconCheck v-if="model.allowed" :size="15" /><IconShieldLock v-else :size="15" /></span><div><strong>{{ model.alias }}<em :class="{ experiment: model.type === 'experiment' }">{{ model.type === 'experiment' ? '实验' : '正式' }}</em></strong><small>{{ model.name }} · {{ model.purpose }}</small></div><b>{{ model.allowed ? '允许' : '未授权' }}</b></div></div></article>
-        <article class="panel management-boundary"><div class="panel-header"><div><h2>管理操作</h2><p>仅开放本地模拟人员停用、软目标与模型白名单调整</p></div><IconShieldLock :size="18" /></div><div class="boundary-copy"><strong>停用会同时回收关联 Key</strong><p>操作要求管理员、CSRF、原因确认和幂等编号；只影响 SQLite 模拟人员与 Key，不调用 New API。</p><a class="btn btn-white" :href="`/audit?resource=person&search=${encodeURIComponent(detail.profile.name)}`"><IconClock :size="16" />操作审计</a><button class="btn btn-white" :disabled="detail.profile.status === 'disabled'" @click="openGoalAdjust">调整软目标</button><button class="btn btn-white" :disabled="detail.profile.status === 'disabled'" @click="openModelPolicy">调整模型白名单</button><button class="btn danger-outline" :disabled="detail.profile.status === 'disabled'" @click="openDisable">{{ detail.profile.status === 'disabled' ? '人员已停用' : '停用并回收 Key' }}</button></div></article>
-      </section>
+       <section class="person-bottom-grid">
+         <article class="panel management-boundary"><div class="panel-header"><div><h2>管理操作</h2><p>仅开放本地模拟人员停用和删除</p></div><IconShieldLock :size="18" /></div><div class="boundary-copy"><strong>{{ detail.profile.status === 'disabled' ? '人员已停用，可从人员目录删除' : '停用会同时回收关联 Key' }}</strong><p>{{ detail.profile.status === 'disabled' ? '删除只移除人员目录记录，历史审计、用量与已回收 Key 记录会保留；操作要求管理员、CSRF、原因确认和幂等编号。' : '操作要求管理员、CSRF、原因确认和幂等编号；只影响 SQLite 模拟人员与 Key，不调用 New API。' }}</p><a class="btn btn-white" :href="`/audit?resource=person&search=${encodeURIComponent(detail.profile.name)}`"><IconClock :size="16" />操作审计</a><button v-if="detail.profile.status !== 'disabled'" class="btn danger-outline" @click="openDisable">停用并回收 Key</button><button v-else class="btn danger-outline" @click="openDelete"><IconTrash :size="16" />删除人员</button></div></article>
+       </section>
 
       <footer class="page-footer">数据来源：{{ detail.meta.source.toUpperCase() }} · 人员状态与 Key 回收可写入本地 SQLite · 完整 Key 从不返回浏览器</footer>
     </template>
@@ -301,19 +290,19 @@ onBeforeUnmount(() => {
       </aside>
     </div>
 
-    <div v-if="showModelPolicy && detail" class="drawer-backdrop" @click.self="closeModelPolicy">
-      <aside class="create-key-dialog quota-adjust-dialog model-policy-dialog" role="dialog" aria-modal="true" aria-label="调整人员模型白名单">
-        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ modelPolicyResult ? '人员模型白名单已更新' : '调整人员模型白名单' }}</h2></div><button class="icon-button" aria-label="关闭人员模型白名单调整" :disabled="isModelPolicyUpdating" @click="closeModelPolicy">×</button></header>
-        <template v-if="modelPolicyResult"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ modelPolicyResult.person.name }} 的模型白名单已更新</strong><p>{{ modelPolicyResult.meta.notice }}</p><small>已同步 {{ modelPolicyResult.keysUpdated }} 个仍有效 Key；审计不保存原因原文。</small></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(modelPolicyResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${modelPolicyResult.operation.auditEventId} 操作审计`"><IconClock :size="16" />查看操作审计</a><button class="btn create-key" @click="closeModelPolicy">完成</button></footer></template>
-        <form v-else class="create-key-form" @submit.prevent="submitModelPolicy"><p class="create-person-note"><strong>{{ detail.profile.name }}</strong> 的模型白名单将写入本地 SQLite，并同步到该人员仍有效的 Key。客户端只使用业务别名；不会调用 New API，也不会记录调整原因原文。</p><div class="person-model-policy-list"><label v-for="model in detail.models" :key="model.alias"><input v-model="modelPolicyForm.models" type="checkbox" :value="model.alias" /><span><strong>{{ model.alias }}</strong><small>{{ model.name }} · {{ model.type === 'experiment' ? '实验模型' : '正式模型' }}</small></span></label></div><label><span>调整原因 <em>至少 8 个字符</em></span><textarea v-model="modelPolicyForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示需要开放隔离实验模型" /></label><label class="access-ack"><input v-model="modelPolicyForm.acknowledgeImpact" type="checkbox" /><span>我已确认：白名单会同步所有仍有效 Key，操作只影响本地 SQLite，并写入不含原因原文的审计摘要。</span></label><div v-if="modelPolicyError" class="create-person-error"><IconAlertTriangle :size="16" />{{ modelPolicyError }}</div><footer><button class="btn btn-white" type="button" :disabled="isModelPolicyUpdating" @click="closeModelPolicy">取消</button><button class="btn create-key" type="submit" :disabled="isModelPolicyUpdating || modelPolicyForm.models.length < 1 || modelPolicyForm.reason.trim().length < 8 || !modelPolicyForm.acknowledgeImpact">{{ isModelPolicyUpdating ? '保存中…' : '确认更新白名单' }}</button></footer></form>
-      </aside>
-    </div>
-
     <div v-if="showDisable && detail" class="drawer-backdrop" @click.self="closeDisable">
       <aside class="create-person-dialog disable-person-dialog" role="dialog" aria-modal="true" aria-label="停用人员">
         <header><div><span class="source-tag demo">SQLITE</span><h2>停用本地演示人员</h2></div><button class="icon-button" aria-label="关闭停用人员" :disabled="isDisabling" @click="closeDisable">×</button></header>
         <template v-if="disableResult"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ disableResult.person.name }} 已停用</strong><p>{{ disableResult.meta.notice }}</p><small>已回收 {{ disableResult.keysDisabled }} 个仍有效 Key；审计不保存原因原文。</small></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(disableResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${disableResult.operation.auditEventId} 操作审计`"><IconClock :size="16" />查看操作审计</a><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
         <form v-else class="create-person-form" @submit.prevent="submitDisable"><p class="create-person-note"><strong>{{ detail.profile.name }}</strong> 会在本地 SQLite 中标为停用，并立即回收其所有仍有效 Key。其后续本地登录和已有会话访问会被拒绝；不会调用 New API 或修改真实账户。</p><label><span>停用原因 <em>至少 8 个字符</em></span><textarea v-model="disableForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示账号已完成测试，需要停用" /></label><label class="access-ack"><input v-model="disableForm.acknowledgeImpact" type="checkbox" /><span>我已确认：人员状态和关联 Key 会立即改变，操作会写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="disableError" class="create-person-error"><IconAlertTriangle :size="16" />{{ disableError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDisabling" @click="closeDisable">取消</button><button class="btn danger-outline" type="submit" :disabled="isDisabling || disableForm.reason.trim().length < 8 || !disableForm.acknowledgeImpact">{{ isDisabling ? '停用中…' : '确认停用并回收 Key' }}</button></footer></form>
+      </aside>
+    </div>
+
+    <div v-if="showDelete && detail" class="drawer-backdrop" @click.self="closeDelete">
+      <aside class="create-person-dialog disable-person-dialog" role="dialog" aria-modal="true" aria-label="删除人员">
+        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ deleteResult ? '人员已删除' : '删除已停用人员' }}</h2></div><button class="icon-button" aria-label="关闭删除人员" :disabled="isDeleting" @click="closeDelete">×</button></header>
+        <template v-if="deleteResult"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ deleteResult.person.name }} 已删除</strong><p>{{ deleteResult.meta.notice }}</p><small>人员目录中已不可见；历史审计、用量与已回收 Key 记录已保留。</small></section><footer class="create-key-dialog-footer"><RouterLink class="btn create-key" to="/people">返回人员列表</RouterLink></footer></template>
+        <form v-else class="create-person-form" @submit.prevent="submitDelete"><p class="create-person-note"><strong>{{ detail.profile.name }}</strong> 已经停用。删除后会从人员目录移除，历史审计、用量与已回收 Key 记录保留，且不能恢复。</p><label><span>删除原因 <em>至少 8 个字符</em></span><textarea v-model="deleteForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示人员已完成测试，需要从目录移除" /></label><label class="access-ack"><input v-model="deleteForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该人员已经停用，删除后不能恢复；操作会写入不含原因原文的审计摘要。</span></label><div v-if="deleteError" class="create-person-error"><IconAlertTriangle :size="16" />{{ deleteError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDeleting" @click="closeDelete">取消</button><button class="btn danger-outline" type="submit" :disabled="isDeleting || deleteForm.reason.trim().length < 8 || !deleteForm.acknowledgeImpact">{{ isDeleting ? '删除中…' : '确认删除人员' }}</button></footer></form>
       </aside>
     </div>
   </div>

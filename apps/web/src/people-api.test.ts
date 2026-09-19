@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { peopleFilterSchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personModelsUpdateBodySchema, personModelsUpdateResponseSchema } from './people-api'
+import { peopleFilterSchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema } from './people-api'
 
 describe('people API contracts', () => {
   it('rejects unsafe pagination values', () => {
@@ -26,7 +26,7 @@ describe('people API contracts', () => {
   it('rejects detail keys that omit their masked representation', () => {
     const result = personDetailResponseSchema.safeParse({
       meta: { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', timezone: 'Asia/Shanghai', notice: '' },
-      profile: {}, metrics: {}, keys: [{ id: 'key-1', purpose: '测试', status: 'active', models: [], expiresAt: '2027-01-01T00:00:00.000Z', lastUsedAt: null }], models: [],
+      profile: {}, metrics: {}, keys: [{ id: 'key-1', purpose: '测试', status: 'active', models: [], expiresAt: '2027-01-01T00:00:00.000Z', lastUsedAt: null }],
     })
     expect(result.success).toBe(false)
   })
@@ -43,10 +43,4 @@ describe('people API contracts', () => {
     expect(personBatchCreateResponseSchema.safeParse({ meta: { source: 'database', createdAt: '2026-09-18T10:00:00.000Z', notice: '本地演示', createdCount: 1 }, people: [{ id: 'person-demo', username: 'new.user', displayName: '王小明', department: { id: 'content', name: '内容运营' } }], operation: { idempotencyKey: 'people-import-1a2b3c4d', idempotent: false, auditEventId: 'audit-people-import-1a2b3c4d' } }).success).toBe(true)
   })
 
-  it('requires an acknowledged, unique model whitelist for local updates', () => {
-    expect(personModelsUpdateBodySchema.safeParse({ idempotencyKey: 'person-models-1a2b3c4d', models: ['ecommerce-copy', 'ecommerce-pro-lab'], reason: '本地演示需要开放实验模型', acknowledgeImpact: true }).success).toBe(true)
-    expect(personModelsUpdateBodySchema.safeParse({ idempotencyKey: 'person-models-1a2b3c4d', models: ['ecommerce-copy', 'ecommerce-copy'], reason: '本地演示需要开放实验模型', acknowledgeImpact: true }).success).toBe(false)
-    expect(personModelsUpdateBodySchema.safeParse({ idempotencyKey: 'short', models: ['ecommerce-copy'], reason: '太短', acknowledgeImpact: false }).success).toBe(false)
-    expect(personModelsUpdateResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-18T10:00:00.000Z', notice: '本地演示' }, person: { id: 'person-lin', name: '林筱雨' }, models: [{ alias: 'ecommerce-copy', name: '电商文案', purpose: '内容生产', type: 'production', allowed: true }], keysUpdated: 2, operation: { idempotencyKey: 'person-models-1a2b3c4d', idempotent: false, auditEventId: 'audit-person-models-1a2b3c4d' } }).success).toBe(true)
-  })
 })

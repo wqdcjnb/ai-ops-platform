@@ -57,7 +57,7 @@ export const alertEventSchema = z.object({
   relatedRequestIds: z.array(z.string().regex(/^req-[a-z0-9-]+$/)),
 })
 
-const metaSchema = z.object({ source: z.literal('database'), simulated: z.literal(true), generatedAt: z.string().datetime(), notice: z.string() })
+const metaSchema = z.object({ source: z.literal('database'), simulated: z.boolean(), generatedAt: z.string().datetime(), notice: z.string() })
 const notificationConfigSchema = z.object({
   configured: z.literal(false),
   channels: z.array(z.object({ type: z.enum(['wecom', 'dingtalk']), state: z.literal('not_configured') })),
@@ -119,14 +119,19 @@ const notificationConfig = {
   notice: '企业微信与钉钉通知尚未配置；当前页面只读取本地模拟告警，不会向外发送消息。',
 }
 
-function noticeFor(newApi: NewApiStatus) {
-  if (newApi.state === 'ready') return '当前读取 SQLite 可重复模拟告警；New API 管理连接已验证，真实事件采集与通知仍未接入'
-  if (newApi.state === 'reachable') return '当前读取 SQLite 可重复模拟告警；New API 可达但等待管理认证'
-  if (newApi.state === 'auth_required') return '当前读取 SQLite 可重复模拟告警；New API 管理认证未通过'
-  return '当前读取 SQLite 可重复模拟告警；New API 当前离线'
+function noticeFor(newApi: NewApiStatus, simulated: boolean) {
+  const source = simulated ? 'SQLite 可重复模拟告警' : 'SQLite 中的网关真实告警'
+  if (newApi.state === 'ready') return `当前读取${source}；New API 管理连接已验证，外部通知仍未接入`
+  if (newApi.state === 'reachable') return `当前读取${source}；New API 可达但等待管理认证`
+  if (newApi.state === 'auth_required') return `当前读取${source}；New API 管理认证未通过`
+  return `当前读取${source}；New API 当前离线`
 }
 
-function meta(newApi: NewApiStatus, now: Date, scope: DataScope) { return { source: 'database' as const, simulated: true as const, generatedAt: now.toISOString(), notice: `${noticeFor(newApi)}${scopeNotice(scope)}` } }
+function meta(newApi: NewApiStatus, now: Date, scope: DataScope, simulated: boolean) { return { source: 'database' as const, simulated, generatedAt: now.toISOString(), notice: `${noticeFor(newApi, simulated)}${scopeNotice(scope)}` } }
+
+function eventsAreSimulated(events: AlertEvent[]) {
+  return events.every((item) => !item.id.startsWith('alert-gateway-'))
+}
 
 function databaseEvents(database: PlatformDatabase, scope: DataScope): AlertEvent[] {
   return database.listAlertEvents().filter((item) => isAlertVisible(database, scope, { type: item.subjectType, id: item.subjectId })).map((item) => ({
@@ -154,7 +159,7 @@ function databaseRules(database: PlatformDatabase): AlertRule[] {
 
 export function createDatabaseAlertSummary(database: PlatformDatabase, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
   const events = databaseEvents(database, scope)
-  return { meta: meta(newApi, now, scope), summary: { open: events.filter((item) => item.status === 'open').length, critical: events.filter((item) => item.status === 'open' && item.severity === 'critical').length, warning: events.filter((item) => item.status === 'open' && item.severity === 'warning').length, experiment: events.filter((item) => item.status !== 'closed' && item.environment === 'experiment').length, acknowledged: events.filter((item) => item.status === 'acknowledged').length, closed: events.filter((item) => item.status === 'closed').length }, notificationConfig }
+  return { meta: meta(newApi, now, scope, eventsAreSimulated(events)), summary: { open: events.filter((item) => item.status === 'open').length, critical: events.filter((item) => item.status === 'open' && item.severity === 'critical').length, warning: events.filter((item) => item.status === 'open' && item.severity === 'warning').length, experiment: events.filter((item) => item.status !== 'closed' && item.environment === 'experiment').length, acknowledged: events.filter((item) => item.status === 'acknowledged').length, closed: events.filter((item) => item.status === 'closed').length }, notificationConfig }
 }
 
 export function createDatabaseAlerts(database: PlatformDatabase, query: AlertsQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
@@ -169,10 +174,10 @@ export function createDatabaseAlerts(database: PlatformDatabase, query: AlertsQu
     return matchesSearch && matchesSubject && matchesAlert && (query.severity === 'all' || item.severity === query.severity) && (query.status === 'all' || item.status === query.status) && (query.source === 'all' || item.source === query.source) && (query.environment === 'all' || item.environment === query.environment)
   })
   const start = (query.page - 1) * query.pageSize
-  return { meta: meta(newApi, now, scope), options: { sources: [{ id: 'quota' as const, label: '额度' }, { id: 'traffic' as const, label: '流量' }, { id: 'error_rate' as const, label: '错误率' }, { id: 'balance' as const, label: '余额' }, { id: 'credential' as const, label: '凭证' }, { id: 'upstream' as const, label: '上游' }] }, items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) } }
+  return { meta: meta(newApi, now, scope, eventsAreSimulated(events)), options: { sources: [{ id: 'quota' as const, label: '额度' }, { id: 'traffic' as const, label: '流量' }, { id: 'error_rate' as const, label: '错误率' }, { id: 'balance' as const, label: '余额' }, { id: 'credential' as const, label: '凭证' }, { id: 'upstream' as const, label: '上游' }] }, items: filtered.slice(start, start + query.pageSize), pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) } }
 }
 
-export function createDatabaseAlertRules(database: PlatformDatabase, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) { return { meta: meta(newApi, now, scope), items: scope.mode === 'global' ? databaseRules(database) : [], notificationConfig } }
+export function createDatabaseAlertRules(database: PlatformDatabase, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) { const events = databaseEvents(database, scope); return { meta: meta(newApi, now, scope, eventsAreSimulated(events)), items: scope.mode === 'global' ? databaseRules(database) : [], notificationConfig } }
 
 export function createDatabaseAlertDetail(database: PlatformDatabase, id: string, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }) {
   const item = databaseEvents(database, scope).find((event) => event.id === id)
@@ -183,5 +188,6 @@ export function createDatabaseAlertDetail(database: PlatformDatabase, id: string
   ]
   if (item.acknowledgedAt) timeline.push({ id: `${id}-ack`, type: 'acknowledged', occurredAt: item.acknowledgedAt, title: '事件已确认', description: `${item.assignee?.name ?? '管理员'}已接手处理。` })
   if (item.closedAt) timeline.push({ id: `${id}-closed`, type: 'closed', occurredAt: item.closedAt, title: '事件已关闭', description: '指标已恢复或演示事件完成处置。' })
-  return { meta: meta(newApi, now, scope), item, analysis: { cause: item.summary, impact: item.environment === 'experiment' ? '影响限定在 CPA 实验组，不会跨组回退至生产路径。' : '可能影响对应生产范围；当前软额度告警不会阻断请求。', recommendation: item.source === 'balance' ? '核对供应商账单并安排充值，完成真实通知配置后再启用自动提醒。' : item.source === 'credential' ? '在凭证管理系统中续期并重新验证，不要在页面或日志中粘贴凭证。' : '可确认或关闭本地 SQLite 模拟事件并留下审计摘要；静默、外部通知和真实事件处置仍未开放。', rawUpstreamBodyAvailable: false as const }, timeline }
+  const events = databaseEvents(database, scope)
+  return { meta: meta(newApi, now, scope, eventsAreSimulated(events)), item, analysis: { cause: item.summary, impact: item.environment === 'experiment' ? '影响限定在 CPA 实验组，不会跨组回退至生产路径。' : '可能影响对应生产范围；当前软额度告警不会阻断请求。', recommendation: item.source === 'balance' ? '核对供应商账单并安排充值，完成真实通知配置后再启用自动提醒。' : item.source === 'credential' ? '在凭证管理系统中续期并重新验证，不要在页面或日志中粘贴凭证。' : '可确认或关闭本地网关事件并留下审计摘要；静默、外部通知和真实事件处置仍未开放。', rawUpstreamBodyAvailable: false as const }, timeline }
 }

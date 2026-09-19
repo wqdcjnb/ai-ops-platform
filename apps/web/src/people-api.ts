@@ -41,7 +41,6 @@ export const peopleResponseSchema = z.object({
     manager: z.string(),
     status: z.enum(['active', 'disabled', 'offboarding']),
     keyCount: z.number().int().nonnegative(),
-    purpose: z.string(),
     goal: z.object({
       used: z.number().int().nonnegative(),
       limit: z.number().int().positive(),
@@ -60,18 +59,18 @@ export const personDetailResponseSchema = z.object({
   meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   profile: z.object({
     id: z.string(), name: z.string(), initials: z.string(), department: z.object({ id: z.string(), name: z.string() }), title: z.string(), manager: z.string(),
-    status: z.enum(['active', 'disabled', 'offboarding']), keyCount: z.number().int().nonnegative(), purpose: z.string(),
+    status: z.enum(['active', 'disabled', 'offboarding']), keyCount: z.number().int().nonnegative(),
     goal: z.object({ used: z.number().int().nonnegative(), limit: z.number().int().positive(), percent: z.number().min(0), state: z.enum(['normal', 'near', 'reached']) }),
     lastActiveAt: z.string().nullable(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
   }),
   metrics: z.object({
-    todayRequests: z.number().int().nonnegative(), monthTokens: z.number().int().nonnegative(), monthPoints: z.number().int().nonnegative(),
+    todayRequests: z.number().int().nonnegative(), monthInputTokens: z.number().int().nonnegative(), monthOutputTokens: z.number().int().nonnegative(), monthTokens: z.number().int().nonnegative(), monthPoints: z.number().int().nonnegative(),
     monthPointLimit: z.number().int().positive(), successRate: z.number().min(0).max(100), p95LatencyMs: z.number().int().nonnegative(),
   }),
   keys: z.array(z.object({
-    id: z.string(), masked: z.string(), purpose: z.string(), status: z.enum(['active', 'disabled']), models: z.array(z.string()), expiresAt: z.string(), lastUsedAt: z.string().nullable(),
+    id: z.string(), masked: z.string(), purpose: z.string(), model: z.string(), status: z.enum(['active', 'disabled']), models: z.array(z.string()), expiresAt: z.string(), lastUsedAt: z.string().nullable(),
+    usage: z.object({ requests: z.number().int().nonnegative(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }),
   })),
-  models: z.array(z.object({ alias: z.string(), name: z.string(), purpose: z.string(), type: z.enum(['production', 'experiment']), allowed: z.boolean() })),
 })
 
 export const personUsageResponseSchema = z.object({
@@ -81,10 +80,10 @@ export const personUsageResponseSchema = z.object({
 
 export type PeopleFilters = z.infer<typeof peopleFilterSchema>
 export const personCreateBodySchema = z.object({
-  username: z.string().trim().regex(/^[a-z][a-z0-9._-]{2,39}$/i),
+  username: z.string().trim().regex(/^[a-z][a-z0-9._-]{2,39}$/i).optional(),
   displayName: z.string().trim().min(2).max(40),
   departmentId: z.string().trim().min(1).max(40),
-  password: z.string().min(8).max(200),
+  password: z.string().min(8).max(200).optional(),
 })
 export const personCreateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
@@ -93,24 +92,11 @@ export const personCreateResponseSchema = z.object({
 })
 export const personBatchCreateBodySchema = z.object({
   idempotencyKey: z.string().regex(/^people-import-[a-z0-9-]{8,96}$/),
-  items: z.array(personCreateBodySchema).min(1).max(200),
+  items: z.array(personCreateBodySchema.partial({ username: true, password: true }).required({ displayName: true, departmentId: true })).min(1).max(200),
 })
 export const personBatchCreateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string(), createdCount: z.number().int().positive() }),
   people: z.array(z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) })),
-  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
-})
-export const personModelsUpdateBodySchema = z.object({
-  idempotencyKey: z.string().regex(/^person-models-[a-z0-9-]{8,96}$/),
-  models: z.array(z.string().trim().regex(/^ecommerce-[a-z0-9-]+$/)).min(1).max(10).refine((items) => new Set(items).size === items.length, '模型别名不能重复'),
-  reason: z.string().trim().min(8).max(200),
-  acknowledgeImpact: z.literal(true),
-})
-export const personModelsUpdateResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string() }),
-  person: z.object({ id: z.string(), name: z.string() }),
-  models: z.array(z.object({ alias: z.string(), name: z.string(), purpose: z.string(), type: z.enum(['production', 'experiment']), allowed: z.boolean() })),
-  keysUpdated: z.number().int().nonnegative(),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
 export const personDisableBodySchema = z.object({
@@ -124,15 +110,25 @@ export const personDisableResponseSchema = z.object({
   keysDisabled: z.number().int().nonnegative(),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
+export const personDeleteBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^person-delete-[a-z0-9-]{8,96}$/),
+  reason: z.string().trim().min(8).max(200),
+  acknowledgeImpact: z.literal(true),
+})
+export const personDeleteResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string() }),
+  person: z.object({ id: z.string(), name: z.string(), status: z.literal('deleted') }),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
 export type PeopleResponse = z.infer<typeof peopleResponseSchema>
 export type PersonCreateBody = z.infer<typeof personCreateBodySchema>
 export type PersonCreateResponse = z.infer<typeof personCreateResponseSchema>
 export type PersonBatchCreateBody = z.infer<typeof personBatchCreateBodySchema>
 export type PersonBatchCreateResponse = z.infer<typeof personBatchCreateResponseSchema>
-export type PersonModelsUpdateBody = z.infer<typeof personModelsUpdateBodySchema>
-export type PersonModelsUpdateResponse = z.infer<typeof personModelsUpdateResponseSchema>
 export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
 export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
+export type PersonDeleteBody = z.infer<typeof personDeleteBodySchema>
+export type PersonDeleteResponse = z.infer<typeof personDeleteResponseSchema>
 export type PersonGoalUpdateBody = QuotaUpdateBody
 export type PersonGoalUpdateResponse = QuotaUpdateResponse
 export type Person = PeopleResponse['items'][number]
@@ -192,19 +188,6 @@ export async function createPeopleBatch(payload: PersonBatchCreateBody): Promise
   return result.data
 }
 
-export async function updatePersonModels(id: string, payload: PersonModelsUpdateBody): Promise<PersonModelsUpdateResponse> {
-  const body = personModelsUpdateBodySchema.parse(payload)
-  const response = await fetch(`/api/people/${encodeURIComponent(id)}/models`, { method: 'PATCH', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
-  const requestId = response.headers.get('x-request-id') ?? undefined
-  if (!response.ok) {
-    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
-    throw new PeopleApiError(detail?.error?.message ?? '更新人员模型白名单失败', requestId)
-  }
-  const result = personModelsUpdateResponseSchema.safeParse(await response.json())
-  if (!result.success) throw new PeopleApiError('人员模型白名单响应格式不符合接口约定', requestId)
-  return result.data
-}
-
 export async function disablePerson(id: string, payload: PersonDisableBody): Promise<PersonDisableResponse> {
   const body = personDisableBodySchema.parse(payload)
   const response = await fetch(`/api/people/${encodeURIComponent(id)}/disable`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
@@ -215,6 +198,19 @@ export async function disablePerson(id: string, payload: PersonDisableBody): Pro
   }
   const result = personDisableResponseSchema.safeParse(await response.json())
   if (!result.success) throw new PeopleApiError('停用人员响应格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function deletePerson(id: string, payload: PersonDeleteBody): Promise<PersonDeleteResponse> {
+  const body = personDeleteBodySchema.parse(payload)
+  const response = await fetch(`/api/people/${encodeURIComponent(id)}/delete`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '删除人员失败', requestId)
+  }
+  const result = personDeleteResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('删除人员响应格式不符合接口约定', requestId)
   return result.data
 }
 

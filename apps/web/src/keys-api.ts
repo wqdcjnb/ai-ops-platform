@@ -8,7 +8,7 @@ export const keyFiltersSchema = z.object({
 
 const keyListItemSchema = z.object({
   id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string(), initials: z.string() }),
-  purpose: z.string(), models: z.array(z.string()), status: z.enum(['active', 'disabled']), expiryState: z.enum(['normal', 'expiring', 'expired']),
+  purpose: z.string(), model: z.string(), models: z.array(z.string()), status: z.enum(['active', 'disabled']), expiryState: z.enum(['normal', 'expiring', 'expired']),
   expiresAt: z.string(), lastUsedAt: z.string().nullable(), usage: z.object({ requests: z.number().int().nonnegative(), points: z.number().int().nonnegative() }),
 })
 
@@ -38,13 +38,13 @@ export type KeyDetailResponse = z.infer<typeof keyDetailResponseSchema>
 export const keyCreateBodySchema = z.object({
   ownerId: z.string().regex(/^person-[a-z0-9-]+$/).max(96),
   purpose: z.string().trim().min(2).max(40),
-  models: z.array(z.string().trim().min(2).max(64)).min(1).max(8),
+  model: z.string().trim().regex(/^ecommerce-[a-z0-9-]+$/).max(64),
   expiresInDays: z.number().int().min(1).max(365),
   deviceNote: z.string().trim().max(120),
 })
 export const keyCreateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
-  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), model: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
   secret: z.string().min(20),
   operation: z.object({ auditEventId: z.string() }),
 })
@@ -67,7 +67,7 @@ export const keyRotateBodySchema = z.object({
 export const keyRotateResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string(), secretAvailable: z.boolean() }),
   oldKey: z.object({ id: z.string(), masked: z.string(), status: z.literal('disabled') }),
-  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
+  key: z.object({ id: z.string(), masked: z.string(), owner: z.object({ id: z.string(), name: z.string(), department: z.string() }), purpose: z.string(), model: z.string(), models: z.array(z.string()), expiresAt: z.string() }),
   secret: z.string().min(20).nullable(),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })

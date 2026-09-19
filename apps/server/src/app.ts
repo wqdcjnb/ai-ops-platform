@@ -9,9 +9,9 @@ import { createDatabaseOverview, overviewResponseSchema, periodSchema } from './
 import { newApiStatusSchema, probeNewApiFromEnvironment, type NewApiStatus } from './new-api-status.js'
 import { newApiManagementResponseSchema, probeNewApiManagementFromEnvironment, type NewApiManagementResponse } from './new-api-management.js'
 import { createPlatformStatus, createTaskSummary, platformStatusSchema, probeHttpService, taskSummarySchema, type PlatformProbeResult } from './platform.js'
-import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, modelsForPurpose, peopleQuerySchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personModelsUpdateBodySchema, personModelsUpdateResponseSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
+import { createDatabasePeople, createDatabasePersonDetail, createDatabasePersonUsage, peopleQuerySchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personCreateBodySchema, personCreateResponseSchema, personDeleteBodySchema, personDeleteResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personIdParamsSchema, personUsageQuerySchema, personUsageResponseSchema } from './people.js'
 import { createDatabaseKeyDetail, createDatabaseKeys, createDemoKeyDetail, createDemoKeys, keyCreateBodySchema, keyCreateResponseSchema, keyDetailResponseSchema, keyDisableBodySchema, keyDisableResponseSchema, keyIdParamsSchema, keyRotateBodySchema, keyRotateResponseSchema, keysQuerySchema, keysResponseSchema } from './keys.js'
-import { createDatabaseLimits, createDemoLimits, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
+import { createDatabaseLimits, createDemoLimits, isSoftQuotaEnabled, limitIdParamsSchema, limitsQuerySchema, limitsResponseSchema, quotaPolicySubject, quotaUpdateBodySchema, quotaUpdateResponseSchema } from './limits.js'
 import { createDatabaseRoutes, routeIdParamsSchema, routePolicyUpdateBodySchema, routePolicyUpdateResponseSchema, routesQuerySchema, routesResponseSchema } from './routes.js'
 import { channelCheckBodySchema, channelCheckResponseSchema, channelIdParamsSchema, channelsQuerySchema, channelsResponseSchema, createDatabaseDemoChannels, createDemoModels, modelsQuerySchema, modelsResponseSchema } from './models.js'
 import { CatalogError, createModelCatalog, type CatalogReader } from './model-catalog.js'
@@ -24,10 +24,13 @@ import { businessRuleDraftBodySchema, businessRulePreviewBodySchema, businessRul
 import { createDatabaseEmployeeKeys, createDatabaseEmployeeProfile, createDatabaseEmployeeUsage, createDemoEmployeeModels, employeeKeysResponseSchema, employeeModelsResponseSchema, employeeProfileResponseSchema, employeeUsageQuerySchema, employeeUsageResponseSchema } from './employee.js'
 import { authErrorSchema, authResponseSchema, createAuthService, isRoleAllowed, loginBodySchema, seedDemoUsers, type AppRole, type AuthService } from './auth.js'
 import { dataScopeFor, isDepartmentVisible } from './data-scope.js'
-import { createPlatformDatabase, databaseStatusSchema, seedDemoData, type PlatformDatabase } from './platform-db.js'
+import { createPlatformDatabase, databaseStatusSchema, hashPlatformApiKey, seedDemoData, type PlatformDatabase } from './platform-db.js'
 import { createDatabaseSearch, searchQuerySchema, searchResponseSchema } from './search.js'
 import { createQuotaRequestsResponse, quotaDecisionBodySchema, quotaRequestBodySchema, quotaRequestParamsSchema, quotaRequestQuerySchema, quotaRequestActionResponseSchema, quotaRequestsResponseSchema } from './quota-requests.js'
 import { createQuotaReservationsResponse, quotaReservationActionBodySchema, quotaReservationActionResponseSchema, quotaReservationBodySchema, quotaReservationParamsSchema, quotaReservationQuerySchema, quotaReservationsResponseSchema, mapQuotaReservation } from './quota-reservations.js'
+import { loadGatewayConfig, type GatewayConfig } from './gateway-config.js'
+import { registerGatewayRoutes } from './gateway/routes.js'
+import type { GatewayUpstream } from './gateway/openai-compatible.js'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -48,6 +51,8 @@ export interface BuildAppOptions {
   probeNewApiManagement?: () => Promise<NewApiManagementResponse>
   probeCpa?: () => Promise<PlatformProbeResult>
   probeDocs?: () => Promise<PlatformProbeResult>
+  gatewayConfig?: GatewayConfig
+  gatewayUpstream?: GatewayUpstream
 }
 
 export function buildApp(options: BuildAppOptions = {}) {
@@ -68,9 +73,13 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
   const authMode = options.authMode ?? (process.env.AUTH_MODE === 'disabled' ? 'disabled' : 'required')
+  const gatewayConfig = options.gatewayConfig ?? loadGatewayConfig()
   const database = options.database ?? createPlatformDatabase({ filename: options.databasePath ?? process.env.PLATFORM_DB_PATH ?? (authMode === 'disabled' ? ':memory:' : undefined) })
+  // Keep the local login accounts available while allowing internal tests to
+  // start from an empty business database. Demo business data is opt-in once
+  // AI_OPS_SEED_DEMO_DATA=false is set in the local environment.
   seedDemoUsers(database)
-  seedDemoData(database)
+  if (process.env.AI_OPS_SEED_DEMO_DATA !== 'false') seedDemoData(database)
   database.cleanupConversationAuditMetadata('startup')
   database.cleanupAuthSessions('startup')
   const auth = options.authService ?? createAuthService({ database })
@@ -117,7 +126,11 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.addHook('preHandler', async (request, reply) => {
     const path = request.url.split('?')[0] ?? '/'
-    if (path === '/health' || path === '/api/auth/login') return
+    if (path === '/health' || path === '/gateway/health' || path === '/gateway/config' || path === '/v1/models' || path === '/v1/chat/completions' || path === '/v1/responses' || path === '/api/auth/login' || path === '/api/auth/bootstrap') return
+    const isLegacySoftQuotaEndpoint = path.startsWith('/api/quota-requests') || path.startsWith('/api/me/quota-requests') || path.endsWith('/goal') || (path.startsWith('/api/limits/') && request.method !== 'GET')
+    if (!isSoftQuotaEnabled() && isLegacySoftQuotaEndpoint) {
+      return reply.status(410).send({ error: { code: 'SOFT_QUOTA_DEPRECATED', message: '软额度已废弃，当前版本不再支持目标、临时额度或额度审批操作', requestId: request.id } })
+    }
     if (authMode === 'disabled') return
     const user = auth.authenticate(request)
     if (!user) {
@@ -158,6 +171,8 @@ export function buildApp(options: BuildAppOptions = {}) {
     },
   }, async () => ({ status: 'ok' as const, service: 'ai-ops-bff' as const }))
 
+  registerGatewayRoutes(app, gatewayConfig, { upstream: options.gatewayUpstream, database })
+
   app.get('/api/platform/database', {
     schema: { response: { 200: databaseStatusSchema } },
   }, async () => database.status())
@@ -180,6 +195,31 @@ export function buildApp(options: BuildAppOptions = {}) {
     recordAuthenticationAudit({
       actorUserId: session.user.id, action: 'login', result: 'success', requestId: request.id, code: 'AUTH_OK',
       message: '本地管理会话已创建；会话令牌与 CSRF 值仅以哈希形式保存。',
+    })
+    return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
+  })
+
+  app.post('/api/auth/bootstrap', {
+    schema: {
+      response: { 200: authResponseSchema, 403: authErrorSchema, 503: authErrorSchema },
+    },
+  }, async (request, reply) => {
+    // The single-admin bootstrap is intentionally limited to local admin-only
+    // mode (or AUTH_MODE=disabled for isolated browser tests). It creates the
+    // same HttpOnly session and CSRF cookie as an explicit login, without
+    // reading or requiring an administrator password.
+    const localBootstrapAllowed = process.env.AI_OPS_ADMIN_ONLY === 'true' || authMode === 'disabled'
+    if (!localBootstrapAllowed) {
+      return reply.status(403).send({ error: { code: 'AUTH_FORBIDDEN', message: '当前环境未启用单管理员自动进入', requestId: request.id } })
+    }
+    const session = auth.bootstrapAdmin?.() ?? null
+    if (!session || session.user.role !== 'super_admin') {
+      return reply.status(503).send({ error: { code: 'AUTH_REQUIRED', message: '本地超级管理员账号尚未准备好，请检查服务端配置', requestId: request.id } })
+    }
+    auth.setSessionCookie(reply, session.token, session.csrfToken, session.expiresAt)
+    recordAuthenticationAudit({
+      actorUserId: session.user.id, action: 'login', result: 'success', requestId: request.id, code: 'AUTH_OK',
+      message: '本机单管理员模式自动创建管理会话；会话令牌与 CSRF 值仅以哈希形式保存。',
     })
     return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
   })
@@ -270,12 +310,18 @@ export function buildApp(options: BuildAppOptions = {}) {
       response: { 201: personCreateResponseSchema, 400: errorResponseSchema, 409: errorResponseSchema },
     },
   }, async (request, reply) => {
-    if (!database.departmentExists(request.body.departmentId)) {
-      return reply.status(400).send({ error: { code: 'DEPARTMENT_NOT_FOUND', message: '请选择有效的在用部门', requestId: request.id } })
+    let departmentId: string
+    try {
+      departmentId = database.ensureDepartment(request.body.departmentId)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'DEPARTMENT_NAME_REQUIRED') return reply.status(400).send({ error: { code: 'DEPARTMENT_NOT_FOUND', message: '请填写所属部门', requestId: request.id } })
+      throw error
     }
     const id = `person-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    const username = request.body.username ?? `person-${randomBytes(9).toString('hex')}`
+    const password = request.body.password ?? randomBytes(24).toString('base64url')
     try {
-      const created = database.createPerson({ id, username: request.body.username, displayName: request.body.displayName, departmentId: request.body.departmentId, password: request.body.password }, {
+      const created = database.createPerson({ id, username, displayName: request.body.displayName, departmentId, password }, {
         id: `audit-${id}-create`,
         actorUserId: request.authUser?.id ?? null,
         action: 'create',
@@ -284,12 +330,12 @@ export function buildApp(options: BuildAppOptions = {}) {
         result: 'success',
         requestId: request.id,
         summary: {
-          message: `已添加本地演示人员 ${request.body.displayName}；初始密码仅保存摘要。`,
+          message: `已添加本地演示人员 ${request.body.displayName}；登录名和初始密码由系统自动生成，仅保存安全摘要。`,
           resourceName: request.body.displayName,
           changes: [
-            { field: 'username', label: '登录名', before: null, after: request.body.username, sensitive: false },
-            { field: 'departmentId', label: '所属部门', before: null, after: request.body.departmentId, sensitive: false },
-            { field: 'password', label: '初始密码', before: null, after: '已设置（不记录值）', sensitive: true },
+            { field: 'username', label: '登录名', before: null, after: username, sensitive: false },
+            { field: 'departmentId', label: '所属部门', before: null, after: departmentId, sensitive: false },
+            { field: 'password', label: '初始密码', before: null, after: '系统自动生成（不记录值）', sensitive: true },
           ],
         },
       })
@@ -309,10 +355,21 @@ export function buildApp(options: BuildAppOptions = {}) {
       response: { 201: personBatchCreateResponseSchema, 400: errorResponseSchema, 409: errorResponseSchema },
     },
   }, async (request, reply) => {
-    const invalidDepartment = request.body.items.find((item) => !database.departmentExists(item.departmentId))
-    if (invalidDepartment) return reply.status(400).send({ error: { code: 'DEPARTMENT_NOT_FOUND', message: '批量文件包含无效部门，请修正后重试', requestId: request.id } })
+    let resolvedItems: Array<typeof request.body.items[number] & { resolvedDepartmentId: string }>
+    try {
+      resolvedItems = request.body.items.map((item) => ({ ...item, resolvedDepartmentId: database.ensureDepartment(item.departmentId) }))
+    } catch (error) {
+      if (error instanceof Error && error.message === 'DEPARTMENT_NAME_REQUIRED') return reply.status(400).send({ error: { code: 'DEPARTMENT_NOT_FOUND', message: '批量文件包含空的所属部门，请修正后重试', requestId: request.id } })
+      throw error
+    }
     const batchId = `people-batch-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
-    const people = request.body.items.map((item) => ({ id: `person-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`, username: item.username, displayName: item.displayName, departmentId: item.departmentId, password: item.password }))
+    const people = resolvedItems.map((item) => ({
+      id: `person-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,
+      username: item.username ?? `person-${randomBytes(9).toString('hex')}`,
+      displayName: item.displayName,
+      departmentId: item.resolvedDepartmentId,
+      password: item.password ?? randomBytes(24).toString('base64url'),
+    }))
     const auditEventId = `audit-${request.body.idempotencyKey}`
     try {
       const result = database.createPeopleBatch(people, {
@@ -324,18 +381,18 @@ export function buildApp(options: BuildAppOptions = {}) {
         result: 'success',
         requestId: request.id,
         summary: {
-          message: `已批量添加本地演示人员 ${people.length} 条；初始密码仅保存摘要。`,
+          message: `已批量添加本地演示人员 ${people.length} 条；登录名和初始密码由系统自动生成，仅保存安全摘要。`,
           resourceName: `批量添加人员（${people.length} 条）`,
           createdPeople: people.map((person) => ({ id: person.id, username: person.username, displayName: person.displayName, departmentId: person.departmentId })),
           changes: [
             { field: 'count', label: '导入人数', before: null, after: String(people.length), sensitive: false },
-            { field: 'password', label: '初始密码', before: null, after: '已设置（不记录值）', sensitive: true },
+            { field: 'password', label: '初始密码', before: null, after: '系统自动生成（不记录值）', sensitive: true },
           ],
         },
       })
       if (result.people.length !== people.length || result.people.some((person) => !person.departmentId || !person.departmentName)) throw new Error('PERSON_BATCH_CREATE_FAILED')
       return reply.status(201).send({
-        meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次批量导入结果；未重复创建人员。' : '批量人员已写入本地 SQLite；职位、用途和真实 New API 映射将在后续接入', createdCount: result.people.length },
+        meta: { source: 'database' as const, createdAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次批量导入结果；未重复创建人员。' : '批量人员已写入本地 SQLite；登录名和初始凭据由服务端生成并仅保存哈希', createdCount: result.people.length },
         people: result.people.map((person) => ({ id: person.id, username: person.username, displayName: person.displayName, department: { id: person.departmentId as string, name: person.departmentName as string } })),
         operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
       })
@@ -375,22 +432,28 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
   })
 
-  app.patch('/api/people/:id/models', {
-    schema: { params: personIdParamsSchema, body: personModelsUpdateBodySchema, response: { 200: personModelsUpdateResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
+  app.post('/api/people/:id/delete', {
+    schema: { params: personIdParamsSchema, body: personDeleteBodySchema, response: { 200: personDeleteResponseSchema, 400: errorResponseSchema, 404: errorResponseSchema, 409: errorResponseSchema } },
   }, async (request, reply) => {
     const visible = createDatabasePersonDetail(database, request.params.id, await (options.probeNewApi ?? probeNewApiFromEnvironment)(), new Date(), dataScopeFor(request.authUser))
-    if (!visible) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到可调整模型白名单的人员', requestId: request.id } })
-    const available = new Set(visible.models.map((model) => model.alias))
-    if (request.body.models.some((model) => !available.has(model))) return reply.status(400).send({ error: { code: 'MODEL_NOT_AVAILABLE', message: '包含当前人员不可用的业务模型别名，请刷新后重试', requestId: request.id } })
     const auditEventId = `audit-${request.body.idempotencyKey}`
     try {
-      const result = database.updatePersonModelPolicy(request.params.id, request.body.models, {
-        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'update', resourceType: 'person', resourceId: request.params.id,
+      const result = database.deletePerson(request.params.id, {
+        id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'delete', resourceType: 'person', resourceId: request.params.id,
         result: 'success', requestId: request.id,
-        summary: { message: '已更新本地 SQLite 人员模型白名单；同步更新仍有效 Key，未调用 New API，也未记录调整原因原文。', resourceName: visible.profile.name, reasonProvided: true, reasonLength: request.body.reason.length, changes: [{ field: 'models', label: '允许模型', before: visible.models.filter((model) => model.allowed).map((model) => model.alias).join('、'), after: request.body.models.join('、'), sensitive: false }, { field: 'keys', label: '关联 Key', before: '仍有效', after: '已同步模型白名单', sensitive: false }] },
+        summary: {
+          message: visible ? '已从人员目录移除本地 SQLite 人员；历史审计与用量记录保留，关联 Key 继续保持已回收状态。' : '已返回上次人员删除结果；未重复写入。',
+          resourceName: visible?.profile.name ?? '已删除人员', reasonProvided: true, reasonLength: request.body.reason.length,
+          changes: [{ field: 'directory', label: '人员目录', before: '已停用', after: '已删除', sensitive: false }],
+        },
       })
-      if (!result) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '该人员已不可用，请刷新后重试', requestId: request.id } })
-      return { meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次模型白名单调整结果；未重复写入。' : '已更新本地 SQLite 模型白名单并同步仍有效 Key；不会调用 New API。' }, person: { id: visible.profile.id, name: visible.profile.name }, models: modelsForPurpose(visible.profile.purpose, result.models), keysUpdated: result.keysUpdated, operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId } }
+      if (!result) return reply.status(404).send({ error: { code: 'PERSON_NOT_FOUND', message: '未找到可删除的人员', requestId: request.id } })
+      if (result.state === 'not_disabled') return reply.status(409).send({ error: { code: 'PERSON_MUST_BE_DISABLED', message: '只有已停用人员才可以删除', requestId: request.id } })
+      return {
+        meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次人员删除结果；未重复写入。' : '人员已从本地 SQLite 人员目录移除；历史审计与用量记录保留，关联 Key 继续保持已回收状态。' },
+        person: { id: result.person.id, name: result.person.displayName, status: 'deleted' as const },
+        operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
+      }
     } catch (error) {
       if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') return reply.status(409).send({ error: { code: 'IDEMPOTENCY_KEY_REUSED', message: '该幂等操作编号已用于另一名人员', requestId: request.id } })
       throw error
@@ -479,7 +542,7 @@ export function buildApp(options: BuildAppOptions = {}) {
     const expiresAt = new Date(Date.now() + request.body.expiresInDays * 86_400_000).toISOString()
     const masked = `sk-ops••••••${secret.slice(-4).toUpperCase()}`
     try {
-      const created = database.createApiKey({ id, ownerUserId: request.body.ownerId, maskedValue: masked, purpose: request.body.purpose, expiresAt, models: request.body.models }, {
+      const created = database.createApiKey({ id, ownerUserId: request.body.ownerId, maskedValue: masked, secretHash: hashPlatformApiKey(secret), purpose: request.body.purpose, expiresAt, model: request.body.model, models: [request.body.model] }, {
         id: `audit-${id}-create`,
         actorUserId: request.authUser?.id ?? null,
         action: 'create',
@@ -493,14 +556,14 @@ export function buildApp(options: BuildAppOptions = {}) {
           changes: [
             { field: 'secret', label: '密钥内容', before: null, after: '已创建（不记录值）', sensitive: true },
             { field: 'purpose', label: '业务用途', before: null, after: request.body.purpose, sensitive: false },
-            { field: 'models', label: '允许模型', before: null, after: request.body.models.join('、'), sensitive: false },
+            { field: 'model', label: '绑定模型', before: null, after: request.body.model, sensitive: false },
           ],
         },
       })
       if (!created || !created.departmentName || !created.expiresAt) throw new Error('KEY_CREATE_FAILED')
       return reply.status(201).send({
-        meta: { source: 'database' as const, createdAt: created.createdAt, notice: '完整 Key 仅在本次响应中展示一次；数据库只保存掩码标识。' },
-        key: { id: created.id, masked: created.maskedValue, owner: { id: created.ownerUserId, name: created.ownerName, department: created.departmentName }, purpose: created.purpose, models: created.models, expiresAt: created.expiresAt },
+        meta: { source: 'database' as const, createdAt: created.createdAt, notice: '完整 Key 仅在本次响应中展示一次；数据库只保存掩码和不可逆哈希。' },
+        key: { id: created.id, masked: created.maskedValue, owner: { id: created.ownerUserId, name: created.ownerName, department: created.departmentName }, purpose: created.purpose, model: created.model, models: [created.model], expiresAt: created.expiresAt },
         secret,
         operation: { auditEventId: `audit-${id}-create` },
       })
@@ -558,13 +621,13 @@ export function buildApp(options: BuildAppOptions = {}) {
     const auditEventId = `audit-${request.body.idempotencyKey}`
     try {
       const result = database.rotateApiKey(request.params.id, {
-        id: rotationId, ownerUserId: visible.key.owner.id, maskedValue: `sk-ops••••••${secret.slice(-4).toUpperCase()}`,
-        purpose: visible.key.purpose, expiresAt, models: visible.key.models,
+        id: rotationId, ownerUserId: visible.key.owner.id, maskedValue: `sk-ops••••••${secret.slice(-4).toUpperCase()}`, secretHash: hashPlatformApiKey(secret),
+        purpose: visible.key.purpose, expiresAt, model: visible.key.model, models: [visible.key.model],
       }, {
         id: auditEventId, actorUserId: request.authUser?.id ?? null, action: 'rotate', resourceType: 'key', resourceId: request.params.id,
         result: 'success', requestId: request.id,
         summary: {
-          message: '已轮换本地 SQLite 演示 Key；旧 Key 已停用，未调用 New API，未记录完整 Key 或轮换原因原文。', resourceName: visible.key.masked,
+          message: '已轮换本地 SQLite 演示 Key；新 Key 继承原 Key 的单一绑定模型，未调用 New API，未记录完整 Key 或轮换原因原文。', resourceName: visible.key.masked,
           reasonProvided: true, reasonLength: request.body.reason.length, idempotencyFingerprint,
           changes: [
             { field: 'status', label: '旧 Key 状态', before: '启用', after: '停用', sensitive: false },
@@ -578,7 +641,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       return {
         meta: { source: 'database' as const, completedAt: new Date().toISOString(), secretAvailable: !result.idempotent, notice: result.idempotent ? '该轮换操作已完成；为保护凭据，完整新 Key 不会再次返回。' : '已轮换本地 SQLite 演示 Key；旧 Key 已停用，完整新 Key 仅在本次响应中返回一次。' },
         oldKey: { id: result.oldKey.id, masked: result.oldKey.maskedValue, status: 'disabled' as const },
-        key: { id: result.newKey.id, masked: result.newKey.maskedValue, owner: { id: result.newKey.ownerUserId, name: result.newKey.ownerName, department: result.newKey.departmentName }, purpose: result.newKey.purpose, models: result.newKey.models, expiresAt: result.newKey.expiresAt },
+        key: { id: result.newKey.id, masked: result.newKey.maskedValue, owner: { id: result.newKey.ownerUserId, name: result.newKey.ownerName, department: result.newKey.departmentName }, purpose: result.newKey.purpose, model: result.newKey.model, models: [result.newKey.model], expiresAt: result.newKey.expiresAt },
         secret: result.idempotent ? null : secret,
         operation: { idempotencyKey: request.body.idempotencyKey, idempotent: result.idempotent, auditEventId },
       }
@@ -1337,12 +1400,14 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.setErrorHandler((error, request, reply) => {
     const isValidationError = typeof error === 'object' && error !== null && 'validation' in error
     const statusCode = isValidationError ? 400 : 500
+    const isGatewayRequest = request.url.split('?')[0]?.startsWith('/v1/') ?? false
     request.log.error({ err: error, requestId: request.id }, 'request failed')
     return reply.status(statusCode).send({
       error: {
         code: isValidationError ? 'INVALID_REQUEST' : 'INTERNAL_ERROR',
         message: isValidationError ? '请求参数不符合接口约定' : '服务暂时不可用',
         requestId: request.id,
+        ...(isGatewayRequest ? { type: 'gateway_error' } : {}),
       },
     })
   })

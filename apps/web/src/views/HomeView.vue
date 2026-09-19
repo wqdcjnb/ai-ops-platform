@@ -75,7 +75,7 @@ const entryCards = computed<EntryCard[]>(() => [
   },
   {
     title: '人员与 Key',
-    description: '管理人员归属、访问凭据和软额度目标',
+    description: '管理人员归属和访问凭据',
     icon: IconUsers,
     tone: 'blue',
     source: tasks.value ? 'SQLITE' : '等待数据',

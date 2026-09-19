@@ -94,6 +94,15 @@ async function loadLimits() {
   errorMessage.value = ''
   try {
     limits.value = await fetchLimits(currentFilters(), next.signal)
+    if (!limits.value.softQuotaEnabled) {
+      quotaRequests.value = null
+      reservations.value = null
+      showAdjust.value = false
+      quotaDecision.value = null
+      reservationDialog.value = null
+    } else {
+      void loadQuotaRequests()
+    }
     if (!limits.value.items.some((item) => item.id === selectedId.value)) selectedId.value = limits.value.items[0]?.id ?? ''
   } catch (error) {
     if (next.signal.aborted) return
@@ -201,7 +210,7 @@ async function submitReservation() {
 
 const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadLimits())
 
-onMounted(() => { void loadLimits(); void loadQuotaRequests() })
+onMounted(() => { void loadLimits() })
 watch(selectedId, () => { void loadReservations() })
 watch(limits, () => { void loadReservations() })
 onBeforeUnmount(() => request?.abort())
@@ -210,19 +219,21 @@ onBeforeUnmount(() => request?.abort())
 <template>
   <div class="dashboard limits-dashboard">
     <section class="page-heading">
-      <div><div class="eyebrow">BUDGET &amp; TRAFFIC POLICY</div><h1>额度与限流</h1><p>从公司到 Key 检查五层软目标、周期用量与实时流量边界。</p></div>
-      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadLimits"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn" :disabled="!selected" @click="openAdjust">调整月度软目标</button></div>
+      <div><div class="eyebrow">BUDGET &amp; TRAFFIC POLICY</div><h1>额度与限流</h1><p>{{ limits?.softQuotaEnabled === false ? '软额度已废弃；当前页面仅保留限流能力状态说明。' : '从公司到 Key 检查五层软目标、周期用量与实时流量边界。' }}</p></div>
+      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadLimits"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button v-if="limits?.softQuotaEnabled !== false" class="btn" :disabled="!selected" @click="openAdjust">调整月度软目标</button></div>
     </section>
 
     <div v-if="limits" class="source-banner"><span>{{ limits.meta.source === 'database' ? 'SQLITE' : 'DEMO' }}</span>{{ limits.meta.notice }}</div>
-    <section class="limit-summary-grid" aria-label="额度状态摘要"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }} <small>{{ card.suffix }}</small></strong><div class="metric-foot">{{ card.hint }}</div></article></section>
+    <section v-if="limits?.softQuotaEnabled !== false" class="limit-summary-grid" aria-label="额度状态摘要"><article v-for="card in summaryCards" :key="card.label" class="metric-card"><div class="metric-top"><span class="metric-label">{{ card.label }}</span><span class="metric-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="19" /></span></div><strong class="metric-value">{{ card.value }} <small>{{ card.suffix }}</small></strong><div class="metric-foot">{{ card.hint }}</div></article></section>
 
-    <section v-if="limits" class="soft-mode-banner"><span><IconShieldLock :size="20" /></span><div><strong>当前为软额度模式</strong><p>达到 80% 或 100% 只产生提示，当前不会拒绝员工请求。硬额度开关已由服务端固定关闭。</p></div><em>不阻断</em></section>
+    <section v-if="limits?.softQuotaEnabled" class="soft-mode-banner"><span><IconShieldLock :size="20" /></span><div><strong>当前为软额度模式</strong><p>达到 80% 或 100% 只产生提示，当前不会拒绝员工请求。硬额度开关已由服务端固定关闭。</p></div><em>不阻断</em></section>
 
     <div v-if="!limits && !errorMessage" class="panel data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取额度策略</strong><p>正在聚合五层目标和实时限流指标…</p></div></div>
     <div v-else-if="errorMessage" class="panel data-state failed"><div class="state-icon"><IconAlertTriangle :size="22" /></div><div><strong>额度策略加载失败</strong><p>{{ errorMessage }}</p></div><button class="btn btn-white" @click="loadLimits">重试</button></div>
 
     <template v-else-if="limits">
+      <section v-if="!limits.softQuotaEnabled" class="panel data-state deprecated-state"><div class="state-icon"><IconShieldLock :size="22" /></div><div><strong>软额度已废弃</strong><p>当前版本不再展示或生成软目标、临时额度申请和额度告警；硬限流尚未开启，后续将单独验收实时限流保护。</p></div></section>
+      <template v-else>
       <section class="panel limit-workbench">
         <form class="limit-filters" @submit.prevent="applyFilters"><label class="limit-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索额度范围" maxlength="60" type="search" placeholder="搜索范围、人员、用途或 Key 掩码" /></label><label><IconFilter :size="15" /><select v-model="level" @change="applyFilters"><option value="all">全部层级</option><option v-for="item in limits.options.levels" :key="item.id" :value="item.id">{{ item.label }}</option></select></label><span class="realtime-search-hint" aria-live="polite">输入即搜索</span><button class="text-button" type="button" @click="clearFilters">清除</button></form>
         <div class="limit-workbench-grid">
@@ -265,7 +276,8 @@ onBeforeUnmount(() => request?.abort())
 
       <section class="panel quota-approval-panel"><header class="panel-header"><div><span class="panel-title">临时额度申请</span><span class="panel-subtitle">本地审批轨道 · 申请原因只保存长度</span></div><div class="quota-approval-summary"><strong>{{ quotaRequests?.summary.pending ?? 0 }}</strong><small>待审批</small><strong>{{ quotaRequests?.summary.active ?? 0 }}</strong><small>活跃</small></div></header><div class="quota-approval-toolbar"><span>审批状态</span><select v-model="quotaStatus" @change="loadQuotaRequests"><option value="all">全部申请</option><option value="pending">待审批</option><option value="approved">已批准</option><option value="rejected">已拒绝</option><option value="expired">已到期</option></select><button class="text-button" @click="loadQuotaRequests"><IconRefresh :size="14" />刷新</button></div><div v-if="quotaRequestError" class="quota-request-error"><IconAlertTriangle :size="15" />{{ quotaRequestError }}</div><div v-else-if="quotaRequests?.items.length" class="quota-approval-list"><article v-for="item in quotaRequests.items" :key="item.id" class="quota-approval-card"><div class="quota-status-rail" :class="item.status" /><div class="quota-approval-main"><header><div><strong>{{ item.requester.name }}</strong><span>{{ item.requester.department }}</span></div><span class="quota-status" :class="item.status">{{ item.status === 'pending' ? '待审批' : item.status === 'approved' ? '已批准' : item.status === 'rejected' ? '已拒绝' : '已到期' }}</span></header><div class="quota-approval-metrics"><span><small>申请点数</small><strong>{{ item.targetPoints.toLocaleString('zh-CN') }} 点</strong></span><span><small>有效时长</small><strong>{{ item.durationHours }} 小时</strong></span><span><small>申请时间</small><strong>{{ resetText(item.requestedAt) }}</strong></span><span><small>原因记录</small><strong>{{ item.reasonLength }} 字（脱敏）</strong></span></div><footer><span v-if="item.expiresAt">{{ item.status === 'approved' ? `到期 ${resetText(item.expiresAt)}` : `处理于 ${resetText(item.decidedAt ?? item.requestedAt)}` }}</span><span v-else>审批操作会写入审计链</span><div v-if="quotaRequests?.scope.canDecide && item.status === 'pending'" class="quota-approval-actions"><button class="btn btn-white" @click="openQuotaDecision(item, 'reject')">拒绝</button><button class="btn" @click="openQuotaDecision(item, 'approve')">批准</button></div></footer></div></article></div><div v-else class="quota-approval-empty"><IconCheck :size="18" />当前筛选下没有申请记录</div></section>
     </template>
-    <footer class="page-footer">数据来源：{{ limits?.meta.source.toUpperCase() ?? '等待数据' }} · 月度软目标与临时额度审批均为本地 SQLite · 硬额度关闭 · 不调用 New API</footer>
+      </template>
+      <footer class="page-footer">数据来源：{{ limits?.meta.source.toUpperCase() ?? '等待数据' }} · {{ limits?.softQuotaEnabled ? '软额度功能已启用' : '软额度已废弃' }} · 硬额度关闭 · 不调用 New API</footer>
 
     <div v-if="showAdjust && selected && month" class="drawer-backdrop" @click.self="closeAdjust">
       <aside class="create-key-dialog quota-adjust-dialog" role="dialog" aria-modal="true" aria-label="调整月度软目标">

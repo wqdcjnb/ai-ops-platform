@@ -8,7 +8,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file-if-exists=.env.local dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run src"
+    "test": "vitest run src",
+    "preflight:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/preflight-local.ps1",
+    "backup:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/backup-local.ps1"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

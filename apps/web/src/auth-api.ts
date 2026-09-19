@@ -56,6 +56,14 @@ export async function login(username: string, password: string, signal?: AbortSi
   }), '登录失败')
 }
 
+export async function bootstrapAdmin(signal?: AbortSignal) {
+  return parseAuthResponse(await fetch('/api/auth/bootstrap', {
+    method: 'POST',
+    headers: { accept: 'application/json' },
+    signal,
+  }), '自动进入管理控制台失败')
+}
+
 export async function logout(signal?: AbortSignal) {
   const response = await fetch('/api/auth/logout', { method: 'POST', headers: withCsrfHeader({ accept: 'application/json' }), signal })
   if (!response.ok) throw new AuthApiError('退出登录失败', response.headers.get('x-request-id') ?? undefined)

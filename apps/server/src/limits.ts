@@ -51,6 +51,9 @@ export const limitNodeSchema = z.object({
 
 export const limitsResponseSchema = z.object({
   meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  // Kept in the response so the client can hide legacy soft-quota controls
+  // without guessing from the returned item list.
+  softQuotaEnabled: z.boolean().default(true),
   summary: z.object({
     monthlyLimit: z.number().int().positive(),
     used: z.number().int().nonnegative(),
@@ -87,6 +90,10 @@ export type LimitsResponse = z.infer<typeof limitsResponseSchema>
 export type LimitNode = z.infer<typeof limitNodeSchema>
 export type QuotaUpdateBody = z.infer<typeof quotaUpdateBodySchema>
 export type QuotaUpdateResponse = z.infer<typeof quotaUpdateResponseSchema>
+
+export function isSoftQuotaEnabled() {
+  return process.env.AI_OPS_SOFT_QUOTA_ENABLED !== 'false'
+}
 
 interface NodeSeed {
   id: string
@@ -167,6 +174,7 @@ export function createDemoLimits(query: LimitsQuery, newApi: NewApiStatus, now =
   const month = company.periods.find((period) => period.id === 'month')!
   return {
     meta: { source: 'demo', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: noticeFor(newApi) },
+    softQuotaEnabled: isSoftQuotaEnabled(),
     summary: { monthlyLimit: month.limit, used: month.used, reserved: month.reserved, percent: month.percent, alertedScopes: all.filter((node) => node.state !== 'normal').length, hitCount: company.rates.rpm.hits },
     hardMode: {
       enabled: false, blocking: false,
@@ -221,6 +229,17 @@ function nodesForScope(nodes: LimitNode[], scope: DataScope) {
 
 export function createDatabaseLimits(database: PlatformDatabase, query: LimitsQuery, newApi: NewApiStatus, now = new Date(), scope: DataScope = { mode: 'global' }): LimitsResponse {
   const demo = createDemoLimits({ level: 'all', search: '' }, newApi, now)
+  if (!isSoftQuotaEnabled()) {
+    return {
+      ...demo,
+      meta: { source: 'database', generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', notice: `软额度已废弃；当前版本不展示或生成软目标、临时额度和软额度告警。${scopeNotice(scope)}` },
+      softQuotaEnabled: false,
+      summary: { monthlyLimit: 1, used: 0, reserved: 0, percent: 0, alertedScopes: 0, hitCount: 0 },
+      options: { levels: [] },
+      items: [],
+      total: 0,
+    }
+  }
   const policies = database.listQuotaPolicies()
   const temporaryGrantPoints = new Map<string, number>()
   for (const grant of database.listActiveTemporaryQuotaGrants(now)) {
