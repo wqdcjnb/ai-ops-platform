@@ -30,7 +30,7 @@ describe('standalone gateway routes', () => {
     expect(health.statusCode).toBe(200)
     expect(health.json()).toMatchObject({
       status: 'ok', service: 'ai-ops-gateway', mode: 'standalone', provider: 'openai_compatible', upstreamConfigured: true,
-      capabilities: { models: true, chatCompletions: true, responses: false, streaming: false },
+      capabilities: { models: true, chatCompletions: true, responses: false, streaming: true },
     })
     expect(health.json().requestId).toBe(health.headers['x-request-id'])
 
@@ -39,15 +39,20 @@ describe('standalone gateway routes', () => {
     expect(config.json()).toMatchObject({ mode: 'standalone', upstream: { provider: 'openai_compatible', configured: true } })
     expect(JSON.stringify(config.json())).not.toContain('server-only-secret')
     expect((await app.inject({ method: 'GET', url: '/api/settings' })).statusCode).toBe(401)
+
+    const upstreamHealth = await app.inject({ method: 'GET', url: '/gateway/upstream-health' })
+    expect(upstreamHealth.statusCode).toBe(200)
+    expect(upstreamHealth.json()).toMatchObject({ mode: 'standalone', status: 'offline', modelCount: 0 })
   })
 
   it('reports an unconfigured standalone gateway without pretending forwarding is available', async () => {
-    const app = buildApp({ databasePath: ':memory:' })
+    const app = buildApp({ databasePath: ':memory:', gatewayConfig: loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'standalone' }) })
     apps.push(app)
 
     const response = await app.inject({ method: 'GET', url: '/gateway/health' })
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({ mode: 'standalone', upstreamConfigured: false, capabilities: { chatCompletions: false } })
+    expect((await app.inject({ method: 'GET', url: '/gateway/upstream-health' })).json()).toMatchObject({ status: 'unconfigured', modelCount: 0 })
   })
 
   it('exposes the active connector and does not relabel a New API route as standalone', async () => {
@@ -70,7 +75,7 @@ describe('standalone gateway routes', () => {
     apps.push(app)
 
     const health = await app.inject({ method: 'GET', url: '/gateway/health' })
-    expect(health.json()).toMatchObject({ connector: { id: 'new_api', label: 'New API 连接器', environment: 'production', configured: true } })
+    expect(health.json()).toMatchObject({ connector: { id: 'new_api', label: 'New API 连接器', environment: 'production', configured: true }, capabilities: { streaming: true, responses: false } })
     const completion = await app.inject({
       method: 'POST',
       url: '/v1/chat/completions',
@@ -78,6 +83,74 @@ describe('standalone gateway routes', () => {
       payload: { model: 'gpt-4o-mini', messages: [{ role: 'user', content: 'hello' }] },
     })
     expect(completion.statusCode).toBe(200)
+  })
+
+  it('passes native Responses requests and streams through the CPA connector', async () => {
+    const events = [
+      { event: 'response.created', data: { id: 'resp-cpa', object: 'response' } },
+      { event: 'response.output_text.delta', data: { delta: 'ok' } },
+      { event: 'response.completed', data: { id: 'resp-cpa', status: 'completed' } },
+    ]
+    let received: Record<string, unknown> | undefined
+    const upstream: GatewayUpstream = {
+      listModels: async () => [{ id: 'gpt-5-codex', object: 'model', created: 1, owned_by: 'cpa' }],
+      chatCompletion: async () => ({ id: 'chatcmpl-cpa', object: 'chat.completion', created: 1, model: 'gpt-5-codex', choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+      chatCompletionStream: async () => undefined,
+      responses: async (request) => {
+        received = request
+        return { id: 'resp-cpa', object: 'response', model: request.model, status: 'completed', output: [{ type: 'message' }] }
+      },
+      responsesStream: async (_request, onEvent) => {
+        for (const event of events) onEvent(event)
+      },
+      cancel: async () => undefined,
+    }
+    const app = buildApp({
+      databasePath: ':memory:',
+      gatewayConfig: loadGatewayConfig({
+        AI_OPS_GATEWAY_MODE: 'cpa',
+        AI_OPS_GATEWAY_CPA_BASE_URL: 'http://127.0.0.1:8317/v1',
+        AI_OPS_GATEWAY_CPA_API_KEY: 'cpa-server-secret',
+        AI_OPS_GATEWAY_CLIENT_API_KEY: 'client-secret',
+      }),
+      gatewayUpstream: upstream,
+    })
+    apps.push(app)
+
+    const health = await app.inject({ method: 'GET', url: '/gateway/health' })
+    expect(health.json()).toMatchObject({
+      mode: 'cpa',
+      connector: { label: 'CPA Codex OAuth', environment: 'production' },
+      capabilities: { responses: true, streaming: true },
+    })
+    const upstreamHealth = await app.inject({ method: 'GET', url: '/gateway/upstream-health' })
+    expect(upstreamHealth.json()).toMatchObject({ status: 'healthy', mode: 'cpa', modelCount: 1 })
+
+    const payload = {
+      model: 'gpt-5-codex',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+      tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+    }
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+      payload,
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ id: 'resp-cpa', object: 'response' })
+    expect(received).toMatchObject({ model: 'gpt-5-codex', tools: payload.tools })
+
+    const streamed = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      headers: { authorization: 'Bearer client-secret', 'content-type': 'application/json' },
+      payload: { ...payload, stream: true },
+    })
+    expect(streamed.statusCode).toBe(200)
+    expect(streamed.headers['content-type']).toContain('text/event-stream')
+    expect(streamed.body).toContain('event: response.created')
+    expect(streamed.body).toContain('event: response.completed')
   })
 
   it('protects P02 endpoints with the temporary server-side client key and maps model aliases', async () => {
@@ -217,6 +290,87 @@ describe('standalone gateway routes', () => {
     database.disableApiKey('key-gateway-test', { id: 'audit-gateway-test-disable', actorUserId: 'user-super-admin', action: 'disable', resourceType: 'key', resourceId: 'key-gateway-test', result: 'success', requestId: 'req-gateway-test', summary: { message: 'test disable' } })
     const revoked = await app.inject({ method: 'GET', url: '/v1/models', headers: { authorization: `Bearer ${secret}` } })
     expect(revoked.statusCode).toBe(401)
+  })
+
+  it('authenticates an external New API token, forwards it upstream, and captures the conversation locally', async () => {
+    const database = new PlatformDatabase({ filename: ':memory:' })
+    const externalSecret = 'sk-new-api-external-test-secret'
+    databases.push(database)
+
+    let forwardedAuthorization: string | undefined
+    const upstream: GatewayUpstream = {
+      listModels: async () => [{ id: 'gpt-5.6-terra', object: 'model', created: 1, owned_by: 'new-api' }],
+      chatCompletion: async (request, _signal, context) => {
+        forwardedAuthorization = context?.authorization
+        return {
+          id: 'chatcmpl-external-key',
+          object: 'chat.completion',
+          created: 1,
+          model: request.model,
+          choices: [{ index: 0, message: { role: 'assistant', content: 'captured' }, finish_reason: 'stop' }],
+        }
+      },
+      chatCompletionStream: async () => undefined,
+      cancel: async () => undefined,
+    }
+    const app = buildApp({
+      database,
+      gatewayConfig: loadGatewayConfig({
+        AI_OPS_GATEWAY_MODE: 'new_api',
+        AI_OPS_GATEWAY_UPSTREAM_BASE_URL: 'http://127.0.0.1:3000/v1',
+        AI_OPS_GATEWAY_UPSTREAM_API_KEY: 'server-only-secret',
+      }),
+      gatewayUpstream: upstream,
+      resolveExternalClientKey: async (secret) => secret === externalSecret ? {
+        id: 'key-external-gateway-test',
+        ownerUserId: 'person-lin',
+        ownerName: '林内容',
+        departmentName: '内容部',
+        maskedValue: 'sk-ops••••••CRET',
+        externalTokenId: 'new-api-token-test',
+        purpose: 'WorkBuddy 对话',
+        model: 'gpt-5.6-terra',
+        models: ['gpt-5.6-terra'],
+        status: 'active',
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      } : null,
+    })
+    apps.push(app)
+    database.createApiKey({
+      id: 'key-external-gateway-test',
+      ownerUserId: 'person-lin',
+      maskedValue: 'sk-ops••••••CRET',
+      purpose: 'WorkBuddy 对话',
+      status: 'active',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+      model: 'gpt-5.6-terra',
+      models: ['gpt-5.6-terra'],
+      externalTokenId: 'new-api-token-test',
+      quotaMode: 'unlimited',
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { authorization: `Bearer ${externalSecret}`, 'user-agent': 'WorkBuddy/1.0', 'content-type': 'application/json' },
+      payload: { model: 'gpt-5.6-terra', messages: [{ role: 'user', content: '请记录这次对话' }] },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(forwardedAuthorization).toBe(`Bearer ${externalSecret}`)
+    const record = database.listConversationAuditRecords()[0]
+    expect(record).toBeDefined()
+    expect(record).toMatchObject({
+      keyId: 'key-external-gateway-test',
+      externalTokenId: 'new-api-token-test',
+      auditStatus: 'succeeded',
+      state: 'captured',
+      contentAccessAvailable: 1,
+    })
+    expect(database.getConversationAuditContent(record!.id)).toMatchObject({ promptAvailable: true, responseAvailable: true })
+    expect(database.listUsageRequests()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ keyId: 'key-external-gateway-test', status: 'succeeded', clientName: 'WorkBuddy' }),
+    ]))
   })
 
   it('uses an explicitly enabled fallback model only for retryable upstream failures', async () => {

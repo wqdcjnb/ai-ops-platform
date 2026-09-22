@@ -23,8 +23,8 @@ let app: App
 beforeEach(() => { vi.resetAllMocks(); host = document.createElement('div'); document.body.append(host); vi.mocked(fetchAuditEvents).mockResolvedValue(response()); vi.mocked(fetchAuditDetail).mockResolvedValue(detail()) })
 afterEach(() => { app?.unmount(); window.history.replaceState({}, '', '/'); host.remove() })
 
-describe('audit view local alert action handoff', () => {
-  it('uses an exact audit event filter from a local alert action and allows clearing it', async () => {
+describe('audit view historic alert records', () => {
+  it('keeps an exact historic alert audit record readable without routing to a removed module', async () => {
     window.history.replaceState({}, '', '/audit?eventId=audit-alert-ack-1a2b3c4d&origin=alert_action')
     app = createApp(AuditView); app.mount(host)
     await vi.waitFor(() => expect(fetchAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'audit-alert-ack-1a2b3c4d', page: 1 }), expect.any(AbortSignal)))
@@ -34,8 +34,8 @@ describe('audit view local alert action handoff', () => {
     expect(window.location.search).toBe('')
     host.querySelector<HTMLButtonElement>('[aria-label="查看 audit-alert-ack-1a2b3c4d 审计详情"]')!.click()
     await vi.waitFor(() => expect(fetchAuditDetail).toHaveBeenCalledWith('audit-alert-ack-1a2b3c4d', expect.any(AbortSignal)))
-    await vi.waitFor(() => expect(host.querySelector('[aria-label="查看 alert-error-global 关联告警"]')).not.toBeNull())
-    expect(host.querySelector<HTMLAnchorElement>('[aria-label="查看 alert-error-global 关联告警"]')?.getAttribute('href')).toBe('/alerts?alertId=alert-error-global')
+    await vi.waitFor(() => expect(host.textContent).toContain('已下线的告警中心'))
+    expect(host.querySelector('[aria-label="查看 alert-error-global 关联告警"]')).toBeNull()
   })
 
   it('supports a quota detail handoff and can clear the linked scope', async () => {
@@ -62,5 +62,18 @@ describe('audit view local alert action handoff', () => {
     await vi.waitFor(() => expect(fetchAuditEvents).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'audit-quota-update-test', page: 1 }), expect.any(AbortSignal)))
     expect(host.textContent).toContain('正在显示本次管理操作的审计记录')
     expect(host.querySelector<HTMLButtonElement>('[aria-label="清除管理操作审计关联"]')).not.toBeNull()
+  })
+
+  it('opens external metadata events with the shared export action', async () => {
+    const externalEvent = { ...event, id: 'audit-cpa-fixture-1', requestId: 'req-cpa-fixture-1', sourceSystem: 'cpa' as const, actionLabel: '网关调用', resource: { type: 'gateway_request' as const, id: 'req-cpa-fixture-1', name: 'GET /v1/models' }, source: { type: 'system' as const, label: 'CPA 运行日志', ipMasked: '10.20.30.*', client: 'CPA · main.log' }, summary: '耗时 18ms · Trace trace-cpa-fixture', transport: { responseCode: 200, durationMs: 18, traceId: 'trace-cpa-fixture' } }
+    vi.mocked(fetchAuditEvents).mockResolvedValue({ ...response(), items: [externalEvent], summary: { total: 1, success: 1, failed: 0, denied: 0, sensitiveChanges: 0 } })
+    vi.mocked(fetchAuditDetail).mockResolvedValue({ ...detail(), event: externalEvent, integrity: { ...response().integrity, verified: false, hashChainVerified: false, checkpointVerified: false, algorithm: 'not_configured', eventCount: 0, notice: '外部只读日志。' }, relatedAuditIds: [] })
+    app = createApp(AuditView); app.mount(host)
+    await vi.waitFor(() => expect(host.querySelector<HTMLButtonElement>('[aria-label="查看 audit-cpa-fixture-1 审计详情"]')).not.toBeNull())
+    host.querySelector<HTMLButtonElement>('[aria-label="查看 audit-cpa-fixture-1 审计详情"]')!.click()
+    await vi.waitFor(() => expect(fetchAuditDetail).toHaveBeenCalledWith('audit-cpa-fixture-1', expect.any(AbortSignal)))
+    await vi.waitFor(() => expect(host.querySelector<HTMLButtonElement>('button[aria-label="关闭详情"]')).not.toBeNull())
+    expect(host.textContent).toContain('导出此事件')
+    expect(host.textContent).toContain('外部元数据只读')
   })
 })

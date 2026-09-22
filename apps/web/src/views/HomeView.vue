@@ -1,112 +1,87 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, type Component } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
   IconAlertTriangle,
   IconArrowUpRight,
   IconCheck,
-  IconCircleDashedCheck,
-  IconGauge,
+  IconCircleCheck,
+  IconClock,
   IconKey,
   IconRefresh,
+  IconRoute,
   IconServer2,
+  IconShieldCheck,
   IconUsers,
 } from '@tabler/icons-vue'
-import { fetchPlatformStatus, fetchTaskSummary, type PlatformService, type PlatformServiceState, type PlatformStatus, type TaskSummary } from '../home-api'
-import { fetchOverview, type OverviewResponse } from '../overview-api'
+import { fetchPlatformStatus, fetchTaskSummary, restartPlatform, type DockerRestartTarget, type DockerService, type PlatformStatus, type TaskSummary } from '../home-api'
 
 const isLoading = ref(false)
 const platform = ref<PlatformStatus | null>(null)
 const tasks = ref<TaskSummary | null>(null)
-const overview = ref<OverviewResponse | null>(null)
 const errors = ref<string[]>([])
+const restartTarget = ref<DockerRestartTarget | null>(null)
+const actionMessage = ref('')
+const actionError = ref('')
 let activeRequest: AbortController | null = null
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
-const serviceLabels: Record<PlatformServiceState, string> = {
-  healthy: '正常',
-  reachable: '可达',
-  auth_required: '认证异常',
+const serviceLabels: Record<DockerService['state'], string> = {
+  healthy: '运行正常',
+  reachable: '启动中',
   offline: '离线',
 }
 
 const taskTargets: Record<TaskSummary['items'][number]['target'], string> = {
-  alerts: '告警中心',
   keys: 'Key 管理',
 }
 
 const taskRoutes: Record<TaskSummary['items'][number]['target'], string> = {
-  alerts: '/alerts',
   keys: '/keys',
 }
 
-const setupDone = computed(() => platform.value?.setup.filter((item) => item.state === 'done').length ?? 0)
-const setupTotal = computed(() => platform.value?.setup.length ?? 0)
-const setupPercent = computed(() => setupTotal.value ? Math.round(setupDone.value / setupTotal.value * 100) : 0)
-const newApi = computed(() => platform.value?.services.find((service) => service.id === 'new-api'))
-const cpa = computed(() => platform.value?.services.find((service) => service.id === 'cpa'))
-const reachableUpstreams = computed(() => [newApi.value, cpa.value].filter((service) => service && service.state !== 'offline').length)
+function legacyMatrix(value: PlatformStatus): DockerService[] {
+  const find = (id: 'bff' | 'new-api' | 'cpa') => value.services.find((service) => service.id === id)
+  const bff = find('bff')
+  const newApi = find('new-api')
+  const cpa = find('cpa')
+  return [
+    { id: 'web', name: 'AI OPS Web', role: '管理界面', state: 'healthy', detail: '前端由 Docker Compose 管理', checkedAt: value.meta.generatedAt, container: null },
+    { id: 'server', name: 'AI OPS Server', role: 'BFF 与网关', state: bff?.state === 'offline' ? 'offline' : 'healthy', detail: bff?.detail ?? '页面数据与权限边界服务', checkedAt: bff?.checkedAt ?? value.meta.generatedAt, container: null },
+    { id: 'new-api', name: 'New API', role: 'Token 与渠道管理', state: newApi?.state === 'offline' ? 'offline' : 'healthy', detail: newApi?.detail ?? '服务状态待检查', checkedAt: newApi?.checkedAt ?? value.meta.generatedAt, container: null },
+    { id: 'cpa', name: 'CPA Codex OAuth', role: '账号池与模型上游', state: cpa?.state === 'offline' ? 'offline' : 'healthy', detail: cpa?.detail ?? '服务状态待检查', checkedAt: cpa?.checkedAt ?? value.meta.generatedAt, container: null },
+  ]
+}
+
+const serviceMatrix = computed<DockerService[]>(() => {
+  if (!platform.value) return []
+  return platform.value.dockerServices ?? legacyMatrix(platform.value)
+})
+
+const healthyServices = computed(() => serviceMatrix.value.filter((service) => service.state === 'healthy').length)
+const serviceTotal = computed(() => serviceMatrix.value.length)
+const dockerControl = computed(() => platform.value?.dockerControl)
+const canRestart = computed(() => Boolean(dockerControl.value?.enabled && dockerControl.value?.available))
+const pendingTasks = computed(() => tasks.value?.total ?? 0)
 const lastUpdated = computed(() => {
-  const value = platform.value?.meta.generatedAt ?? tasks.value?.generatedAt ?? overview.value?.meta.generatedAt
+  const value = platform.value?.meta.generatedAt ?? tasks.value?.generatedAt
   if (!value) return '等待数据'
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(value))
 })
 
-interface EntryCard {
-  title: string
-  description: string
-  icon: Component
-  tone: string
-  source: string
-  value: string
-  detail: string
-  to?: string
+function checkedTime(service: DockerService) {
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(service.checkedAt))
 }
 
-const entryCards = computed<EntryCard[]>(() => [
-  {
-    title: '运营总览',
-    description: '查看今日请求、Token、成本点数和链路健康',
-    icon: IconGauge,
-    tone: 'teal',
-    source: overview.value ? 'SQLITE' : '等待数据',
-    value: overview.value ? overview.value.metrics.todayRequests.toLocaleString('zh-CN') : '—',
-    detail: overview.value ? `今日请求 · 成功率 ${overview.value.metrics.successRate}% · 模拟元数据` : 'SQLite 模拟数据暂未加载',
-    to: '/overview',
-  },
-  {
-    title: '人员与 Key',
-    description: '管理人员归属和访问凭据',
-    icon: IconUsers,
-    tone: 'blue',
-    source: tasks.value ? 'SQLITE' : '等待数据',
-    value: tasks.value ? tasks.value.summary.activeKeys.toLocaleString('zh-CN') : '—',
-    detail: tasks.value ? `${tasks.value.summary.activeKeys} 个有效 Key · ${tasks.value.summary.expiringKeys} 个临期` : 'SQLite Key 摘要暂未加载',
-    to: '/people',
-  },
-  {
-    title: '上游账号',
-    description: '检查正式服务与隔离实验服务的连接状态',
-    icon: IconServer2,
-    tone: 'violet',
-    source: 'LIVE',
-    value: platform.value ? `${reachableUpstreams.value}/2` : '—',
-    detail: platform.value ? '上游入口当前可达' : '服务状态暂未加载',
-    to: '/upstreams',
-  },
-  {
-    title: '待处理事项',
-    description: '集中查看告警和临期 Key 风险',
-    icon: IconAlertTriangle,
-    tone: 'amber',
-    source: tasks.value ? 'SQLITE' : '等待数据',
-    value: tasks.value ? String(tasks.value.total) : '—',
-    detail: tasks.value ? (tasks.value.total ? `${tasks.value.summary.openAlerts} 项告警与 ${tasks.value.summary.expiringKeys} 个临期 Key` : '当前没有待处理事项') : 'SQLite 任务摘要暂未加载',
-    to: '/alerts',
-  },
-])
+function serviceIcon(service: DockerService) {
+  if (service.id === 'web') return IconRoute
+  if (service.id === 'server') return IconShieldCheck
+  if (service.id === 'new-api') return IconKey
+  return IconServer2
+}
 
-function checkedTime(service: PlatformService) {
-  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(service.checkedAt))
+function statusClass(service: DockerService) {
+  return `state-${service.state}`
 }
 
 async function loadHome() {
@@ -115,11 +90,11 @@ async function loadHome() {
   activeRequest = request
   isLoading.value = true
   errors.value = []
+  actionError.value = ''
 
-  const [platformResult, taskResult, overviewResult] = await Promise.allSettled([
+  const [platformResult, taskResult] = await Promise.allSettled([
     fetchPlatformStatus(request.signal),
     fetchTaskSummary(request.signal),
-    fetchOverview('7d', request.signal),
   ])
   if (request.signal.aborted) return
 
@@ -127,26 +102,47 @@ async function loadHome() {
   else errors.value.push('服务矩阵加载失败')
   if (taskResult.status === 'fulfilled') tasks.value = taskResult.value
   else errors.value.push('待处理事项加载失败')
-  if (overviewResult.status === 'fulfilled') overview.value = overviewResult.value
-  else errors.value.push('运营摘要加载失败')
 
   if (activeRequest === request) isLoading.value = false
 }
 
+async function restart(target: DockerRestartTarget) {
+  if (!canRestart.value || restartTarget.value) return
+  const label = target === 'all' ? '整套 Docker Compose 服务' : serviceMatrix.value.find((service) => service.id === target)?.name ?? target
+  if (typeof window !== 'undefined' && !window.confirm(`确认重启${label}？重启期间对应服务会短暂不可用。`)) return
+
+  restartTarget.value = target
+  actionMessage.value = ''
+  actionError.value = ''
+  try {
+    const result = await restartPlatform(target)
+    actionMessage.value = result.message
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => void loadHome(), target === 'all' ? 3_000 : 1_800)
+  } catch (error) {
+    actionError.value = error instanceof Error ? error.message : '重启请求未提交'
+  } finally {
+    restartTarget.value = null
+  }
+}
+
 onMounted(() => void loadHome())
-onBeforeUnmount(() => activeRequest?.abort())
+onBeforeUnmount(() => {
+  activeRequest?.abort()
+  if (refreshTimer) clearTimeout(refreshTimer)
+})
 </script>
 
 <template>
-  <div class="dashboard home-dashboard">
+  <div class="dashboard home-dashboard home-v2">
     <section class="page-heading home-heading">
       <div>
-        <div class="eyebrow">CONTROL CENTER</div>
+        <div class="eyebrow">COMPOSE CONTROL CENTER</div>
         <h1>统一入口</h1>
-        <p>先确认环境状态，再进入运营、人员和上游管理任务。</p>
+        <p>只看当前真正运行的四个 Docker 服务，并在同一处完成健康检查与重启。</p>
       </div>
       <div class="heading-actions">
-        <span class="updated-at">检查时间 {{ lastUpdated }}</span>
+        <span class="updated-at">最近检查 {{ lastUpdated }}</span>
         <button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadHome">
           <IconRefresh :size="17" :class="{ spinning: isLoading }" /> {{ isLoading ? '检查中' : '刷新状态' }}
         </button>
@@ -155,87 +151,80 @@ onBeforeUnmount(() => activeRequest?.abort())
 
     <div v-if="errors.length" class="partial-warning" role="status">
       <IconAlertTriangle :size="17" />
-      <span>部分数据未更新：{{ errors.join('、') }}。其余区域仍可使用。</span>
+      <span>部分数据未更新：{{ errors.join('、') }}。可以稍后再次刷新。</span>
     </div>
+    <div v-if="actionMessage" class="home-action-notice success" role="status"><IconCheck :size="16" />{{ actionMessage }}</div>
+    <div v-if="actionError" class="home-action-notice error" role="alert"><IconAlertTriangle :size="16" />{{ actionError }}</div>
 
-    <section class="entry-grid" aria-label="业务入口">
-      <article v-for="card in entryCards" :key="card.title" class="entry-card" :class="{ disabled: !card.to }">
-        <div class="entry-card-top">
-          <span class="entry-icon" :class="`tone-${card.tone}`"><component :is="card.icon" :size="21" /></span>
-          <span class="source-tag" :class="card.source.toLowerCase()">{{ card.source }}</span>
-        </div>
-        <div class="entry-title"><h2>{{ card.title }}</h2><span>{{ card.value }}</span></div>
-        <p>{{ card.description }}</p>
-        <div class="entry-foot">
-          <small>{{ card.detail }}</small>
-          <RouterLink v-if="card.to" :to="card.to" :aria-label="`进入${card.title}`">进入 <IconArrowUpRight :size="15" /></RouterLink>
-          <span v-else title="对应页面尚未开发">页面待开发</span>
-        </div>
-      </article>
+    <section class="home-summary-strip" aria-label="平台摘要">
+      <article><span class="summary-icon tone-green"><IconCircleCheck :size="18" /></span><div><small>服务正常</small><strong>{{ healthyServices }}/{{ serviceTotal || 4 }}</strong></div></article>
+      <article><span class="summary-icon tone-blue"><IconServer2 :size="18" /></span><div><small>Docker 控制</small><strong>{{ canRestart ? '已连接' : '只读模式' }}</strong></div></article>
+      <article><span class="summary-icon tone-amber"><IconAlertTriangle :size="18" /></span><div><small>待处理事项</small><strong>{{ pendingTasks }}</strong></div></article>
+      <article><span class="summary-icon tone-violet"><IconClock :size="18" /></span><div><small>检查时间</small><strong>{{ lastUpdated }}</strong></div></article>
     </section>
 
-    <section class="home-content-grid">
-      <article class="panel service-panel">
-        <div class="panel-header">
-          <div><h2>服务矩阵</h2><p>逐项展示真实探测结果，不再使用含义模糊的可用数汇总</p></div>
-          <span class="source-tag live">LIVE</span>
+    <section class="home-primary-grid">
+      <article class="panel compose-panel">
+        <div class="panel-header compose-header">
+          <div><h2>服务矩阵</h2><p>Compose 项目：{{ dockerControl?.projectName ?? 'ai-ops-platform' }} · {{ dockerControl?.notice ?? '正在读取 Docker 状态' }}</p></div>
+          <button class="btn btn-primary compact-action" :disabled="!canRestart || Boolean(restartTarget)" @click="restart('all')">
+            <IconRefresh :size="15" :class="{ spinning: restartTarget === 'all' }" /> 重启全部服务
+          </button>
         </div>
-        <div v-if="platform" class="service-list">
-          <div v-for="service in platform.services" :key="service.id" class="service-row">
-            <span class="service-dot" :class="`state-${service.state}`" />
-            <div class="service-copy"><strong>{{ service.name }}</strong><small>{{ service.detail }}</small></div>
-            <div class="service-check"><strong :class="`state-${service.state}`">{{ serviceLabels[service.state] }}</strong><small>{{ checkedTime(service) }}</small></div>
-          </div>
+
+        <div v-if="serviceMatrix.length" class="compose-service-grid">
+          <article v-for="service in serviceMatrix" :key="service.id" class="compose-service-card" :class="statusClass(service)">
+            <header>
+              <span class="compose-service-icon"><component :is="serviceIcon(service)" :size="20" /></span>
+              <div><strong>{{ service.name }}</strong><small>{{ service.role }}</small></div>
+              <span class="service-state-pill" :class="statusClass(service)"><i />{{ serviceLabels[service.state] }}</span>
+            </header>
+            <div class="compose-service-detail"><span>{{ service.detail }}</span></div>
+            <footer>
+              <span>检查 {{ checkedTime(service) }}</span>
+              <button class="service-restart-button" :disabled="!canRestart || Boolean(restartTarget) || !service.container" :title="!canRestart ? 'Docker 控制未连接，当前为只读模式' : !service.container ? '未找到容器' : `重启 ${service.name}`" @click="restart(service.id)">
+                <IconRefresh :size="14" :class="{ spinning: restartTarget === service.id }" /> 重启
+              </button>
+            </footer>
+          </article>
         </div>
-        <div v-else class="panel-empty">{{ isLoading ? '正在探测 BFF、New API 与 CPA…' : '服务矩阵暂时不可用' }}</div>
+        <div v-else class="panel-empty">{{ isLoading ? '正在读取 Docker Compose 服务…' : '服务矩阵暂时不可用' }}</div>
       </article>
 
-      <article class="panel task-panel">
-        <div class="panel-header">
-          <div><h2>待处理事项</h2><p>根据 SQLite 模拟告警和掩码 Key 汇总，不包含完整凭据</p></div>
-          <span class="source-tag sqlite">SQLITE</span>
-        </div>
-        <div v-if="tasks?.items.length" class="home-task-list">
-          <div v-for="task in tasks.items" :key="task.id" class="home-task-item">
-            <span class="task-symbol" :class="`level-${task.level}`"><IconAlertTriangle :size="17" /></span>
-            <div><strong>{{ task.title }}</strong><small>{{ task.detail }}</small></div>
-            <RouterLink class="task-target-link" :to="taskRoutes[task.target]" :aria-label="`进入${taskTargets[task.target]}`">{{ taskTargets[task.target] }} <IconArrowUpRight :size="13" /></RouterLink>
+      <aside class="home-side-stack">
+        <article class="panel action-panel">
+          <div class="panel-header"><div><h2>运维动作</h2><p>仅管理员可执行，所有操作写入审计日志</p></div><IconShieldCheck :size="18" /></div>
+          <div class="action-panel-body">
+            <div class="action-explainer"><span><IconRefresh :size="18" /></span><div><strong>按需重启，不修改配置</strong><p>重启只作用于当前 Compose 项目容器，不会删除数据卷或认证文件。</p></div></div>
+            <div class="control-state" :class="{ ready: canRestart }"><i />{{ canRestart ? 'Docker Engine 已连接，可执行重启' : '当前为只读模式' }}</div>
+            <small class="control-note">{{ dockerControl?.notice ?? '刷新后显示 Docker 控制状态' }}</small>
           </div>
-        </div>
-        <div v-else-if="tasks" class="panel-empty success"><IconCheck :size="20" />当前没有待处理事项</div>
-        <div v-else class="panel-empty">{{ isLoading ? '正在汇总 SQLite 模拟任务…' : '待处理事项暂时不可用' }}</div>
-      </article>
+        </article>
+
+        <article class="panel quick-panel home-quick-panel">
+          <div class="panel-header"><div><h2>常用管理</h2><p>业务管理入口保持不变，系统接口不再单独暴露</p></div></div>
+          <nav class="home-quick-links" aria-label="常用管理入口">
+            <RouterLink to="/people"><span><IconUsers :size="17" /></span><div><strong>人员与部门</strong><small>同步人员归属与权限</small></div><IconArrowUpRight :size="15" /></RouterLink>
+            <RouterLink to="/keys"><span><IconKey :size="17" /></span><div><strong>Key 管理</strong><small>创建、停用与轮换凭据</small></div><IconArrowUpRight :size="15" /></RouterLink>
+            <RouterLink to="/upstreams"><span><IconServer2 :size="17" /></span><div><strong>上游账号</strong><small>检查模型与 OAuth 连接</small></div><IconArrowUpRight :size="15" /></RouterLink>
+          </nav>
+        </article>
+      </aside>
     </section>
 
-    <section class="home-bottom-grid">
-      <article class="panel setup-panel">
-        <div class="panel-header">
-          <div><h2>首次配置清单</h2><p>完成最小可用链路所需的环境步骤</p></div>
-          <strong class="setup-count">{{ setupDone }}/{{ setupTotal || '—' }}</strong>
+    <section class="panel home-tasks-panel">
+      <div class="panel-header"><div><h2>待处理事项</h2><p>只展示临期 Key 摘要，不包含完整凭据或运营指标</p></div></div>
+      <div v-if="tasks?.items.length" class="home-task-list">
+        <div v-for="task in tasks.items" :key="task.id" class="home-task-item">
+          <span class="task-symbol" :class="`level-${task.level}`"><IconAlertTriangle :size="17" /></span>
+          <div><strong>{{ task.title }}</strong><small>{{ task.detail }}</small></div>
+          <RouterLink class="task-target-link" :to="taskRoutes[task.target]" :aria-label="`进入${taskTargets[task.target]}`">{{ taskTargets[task.target] }} <IconArrowUpRight :size="13" /></RouterLink>
         </div>
-        <div class="setup-progress" :aria-label="`配置完成 ${setupPercent}%`"><i :style="{ width: `${setupPercent}%` }" /></div>
-        <div v-if="platform" class="setup-list">
-          <div v-for="item in platform.setup" :key="item.id" class="setup-item" :class="{ done: item.state === 'done' }">
-            <span><IconCheck v-if="item.state === 'done'" :size="15" /><IconCircleDashedCheck v-else :size="15" /></span>
-            <div><strong>{{ item.label }}</strong><small>{{ item.detail }}</small></div>
-          </div>
-        </div>
-        <div v-else class="panel-empty">配置状态暂未加载</div>
-      </article>
-
-      <article class="panel quick-panel">
-        <div class="panel-header"><div><h2>系统入口</h2><p>只返回安全地址，不携带登录参数或凭据</p></div><IconKey :size="18" /></div>
-        <div v-if="platform" class="quick-links">
-          <a v-for="link in platform.links" :key="link.id" :href="link.url" target="_blank" rel="noreferrer">
-            <span><IconServer2 :size="18" /></span>
-            <div><strong>{{ link.label }}</strong><small>{{ link.url }}</small></div>
-            <IconArrowUpRight :size="16" />
-          </a>
-        </div>
-        <div v-else class="panel-empty">系统入口暂未加载</div>
-      </article>
+      </div>
+      <div v-else-if="tasks" class="panel-empty success"><IconCheck :size="20" />当前没有待处理事项</div>
+      <div v-else class="panel-empty">{{ isLoading ? '正在汇总待处理事项…' : '待处理事项暂时不可用' }}</div>
     </section>
 
-    <footer class="page-footer">服务状态：LIVE · 运营摘要与待办：SQLite 模拟数据 · 不代表真实网关事件或 Key 到期状态</footer>
+    <footer class="page-footer">服务矩阵来自 Docker Engine；重启不会删除 Compose 数据卷。业务待办来自本地审计与 Key 摘要。</footer>
   </div>
 </template>

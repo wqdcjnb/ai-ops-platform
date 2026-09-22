@@ -16,7 +16,7 @@ describe('global search', () => {
 
     const people = createDatabaseSearch(database, { q: '林筱雨' }, { mode: 'global' })
     expect(people.groups).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'people', items: expect.arrayContaining([expect.objectContaining({ title: '林筱雨', href: '/people/person-lin' })]) }),
+      expect.objectContaining({ id: 'people', items: expect.arrayContaining([expect.objectContaining({ title: '林筱雨', href: '/usage?person=person-lin' })]) }),
       expect.objectContaining({ id: 'keys', items: expect.arrayContaining([expect.objectContaining({ title: 'sk-ops••••••7F2A' })]) }),
     ]))
     expect(JSON.stringify(people)).not.toContain('sk-live-')

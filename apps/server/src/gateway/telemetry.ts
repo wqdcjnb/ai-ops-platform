@@ -78,7 +78,7 @@ export function recordGatewayUsage(context: GatewayUsageContext) {
 
 function connectorChannel(mode: GatewayMode): PlatformUsageRequestSeed['channel'] {
   if (mode === 'new_api') return { id: 'gateway-new-api', name: 'New API 连接器', type: 'official_api' }
-  if (mode === 'cpa') return { id: 'gateway-cpa', name: 'CPA 连接器', type: 'cpa_oauth' }
+  if (mode === 'cpa') return { id: 'gateway-cpa', name: 'CPA Codex OAuth', type: 'cpa_oauth' }
   return { id: 'gateway-standalone', name: 'AI OPS 独立网关', type: 'official_api' }
 }
 
@@ -94,6 +94,7 @@ export function usageFromPayload(payload: unknown) {
 export function outputTextLength(payload: unknown) {
   if (!isRecord(payload)) return 0
   if (typeof payload.output_text === 'string') return payload.output_text.length
+  if (typeof payload.delta === 'string') return payload.delta.length
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   return choices.reduce((total, choice) => {
     if (!isRecord(choice)) return total

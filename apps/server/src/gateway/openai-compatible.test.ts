@@ -38,6 +38,37 @@ describe('OpenAI-compatible gateway adapter', () => {
     await expect(adapter.listModels()).rejects.toMatchObject({ code: 'GATEWAY_UPSTREAM_RATE_LIMITED', statusCode: 429 })
   })
 
+  it('preserves native Responses payloads and event names', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'resp_1', object: 'response', model: 'gpt-5-codex', status: 'completed', output: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response([
+        'event: response.created',
+        'data: {"id":"resp_1","object":"response"}',
+        '',
+        'event: response.output_text.delta',
+        'data: {"delta":"ok"}',
+        '',
+        'event: response.completed',
+        'data: {"id":"resp_1","status":"completed"}',
+        '',
+      ].join('\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const adapter = new OpenAiCompatibleAdapter(config())
+
+    const response = await adapter.responses!({ model: 'gpt-5-codex', input: 'hello', tools: [{ type: 'function' }] })
+    expect(response).toMatchObject({ id: 'resp_1', status: 'completed' })
+    const events: Array<{ event?: string; data: Record<string, unknown> }> = []
+    await adapter.responsesStream!({ model: 'gpt-5-codex', input: 'hello', stream: true }, (event) => events.push(event))
+    expect(events).toEqual([
+      { event: 'response.created', data: { id: 'resp_1', object: 'response' } },
+      { event: 'response.output_text.delta', data: { delta: 'ok' } },
+      { event: 'response.completed', data: { id: 'resp_1', status: 'completed' } },
+    ])
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:9000/v1/responses')
+    const body = JSON.parse(fetchMock.mock.calls[1]?.[1]?.body as string) as { stream: boolean }
+    expect(body.stream).toBe(true)
+  })
+
   it('parses upstream SSE chunks and sends streaming requests with stream=true', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response([
       'data: {"id":"chatcmpl-stream","object":"chat.completion.chunk","created":7,"model":"gpt-4o-mini","choices":[]}',

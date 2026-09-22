@@ -1,22 +1,26 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
-  IconAlertTriangle, IconBan, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconDeviceDesktop,
-  IconFilter, IconKey, IconKeyOff, IconRefresh, IconRotate, IconSearch, IconShieldCheck, IconSparkles, IconUser, IconX,
+  IconAlertTriangle, IconBan, IconCheck, IconChevronDown, IconChevronLeft, IconChevronRight, IconCopy,
+  IconDotsVertical, IconFilter, IconKey, IconKeyOff, IconRefresh, IconSearch, IconShieldCheck, IconSparkles, IconTrash, IconUser, IconX,
 } from '@tabler/icons-vue'
-import { createKey, disableKey, fetchKeyDetail, fetchKeys, KeysApiError, rotateKey, type KeyCreateBody, type KeyCreateResponse, type KeyDetailResponse, type KeyDisableBody, type KeyFilters, type KeyListItem, type KeyRotateBody, type KeyRotateResponse, type KeysResponse } from '../keys-api'
+import { createKey, deleteKey, disableKey, enableKey, fetchKeySecret, fetchKeys, KeysApiError, type KeyCreateBody, type KeyCreateResponse, type KeyEnableBody, type KeyFilters, type KeyListItem, type KeysResponse } from '../keys-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 import { surnameInitial } from '../modules/people/person-display'
+import { buildWorkBuddyModelsConfig, workBuddyConfigFileName } from '../workbuddy-config'
 
 const route = useRoute()
 const keys = ref<KeysResponse | null>(null)
-const selected = ref<KeyDetailResponse | null>(null)
 const isLoading = ref(false)
-const isDetailLoading = ref(false)
 const errorMessage = ref('')
-const detailError = ref('')
 const copied = ref('')
+const copyingKeyId = ref<string | null>(null)
+const copiedKeyId = ref<string | null>(null)
+const keyCopyError = ref('')
+const downloadingWorkBuddyKeyId = ref<string | null>(null)
+const workBuddyConfigNotice = ref('')
+let copiedKeyResetTimer: ReturnType<typeof setTimeout> | null = null
 const search = ref('')
 const owner = ref(typeof route.query.owner === 'string' ? route.query.owner : 'all')
 const purpose = ref('all')
@@ -28,19 +32,27 @@ const showCreate = ref(false)
 const createError = ref('')
 const isCreating = ref(false)
 const createdKey = ref<KeyCreateResponse | null>(null)
-const showDisable = ref(false)
-const disableError = ref('')
-const disableResult = ref<Awaited<ReturnType<typeof disableKey>> | null>(null)
-const isDisabling = ref(false)
-const disableForm = ref<KeyDisableBody>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
-const showRotate = ref(false)
-const rotateError = ref('')
-const isRotating = ref(false)
-const rotatedKey = ref<KeyRotateResponse | null>(null)
-const rotateForm = ref<KeyRotateBody>({ idempotencyKey: '', reason: '', expiresInDays: 90, acknowledgeImpact: true })
-const createForm = ref<KeyCreateBody>({ ownerId: '', purpose: '', model: 'ecommerce-general', expiresInDays: 90, deviceNote: '本地演示设备' })
+type KeyAction = 'disable' | 'delete'
+type PendingKeyAction = { key: KeyListItem; action: KeyAction }
+type KeyActionForm = { idempotencyKey: string; reason: string; acknowledgeImpact: boolean }
+const openMenuId = ref<string | null>(null)
+const pendingKeyAction = ref<PendingKeyAction | null>(null)
+const keyActionError = ref('')
+const isKeyActionLoading = ref(false)
+const keyDeleteCountdown = ref(0)
+let keyDeleteCountdownTimer: ReturnType<typeof setInterval> | null = null
+const disableForm = ref<KeyActionForm>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
+const deleteForm = ref<KeyActionForm>({ idempotencyKey: '', reason: '', acknowledgeImpact: true })
+const isEnabling = ref(false)
+type LocalKeyCreateBody = Extract<KeyCreateBody, { ownerId: string }>
+const createForm = ref<LocalKeyCreateBody>({ ownerId: '', purpose: '', model: '', expiresInDays: 90, deviceNote: '本地演示设备' })
+const createIdempotencyKey = ref('')
+const ownerSearch = ref('')
+const modelSearch = ref('')
+const ownerPickerOpen = ref(false)
+const modelPickerOpen = ref(false)
+const actionMenuPosition = ref({ top: 0, left: 0 })
 let listRequest: AbortController | null = null
-let detailRequest: AbortController | null = null
 
 const totalPages = computed(() => Math.max(1, Math.ceil((keys.value?.total ?? 0) / pageSize)))
 const updatedAt = computed(() => keys.value ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(keys.value.meta.generatedAt)) : '等待数据')
@@ -54,21 +66,28 @@ const summaryCards = computed(() => {
   return [
     { label: '全部 Key', value: value?.total ?? '—', hint: '仅显示掩码标识', icon: IconKey, tone: 'teal' },
     { label: '正常启用', value: value?.active ?? '—', hint: '当前允许调用', icon: IconShieldCheck, tone: 'green' },
-    { label: '30 天内到期', value: value?.expiring ?? '—', hint: '需要安排轮换', icon: IconAlertTriangle, tone: 'amber' },
+    { label: '30 天内到期', value: value?.expiring ?? '—', hint: '需要及时处理', icon: IconAlertTriangle, tone: 'amber' },
     { label: '已停用', value: value?.disabled ?? '—', hint: '不可继续调用', icon: IconKeyOff, tone: 'violet' },
   ]
 })
 const availableModels = computed(() => keys.value?.options.models.length ? keys.value.options.models : ['ecommerce-general'])
-
-function relativeTime(value: string | null) {
-  if (!value) return '从未使用'
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60_000))
-  if (minutes < 60) return `${Math.max(1, minutes)} 分钟前`
-  if (minutes < 1440) return `${Math.round(minutes / 60)} 小时前`
-  return `${Math.round(minutes / 1440)} 天前`
-}
-
-function dateText(value: string) { return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)) }
+const managedKeys = computed(() => keys.value?.meta.source === 'new_api')
+const selectedOwner = computed(() => keys.value?.options.owners.find(item => item.id === createForm.value.ownerId))
+const ownerInputValue = computed(() => ownerSearch.value || (selectedOwner.value ? `${selectedOwner.value.name} · ${selectedOwner.value.department}` : ''))
+const modelInputValue = computed(() => modelSearch.value || createForm.value.model)
+const filteredOwners = computed(() => {
+  const query = ownerSearch.value.trim().toLocaleLowerCase('zh-CN')
+  return (keys.value?.options.owners ?? []).filter(item => {
+    if (!query) return true
+    return `${item.name} ${item.department}`.toLocaleLowerCase('zh-CN').includes(query)
+  })
+})
+const filteredModels = computed(() => {
+  const query = modelSearch.value.trim().toLocaleLowerCase('zh-CN')
+  return availableModels.value.filter(item => !query || item.toLocaleLowerCase('zh-CN').includes(query))
+})
+const openMenuItem = computed(() => keys.value?.items.find(item => item.id === openMenuId.value) ?? null)
+function dateText(value: string | null) { return value ? new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value)) : '永久有效' }
 function currentFilters(): KeyFilters { return { search: search.value.trim(), owner: owner.value, purpose: purpose.value, model: model.value, status: status.value, page: page.value, pageSize } }
 
 async function loadKeys() {
@@ -92,8 +111,9 @@ function goToPage(next: number) { if (next < 1 || next > totalPages.value || nex
 function openCreate() {
   createError.value = ''
   createdKey.value = null
-  const firstOwner = keys.value?.options.owners[0]
-  createForm.value = { ownerId: firstOwner?.id ?? '', purpose: '', model: availableModels.value[0] ?? 'ecommerce-general', expiresInDays: 90, deviceNote: '本地演示设备' }
+  createIdempotencyKey.value = `key-create-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`
+  createForm.value = { ownerId: '', purpose: '', model: '', expiresInDays: 90, deviceNote: '本地演示设备' }
+  closePickers()
   showCreate.value = true
 }
 
@@ -102,15 +122,71 @@ function closeCreate() {
   showCreate.value = false
   createdKey.value = null
   createError.value = ''
+  closePickers()
+}
+
+function closePickers() {
+  ownerPickerOpen.value = false
+  modelPickerOpen.value = false
+  ownerSearch.value = ''
+  modelSearch.value = ''
+}
+
+function openOwnerPicker(event: FocusEvent) {
+  ownerPickerOpen.value = true
+  modelPickerOpen.value = false
+  modelSearch.value = ''
+  const input = event.currentTarget as HTMLInputElement | null
+  if (input && createForm.value.ownerId) input.select()
+}
+
+function openModelPicker(event: FocusEvent) {
+  modelPickerOpen.value = true
+  ownerPickerOpen.value = false
+  ownerSearch.value = ''
+  const input = event.currentTarget as HTMLInputElement | null
+  if (input && createForm.value.model) input.select()
+}
+
+function handleOwnerInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value
+  const selected = selectedOwner.value
+  ownerSearch.value = value
+  if (createForm.value.ownerId && (!selected || value !== `${selected.name} · ${selected.department}`)) createForm.value.ownerId = ''
+  ownerPickerOpen.value = true
+  modelPickerOpen.value = false
+}
+
+function handleModelInput(event: Event) {
+  const value = (event.target as HTMLInputElement).value
+  modelSearch.value = value
+  if (createForm.value.model && value !== createForm.value.model) createForm.value.model = ''
+  modelPickerOpen.value = true
+  ownerPickerOpen.value = false
+}
+
+function chooseOwner(id: string) {
+  createForm.value.ownerId = id
+  closePickers()
+}
+
+function chooseModel(value: string) {
+  createForm.value.model = value
+  closePickers()
 }
 
 async function submitCreate() {
+  if (!createForm.value.ownerId) { createError.value = '请选择所属人员'; return }
+  if (createForm.value.purpose.trim().length < 2) { createError.value = '请输入用途（至少 2 个字符）'; return }
   if (!createForm.value.model) { createError.value = '请选择一个绑定模型'; return }
   if (!availableModels.value.includes(createForm.value.model)) { createError.value = '请选择有效的业务模型'; return }
   isCreating.value = true
   createError.value = ''
   try {
-    createdKey.value = await createKey(createForm.value)
+    const payload: KeyCreateBody = managedKeys.value
+      ? { personId: createForm.value.ownerId, purpose: createForm.value.purpose.trim(), model: createForm.value.model }
+      : createForm.value
+    createdKey.value = await createKey(payload, createIdempotencyKey.value)
     await loadKeys()
   } catch (error) {
     const requestId = error instanceof KeysApiError ? error.requestId : undefined
@@ -118,73 +194,174 @@ async function submitCreate() {
   } finally { isCreating.value = false }
 }
 
-async function openDetail(id: string) {
-  detailRequest?.abort()
-  const request = new AbortController()
-  detailRequest = request
-  selected.value = null
-  detailError.value = ''
-  copied.value = ''
-  isDetailLoading.value = true
-  try { selected.value = await fetchKeyDetail(id, request.signal) }
-  catch (error) { if (!request.signal.aborted) detailError.value = error instanceof Error ? error.message : 'Key 详情暂时无法加载' }
-  finally { if (detailRequest === request) isDetailLoading.value = false }
-}
-
-function closeDetail() { detailRequest?.abort(); selected.value = null; detailError.value = ''; isDetailLoading.value = false }
 async function copyValue(label: string, value: string) { try { await navigator.clipboard.writeText(value); copied.value = label } catch { copied.value = '复制失败' } }
-function newDisableIdempotencyKey() { return `key-disable-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
-function openDisable() {
-  if (!selected.value || selected.value.key.status === 'disabled') return
-  disableError.value = ''; disableResult.value = null
-  disableForm.value = { idempotencyKey: newDisableIdempotencyKey(), reason: '', acknowledgeImpact: true }
-  showDisable.value = true
-}
-function closeDisable() { if (!isDisabling.value) { showDisable.value = false; disableError.value = ''; disableResult.value = null } }
-async function submitDisable() {
-  if (!selected.value) return
-  isDisabling.value = true; disableError.value = ''
+async function copyKeySecret(key: KeyListItem) {
+  if (copyingKeyId.value) return
+  copyingKeyId.value = key.id
+  if (copiedKeyId.value === key.id) copiedKeyId.value = null
+  keyCopyError.value = ''
   try {
-    disableResult.value = await disableKey(selected.value.key.id, disableForm.value)
-    await loadKeys()
-    selected.value = await fetchKeyDetail(selected.value.key.id)
+    const response = await fetchKeySecret(key.id)
+    if (!navigator.clipboard?.writeText) throw new Error('当前浏览器不支持复制到剪贴板')
+    await navigator.clipboard.writeText(response.secret)
+    copiedKeyId.value = key.id
+    if (copiedKeyResetTimer) clearTimeout(copiedKeyResetTimer)
+    copiedKeyResetTimer = setTimeout(() => {
+      if (copiedKeyId.value === key.id) copiedKeyId.value = null
+      copiedKeyResetTimer = null
+    }, 2_200)
   } catch (error) {
     const requestId = error instanceof KeysApiError ? error.requestId : undefined
-    disableError.value = `${error instanceof Error ? error.message : '停用 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
-  } finally { isDisabling.value = false }
+    keyCopyError.value = `${error instanceof Error ? error.message : '复制 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally {
+    copyingKeyId.value = null
+  }
 }
-function newRotateIdempotencyKey() { return `key-rotate-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
-function openRotate() {
-  if (!selected.value || selected.value.key.status === 'disabled') return
-  rotateError.value = ''; rotatedKey.value = null
-  rotateForm.value = { idempotencyKey: newRotateIdempotencyKey(), reason: '', expiresInDays: 90, acknowledgeImpact: true }
-  showRotate.value = true
+function operationKey(prefix: 'key-disable' | 'key-enable' | 'key-delete') { return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}` }
+function closeActionMenu() { openMenuId.value = null }
+async function toggleActionMenu(id: string, event: MouseEvent) {
+  if (openMenuId.value === id) {
+    closeActionMenu()
+    return
+  }
+  const button = event.currentTarget as HTMLElement | null
+  if (!button) return
+  const rect = button.getBoundingClientRect()
+  const viewportPadding = 8
+  const estimatedWidth = 160
+  const estimatedHeight = 120
+  const left = Math.min(Math.max(viewportPadding, rect.right - estimatedWidth), Math.max(viewportPadding, window.innerWidth - estimatedWidth - viewportPadding))
+  let top = rect.bottom + 6
+  if (top + estimatedHeight > window.innerHeight - viewportPadding) top = Math.max(viewportPadding, rect.top - estimatedHeight - 6)
+  actionMenuPosition.value = { top, left }
+  openMenuId.value = id
+  await nextTick()
+  if (openMenuId.value !== id) return
+  const menu = document.querySelector<HTMLElement>('.key-action-menu')
+  if (!menu) return
+  const menuRect = menu.getBoundingClientRect()
+  const boundedLeft = Math.min(Math.max(viewportPadding, rect.right - menuRect.width), Math.max(viewportPadding, window.innerWidth - menuRect.width - viewportPadding))
+  const belowTop = rect.bottom + 6
+  const boundedTop = belowTop + menuRect.height <= window.innerHeight - viewportPadding
+    ? belowTop
+    : Math.max(viewportPadding, rect.top - menuRect.height - 6)
+  actionMenuPosition.value = { top: boundedTop, left: boundedLeft }
 }
-function closeRotate() { if (!isRotating.value) { showRotate.value = false; rotateError.value = ''; rotatedKey.value = null } }
-async function submitRotate() {
-  if (!selected.value) return
-  isRotating.value = true; rotateError.value = ''
+function clearDeleteCountdown() {
+  if (keyDeleteCountdownTimer) {
+    clearInterval(keyDeleteCountdownTimer)
+    keyDeleteCountdownTimer = null
+  }
+  keyDeleteCountdown.value = 0
+}
+function closeKeyAction() {
+  if (isKeyActionLoading.value) return
+  pendingKeyAction.value = null
+  keyActionError.value = ''
+  clearDeleteCountdown()
+}
+function openKeyAction(key: KeyListItem, action: KeyAction) {
+  closeActionMenu()
+  pendingKeyAction.value = { key, action }
+  keyActionError.value = ''
+  clearDeleteCountdown()
+  if (action === 'disable') {
+    disableForm.value = { idempotencyKey: operationKey('key-disable'), reason: '', acknowledgeImpact: true }
+    return
+  }
+  deleteForm.value = { idempotencyKey: operationKey('key-delete'), reason: '', acknowledgeImpact: true }
+  keyDeleteCountdown.value = 5
+  keyDeleteCountdownTimer = setInterval(() => {
+    keyDeleteCountdown.value = Math.max(0, keyDeleteCountdown.value - 1)
+    if (keyDeleteCountdown.value === 0) clearDeleteCountdown()
+  }, 1000)
+}
+async function enableKeyFromMenu(key: KeyListItem) {
+  closeActionMenu()
+  if (isEnabling.value || key.status !== 'disabled') return
+  isEnabling.value = true
+  keyActionError.value = ''
+  const payload: KeyEnableBody = { idempotencyKey: operationKey('key-enable'), acknowledgeImpact: true }
   try {
-    rotatedKey.value = await rotateKey(selected.value.key.id, rotateForm.value)
+    await enableKey(key.id, payload)
     await loadKeys()
-    selected.value = await fetchKeyDetail(selected.value.key.id)
   } catch (error) {
     const requestId = error instanceof KeysApiError ? error.requestId : undefined
-    rotateError.value = `${error instanceof Error ? error.message : '轮换 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
-  } finally { isRotating.value = false }
+    keyActionError.value = `${error instanceof Error ? error.message : '启用 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isEnabling.value = false }
+}
+async function downloadWorkBuddyConfig(key: KeyListItem) {
+  if (downloadingWorkBuddyKeyId.value) return
+  const baseUrl = keys.value?.connection.baseUrl
+  if (!baseUrl) {
+    keyCopyError.value = '未获取到平台地址，无法生成 WorkBuddy 配置'
+    closeActionMenu()
+    return
+  }
+
+  downloadingWorkBuddyKeyId.value = key.id
+  keyCopyError.value = ''
+  workBuddyConfigNotice.value = ''
+  try {
+    const response = await fetchKeySecret(key.id)
+    const config = buildWorkBuddyModelsConfig({ baseUrl, apiKey: response.secret, model: key.model })
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = workBuddyConfigFileName
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+    workBuddyConfigNotice.value = `已下载 WorkBuddy ${workBuddyConfigFileName}；文件内 apiKey 已写入完整 Key，导入后可直接使用 ${key.model}。`
+  } catch (error) {
+    const requestId = error instanceof KeysApiError ? error.requestId : undefined
+    keyCopyError.value = `${error instanceof Error ? error.message : '生成 WorkBuddy 配置失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally {
+    downloadingWorkBuddyKeyId.value = null
+    closeActionMenu()
+  }
+}
+async function submitKeyAction() {
+  const pending = pendingKeyAction.value
+  if (!pending || isKeyActionLoading.value) return
+  if (pending.action === 'delete' && keyDeleteCountdown.value > 0) return
+  isKeyActionLoading.value = true
+  keyActionError.value = ''
+  try {
+    if (pending.action === 'disable') await disableKey(pending.key.id, { ...disableForm.value, acknowledgeImpact: true })
+    else await deleteKey(pending.key.id, { ...deleteForm.value, acknowledgeImpact: true })
+    await loadKeys()
+    pendingKeyAction.value = null
+    keyActionError.value = ''
+    clearDeleteCountdown()
+  } catch (error) {
+    const requestId = error instanceof KeysApiError ? error.requestId : undefined
+    keyActionError.value = `${error instanceof Error ? error.message : pending.action === 'disable' ? '禁用 Key 失败' : '删除 Key 失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally { isKeyActionLoading.value = false }
 }
 
 const { cancel: cancelSearch } = useDebouncedSearch(search, () => { page.value = 1; void loadKeys() })
 
-onMounted(() => void loadKeys())
-onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
+function handleDocumentClick() { closeActionMenu() }
+onMounted(() => {
+  document.addEventListener('click', handleDocumentClick)
+  void loadKeys()
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleDocumentClick)
+  listRequest?.abort()
+  clearDeleteCountdown()
+  if (copiedKeyResetTimer) clearTimeout(copiedKeyResetTimer)
+})
 </script>
 
 <template>
   <div class="dashboard keys-dashboard">
     <section class="page-heading">
-      <div><div class="eyebrow">ACCESS CREDENTIALS</div><h1>Key 管理</h1><p>按人员、用途和模型检查访问凭据；完整 Key 永远不进入列表。</p></div>
-      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadKeys"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn create-key" type="button" @click="openCreate"><IconKey :size="17" />创建 Key</button></div>
+      <div><div class="eyebrow">ACCESS CREDENTIALS</div><h1>Key 管理</h1><p>按人员、用途和模型检查访问凭据；完整 Key 不在列表展示，可点击复制按钮按需获取。</p></div>
+      <div class="heading-actions"><span class="updated-at">更新于 {{ updatedAt }}</span><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadKeys"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button><button class="btn create-key" type="button" :disabled="isLoading || !keys" @click="openCreate"><IconKey :size="17" />创建 Key</button></div>
     </section>
 
     <div v-if="keys" class="source-banner"><span>{{ keys.meta.source.toUpperCase() }}</span>{{ keys.meta.notice }}</div>
@@ -193,7 +370,7 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
     <section class="panel keys-main-panel">
       <form class="key-filters" @submit.prevent="applyFilters">
         <label class="key-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索 Key" type="search" maxlength="60" placeholder="搜索 Key 掩码、人员、部门、用途或模型" /></label>
-        <label><IconUser :size="15" /><select v-model="owner" @change="applyFilters"><option value="all">全部人员</option><option v-for="item in keys?.options.owners ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
+        <label><IconUser :size="15" /><select v-model="owner" @change="applyFilters"><option value="all">全部人员</option><option v-for="item in keys?.options.owners ?? []" :key="item.id" :value="item.id">{{ item.name }} · {{ item.department }}</option></select></label>
         <label><IconFilter :size="15" /><select v-model="purpose" @change="applyFilters"><option value="all">全部用途</option><option v-for="item in keys?.options.purposes ?? []" :key="item" :value="item">{{ item }}</option></select></label>
         <label><IconSparkles :size="15" /><select v-model="model" @change="applyFilters"><option value="all">全部模型</option><option v-for="item in keys?.options.models ?? []" :key="item" :value="item">{{ item }}</option></select></label>
         <label><IconShieldCheck :size="15" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">正常启用</option><option value="expiring">30 天内到期</option><option value="disabled">已停用</option></select></label>
@@ -203,60 +380,65 @@ onBeforeUnmount(() => { listRequest?.abort(); detailRequest?.abort() })
       <div v-if="!keys && !errorMessage" class="data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取 Key 列表</strong><p>正在从 BFF 获取脱敏后的访问凭据…</p></div></div>
       <div v-else-if="errorMessage" class="data-state failed"><div class="state-icon"><IconAlertTriangle :size="22" /></div><div><strong>Key 数据加载失败</strong><p>{{ errorMessage }}</p></div><button class="btn btn-white" @click="loadKeys">重试</button></div>
       <template v-else-if="keys">
-        <div v-if="keys.items.length" class="table-responsive"><table class="data-table keys-table"><thead><tr><th>Key 掩码</th><th>所属人员</th><th>用途</th><th>绑定模型</th><th>状态</th><th>到期时间</th><th class="number-cell">本月请求</th><th>最后使用</th><th /></tr></thead><tbody><tr v-for="item in keys.items" :key="item.id"><td><button class="masked-key" @click="openDetail(item.id)">{{ item.masked }}</button></td><td><div class="person-cell"><span class="person-avatar avatar-blue">{{ surnameInitial(item.owner.name) }}</span><span><strong>{{ item.owner.name }}</strong><small>{{ item.owner.department }}</small></span></div></td><td><span class="purpose-tag">{{ item.purpose }}</span></td><td><div class="model-tags"><span>{{ item.model }}</span></div></td><td><span class="person-status" :class="`status-${item.status}`"><i />{{ item.status === 'active' ? '启用' : '停用' }}</span></td><td><div class="expiry-cell"><strong :class="`expiry-${item.expiryState}`">{{ dateText(item.expiresAt) }}</strong><small v-if="item.expiryState !== 'normal'">{{ item.expiryState === 'expiring' ? '即将到期' : '已过期' }}</small></div></td><td class="number-cell">{{ item.usage.requests.toLocaleString('zh-CN') }}</td><td>{{ relativeTime(item.lastUsedAt) }}</td><td><button class="row-action enabled" :aria-label="`查看 ${item.masked} 详情`" @click="openDetail(item.id)"><IconChevronRight :size="17" /></button></td></tr></tbody></table></div>
+        <div v-if="keyActionError && !pendingKeyAction" class="person-action-inline-error"><IconAlertTriangle :size="15" />{{ keyActionError }}<button type="button" aria-label="关闭操作错误" @click="keyActionError = ''">×</button></div>
+        <div v-if="keyCopyError" class="person-action-inline-error key-copy-error"><IconAlertTriangle :size="15" />{{ keyCopyError }}<button type="button" aria-label="关闭复制错误" @click="keyCopyError = ''">×</button></div>
+        <div v-if="workBuddyConfigNotice" class="person-action-inline-success key-copy-error"><IconCheck :size="15" />{{ workBuddyConfigNotice }}<button type="button" aria-label="关闭 WorkBuddy 配置提示" @click="workBuddyConfigNotice = ''">×</button></div>
+         <div v-if="keys.items.length" class="table-responsive" @click="closeActionMenu"><table class="data-table keys-table"><thead><tr><th>所属人员</th><th>部门</th><th>用途</th><th>API密钥（KEY掩码）</th><th>绑定模型</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in keys.items" :key="item.id"><td><div class="person-cell"><span class="person-avatar avatar-blue">{{ surnameInitial(item.owner.name) }}</span><span><strong>{{ item.owner.name }}</strong></span></div></td><td><span class="department-cell">{{ item.owner.department }}</span></td><td><span class="purpose-tag">{{ item.purpose }}</span></td><td><span class="key-copy-cell"><code class="masked-key">{{ item.masked }}</code><button class="key-copy-button" type="button" :disabled="copyingKeyId === item.id" :aria-label="`复制 ${item.masked}`" :title="copiedKeyId === item.id ? '已复制完整 Key' : '复制完整 Key'" @click.stop="copyKeySecret(item)"><IconRefresh v-if="copyingKeyId === item.id" :size="13" class="spinning" /><IconCheck v-else-if="copiedKeyId === item.id" :size="13" /><IconCopy v-else :size="13" /></button></span></td><td><div class="model-tags"><span>{{ item.model }}</span></div></td><td><span class="person-status" :class="`status-${item.status}`"><i />{{ item.status === 'active' ? '启用' : '停用' }}</span></td><td class="key-action-cell"><button class="key-more-button" type="button" :aria-label="`${item.masked} 操作`" :aria-expanded="openMenuId === item.id" @click.stop="toggleActionMenu(item.id, $event)"><IconDotsVertical :size="18" aria-hidden="true" /></button></td></tr></tbody></table><Teleport to="body"><div v-if="openMenuItem" class="key-action-menu" role="menu" :style="{ top: `${actionMenuPosition.top}px`, left: `${actionMenuPosition.left}px` }" @click.stop><button type="button" role="menuitem" @click="openMenuItem.status === 'active' ? openKeyAction(openMenuItem, 'disable') : enableKeyFromMenu(openMenuItem)">{{ openMenuItem.status === 'active' ? '禁用' : '启用' }}</button><button type="button" role="menuitem" :disabled="downloadingWorkBuddyKeyId === openMenuItem.id" @click="downloadWorkBuddyConfig(openMenuItem)">{{ downloadingWorkBuddyKeyId === openMenuItem.id ? '正在生成 WorkBuddy 配置…' : '下载 WorkBuddy 配置' }}</button><button type="button" role="menuitem" class="danger-menu-item" @click="openKeyAction(openMenuItem, 'delete')">删除</button></div></Teleport></div>
         <div v-else class="people-empty"><IconKey :size="24" /><strong>没有符合条件的 Key</strong><span>调整人员、用途、模型或状态筛选。</span><button class="text-button" @click="clearFilters">清除筛选</button></div>
         <footer class="table-footer"><span>{{ rangeText }}</span><div><button :disabled="page <= 1 || isLoading" aria-label="上一页" @click="goToPage(page - 1)"><IconChevronLeft :size="16" /></button><strong>第 {{ page }} / {{ totalPages }} 页</strong><button :disabled="page >= totalPages || isLoading" aria-label="下一页" @click="goToPage(page + 1)"><IconChevronRight :size="16" /></button></div></footer>
       </template>
     </section>
 
-    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · 新建、停用与轮换 Key 仅作用于本地 SQLite 演示数据</footer>
+    <footer class="page-footer">数据来源：{{ keys?.meta.source.toUpperCase() ?? '等待数据' }} · {{ managedKeys ? '创建、启用、禁用与删除通过 New API 生效；管理员可按需复制完整 Key，服务端不保存明文。' : '新建、启用、禁用与删除仅作用于本地 SQLite 演示数据；管理员可按需复制完整 Key。' }}</footer>
 
     <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
-      <aside class="create-key-dialog" role="dialog" aria-modal="true" aria-label="创建 Key">
-        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ createdKey ? 'Key 已创建' : '创建 Key' }}</h2></div><button class="icon-button" aria-label="关闭创建 Key" :disabled="isCreating" @click="closeCreate"><IconX :size="20" /></button></header>
+       <aside class="create-key-dialog" :class="{ 'has-open-picker': ownerPickerOpen || modelPickerOpen }" role="dialog" aria-modal="true" aria-label="创建 Key">
+        <header><div><span class="source-tag demo">{{ managedKeys ? 'NEW API' : 'SQLITE' }}</span><h2>{{ createdKey ? 'Key 已创建' : '创建 Key' }}</h2></div><button class="icon-button" aria-label="关闭创建 Key" :disabled="isCreating" @click="closeCreate"><IconX :size="20" /></button></header>
         <template v-if="createdKey">
-          <section class="created-key-success"><IconCheck :size="22" /><strong>完整 Key 仅展示这一次</strong><p>请立即复制并保存。关闭窗口后平台不会再次返回完整值。</p><div><code>{{ createdKey.secret }}</code><button class="btn btn-white" @click="copyValue('created-secret', createdKey.secret)"><IconCheck v-if="copied === 'created-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'created-secret' ? '已复制' : '复制' }}</button></div><small>{{ createdKey.key.owner.name }} · {{ createdKey.key.purpose }} · {{ dateText(createdKey.key.expiresAt) }} 到期</small></section>
-          <footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(createdKey.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${createdKey.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" @click="closeCreate">完成</button></footer>
+          <section class="created-key-success"><IconCheck :size="22" /><strong>Key 已创建</strong><p>{{ managedKeys ? 'Key 由 New API 管理员账号创建，AI OPS 按所选人员显示归属；创建响应会返回一次，之后也可在列表点击复制按钮按需获取。' : '请复制保存；关闭窗口后列表只显示 Key 掩码，也可在列表按需复制。' }}</p><div><code>{{ createdKey.secret }}</code><button class="btn btn-white" @click="copyValue('created-secret', createdKey.secret)"><IconCheck v-if="copied === 'created-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'created-secret' ? '已复制' : '复制' }}</button></div><small>{{ createdKey.key.owner.name }} · {{ createdKey.key.purpose }} · {{ createdKey.key.expiresAt ? `${dateText(createdKey.key.expiresAt)} 到期` : '永久有效' }}</small></section>
+          <footer class="create-key-dialog-footer"><button class="btn create-key" @click="closeCreate">完成</button></footer>
         </template>
-        <form v-else class="create-key-form" @submit.prevent="submitCreate">
-          <p class="create-person-note">创建本地演示 Key。数据库仅保存掩码标识，完整值只在成功后展示一次。</p>
-          <label><span>所属人员</span><select v-model="createForm.ownerId" required><option v-for="item in keys?.options.owners ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-          <label><span>业务用途</span><input v-model="createForm.purpose" required minlength="2" maxlength="40" placeholder="例如：商品文案" /></label>
-          <label><span>绑定模型</span><select v-model="createForm.model" required><option v-for="item in availableModels" :key="item" :value="item">{{ item }}</option></select><small class="create-person-field-hint">一个 Key 只能调用一个模型；需要多个模型时，请分别创建多个 Key。</small></label>
-          <label><span>有效期（天）</span><input v-model.number="createForm.expiresInDays" required min="1" max="365" type="number" /></label>
-          <label><span>设备备注</span><input v-model="createForm.deviceNote" maxlength="120" placeholder="本地演示设备" /></label>
+        <form v-else class="create-key-form" @submit.prevent="submitCreate" @click="closePickers">
+          <p class="create-person-note">{{ managedKeys ? 'Key 会在 AI OPS 按当前有效人员显示归属；New API 由管理员账号创建，并绑定一个 CPA 模型，额度不限且永久有效。完整凭据会在创建响应中返回，之后可在列表按需复制。' : '创建本地演示 Key。数据库保存加密凭据，列表默认仅显示掩码，管理员可按需复制完整值。' }}</p>
+          <label>
+            <span>所属人员</span>
+            <div class="key-picker" :class="{ 'is-open': ownerPickerOpen }" @click.stop>
+              <IconSearch :size="14" />
+              <input id="owner-picker-trigger" :value="ownerInputValue" type="search" role="combobox" aria-haspopup="listbox" aria-controls="owner-picker-menu" :aria-expanded="ownerPickerOpen" aria-autocomplete="list" autocomplete="off" maxlength="60" aria-label="搜索所属人员" placeholder="搜索或选择人员" @focus="openOwnerPicker" @input="handleOwnerInput" @keydown.esc="closePickers" />
+              <IconChevronDown :size="16" :class="{ rotated: ownerPickerOpen }" />
+              <div v-if="ownerPickerOpen" id="owner-picker-menu" class="key-picker-menu" role="listbox" aria-label="所属人员选项">
+                <button v-for="item in filteredOwners" :key="item.id" type="button" class="key-picker-option" :class="{ 'is-selected': createForm.ownerId === item.id }" role="option" :aria-selected="createForm.ownerId === item.id" @click="chooseOwner(item.id)"><span>{{ item.name }} · {{ item.department }}</span><IconCheck v-if="createForm.ownerId === item.id" :size="15" /></button>
+                <p v-if="!filteredOwners.length" class="key-picker-empty">没有匹配的人员</p>
+              </div>
+            </div>
+          </label>
+          <label><span>用途</span><input v-model="createForm.purpose" required minlength="2" maxlength="40" placeholder="例如：Codex 开发、接口测试" /></label>
+          <label>
+            <span>绑定模型</span>
+            <div class="key-picker" :class="{ 'is-open': modelPickerOpen }" @click.stop>
+              <IconSearch :size="14" />
+              <input id="model-picker-trigger" :value="modelInputValue" type="search" role="combobox" aria-haspopup="listbox" aria-controls="model-picker-menu" :aria-expanded="modelPickerOpen" aria-autocomplete="list" autocomplete="off" maxlength="80" aria-label="搜索绑定模型" placeholder="搜索或选择模型" @focus="openModelPicker" @input="handleModelInput" @keydown.esc="closePickers" />
+              <IconChevronDown :size="16" :class="{ rotated: modelPickerOpen }" />
+              <div v-if="modelPickerOpen" id="model-picker-menu" class="key-picker-menu" role="listbox" aria-label="绑定模型选项">
+                <button v-for="item in filteredModels" :key="item" type="button" class="key-picker-option" :class="{ 'is-selected': createForm.model === item }" role="option" :aria-selected="createForm.model === item" @click="chooseModel(item)"><span>{{ item }}</span><IconCheck v-if="createForm.model === item" :size="15" /></button>
+                <p v-if="!filteredModels.length" class="key-picker-empty">没有匹配的模型</p>
+              </div>
+            </div>
+            <small class="create-person-field-hint">一个 Key 只能调用一个模型；需要多个模型时，请分别创建多个 Key。</small>
+          </label>
+          <label v-if="!managedKeys"><span>有效期（天）</span><input v-model.number="createForm.expiresInDays" required min="1" max="365" type="number" /></label>
+          <label v-if="!managedKeys"><span>设备备注</span><input v-model="createForm.deviceNote" maxlength="120" placeholder="本地演示设备" /></label>
           <div v-if="createError" class="create-person-error"><IconAlertTriangle :size="16" />{{ createError }}</div>
           <footer><button class="btn btn-white" type="button" :disabled="isCreating" @click="closeCreate">取消</button><button class="btn create-key" type="submit" :disabled="isCreating">{{ isCreating ? '生成中…' : '生成 Key' }}</button></footer>
         </form>
       </aside>
     </div>
 
-    <div v-if="selected || isDetailLoading || detailError" class="drawer-backdrop" @click.self="closeDetail">
-      <aside class="key-drawer" role="dialog" aria-modal="true" aria-label="Key 详情">
-        <header><div><span class="source-tag demo">DEMO</span><h2>Key 详情</h2></div><button class="icon-button" aria-label="关闭 Key 详情" @click="closeDetail"><IconX :size="20" /></button></header>
-        <div v-if="isDetailLoading" class="panel-empty"><IconRefresh :size="20" class="spinning" />正在加载脱敏详情…</div>
-        <div v-else-if="detailError" class="panel-empty"><IconAlertTriangle :size="20" />{{ detailError }}</div>
-        <template v-else-if="selected"><section class="drawer-key-hero"><IconKey :size="24" /><div><code>{{ selected.key.masked }}</code><span class="person-status" :class="`status-${selected.key.status}`"><i />{{ selected.key.status === 'active' ? '启用' : '停用' }}</span></div><small>{{ selected.key.id }}</small></section>
-          <dl class="drawer-facts"><div><dt>所属人员</dt><dd><RouterLink :to="`/people/${selected.key.owner.id}`">{{ selected.key.owner.name }}</RouterLink></dd></div><div><dt>所属部门</dt><dd>{{ selected.key.owner.department }}</dd></div><div><dt>用途</dt><dd>{{ selected.key.purpose }}</dd></div><div><dt>设备备注</dt><dd>{{ selected.key.deviceNote }}</dd></div><div><dt>创建时间</dt><dd>{{ dateText(selected.key.createdAt) }}</dd></div><div><dt>到期时间</dt><dd>{{ dateText(selected.key.expiresAt) }}</dd></div><div><dt>来源限制</dt><dd>{{ selected.key.allowedIps.join('、') }}</dd></div><div><dt>限流</dt><dd>{{ selected.key.limits.rpm }} RPM · {{ (selected.key.limits.tpm / 1000).toFixed(0) }}K TPM · {{ selected.key.limits.concurrent }} 并发</dd></div></dl>
-          <section class="drawer-section"><h3>绑定模型</h3><div class="drawer-models"><span>{{ selected.key.model }}</span></div><p class="drawer-help">此 Key 只能调用绑定的业务模型；如需切换模型，请新建一个 Key。</p></section>
-          <footer class="drawer-actions"><a class="btn btn-white" :href="`/audit?resource=key&search=${encodeURIComponent(selected.key.masked)}`"><IconShieldCheck :size="16" />操作审计</a><button class="btn btn-white" :disabled="selected.key.status === 'disabled'" @click="openRotate"><IconRotate :size="16" />{{ selected.key.status === 'disabled' ? '无法轮换' : '轮换 Key' }}</button><button class="btn danger-outline" :disabled="selected.key.status === 'disabled'" @click="openDisable"><IconBan :size="16" />{{ selected.key.status === 'disabled' ? '已停用' : '停用 Key' }}</button></footer>
-        </template>
-      </aside>
-    </div>
-
-    <div v-if="showDisable && selected" class="drawer-backdrop" @click.self="closeDisable">
-      <aside class="create-key-dialog disable-key-dialog" role="dialog" aria-modal="true" aria-label="停用 Key">
-        <header><div><span class="source-tag demo">SQLITE</span><h2>停用本地演示 Key</h2></div><button class="icon-button" aria-label="关闭停用 Key" :disabled="isDisabling" @click="closeDisable"><IconX :size="20" /></button></header>
-        <template v-if="disableResult"><section class="created-key-success"><IconCheck :size="22" /><strong>Key 已停用</strong><p>{{ disableResult.key.masked }} 已停用；{{ disableResult.meta.notice }}</p></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(disableResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${disableResult.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" @click="closeDisable">完成</button></footer></template>
-        <form v-else class="create-key-form" @submit.prevent="submitDisable"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 将只在本地 SQLite 中标为停用。不会调用 New API、不会撤销真实凭据，当前页面也不提供恢复操作。</p><label><span>停用原因 <em>至少 8 个字符</em></span><textarea v-model="disableForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：复核疑似泄露的本地演示设备" /></label><label class="access-ack"><input v-model="disableForm.acknowledgeImpact" type="checkbox" /><span>我已确认：该操作会立即改变本地演示 Key 状态，并写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="disableError" class="create-person-error"><IconAlertTriangle :size="16" />{{ disableError }}</div><footer><button class="btn btn-white" type="button" :disabled="isDisabling" @click="closeDisable">取消</button><button class="btn danger-outline" type="submit" :disabled="isDisabling || disableForm.reason.trim().length < 8 || !disableForm.acknowledgeImpact">{{ isDisabling ? '停用中…' : '确认停用' }}</button></footer></form>
-      </aside>
-    </div>
-
-    <div v-if="showRotate && selected" class="drawer-backdrop" @click.self="closeRotate">
-      <aside class="create-key-dialog rotate-key-dialog" role="dialog" aria-modal="true" aria-label="轮换 Key">
-        <header><div><span class="source-tag demo">SQLITE</span><h2>{{ rotatedKey ? 'Key 已轮换' : '轮换本地演示 Key' }}</h2></div><button class="icon-button" aria-label="关闭轮换 Key" :disabled="isRotating" @click="closeRotate"><IconX :size="20" /></button></header>
-        <template v-if="rotatedKey"><section class="created-key-success"><IconCheck :size="22" /><strong>{{ rotatedKey.secret ? '完整新 Key 仅展示这一次' : '轮换操作已完成' }}</strong><p>{{ rotatedKey.meta.notice }}</p><div v-if="rotatedKey.secret"><code>{{ rotatedKey.secret }}</code><button class="btn btn-white" @click="copyValue('rotated-secret', rotatedKey.secret)"><IconCheck v-if="copied === 'rotated-secret'" :size="15" /><IconCopy v-else :size="15" />{{ copied === 'rotated-secret' ? '已复制' : '复制' }}</button></div><small>旧 Key {{ rotatedKey.oldKey.masked }} 已停用 · 新 Key {{ rotatedKey.key.masked }} · {{ dateText(rotatedKey.key.expiresAt) }} 到期</small></section><footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(rotatedKey.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${rotatedKey.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" @click="closeRotate">完成</button></footer></template>
-        <form v-else class="create-key-form" @submit.prevent="submitRotate"><p class="create-person-note"><strong>{{ selected.key.masked }}</strong> 会立即在本地 SQLite 中停用，并生成继承同一人员、用途和绑定模型（{{ selected.key.model }}）的新 Key。不会调用 New API 或修改真实凭据；完整新 Key 仅在首次成功响应中显示。</p><label><span>新有效期（天）</span><input v-model.number="rotateForm.expiresInDays" required min="1" max="365" type="number" /></label><label><span>轮换原因 <em>至少 8 个字符</em></span><textarea v-model="rotateForm.reason" required minlength="8" maxlength="200" rows="4" placeholder="例如：本地演示 Key 即将到期，按周期轮换" /></label><label class="access-ack"><input v-model="rotateForm.acknowledgeImpact" type="checkbox" /><span>我已确认：旧 Key 会立即停用；新 Key 的完整值只展示一次；操作会写入不含原因原文或完整 Key 的审计摘要。</span></label><div v-if="rotateError" class="create-person-error"><IconAlertTriangle :size="16" />{{ rotateError }}</div><footer><button class="btn btn-white" type="button" :disabled="isRotating" @click="closeRotate">取消</button><button class="btn create-key" type="submit" :disabled="isRotating || rotateForm.reason.trim().length < 8 || !rotateForm.acknowledgeImpact">{{ isRotating ? '轮换中…' : '确认轮换' }}</button></footer></form>
+    <div v-if="pendingKeyAction" class="drawer-backdrop" @click.self="closeKeyAction">
+        <aside class="person-action-dialog key-action-dialog" role="dialog" aria-modal="true" :aria-label="pendingKeyAction.action === 'delete' ? '确认删除 Key' : '确认禁用 Key'">
+         <header><div><span class="person-action-dialog-icon" :class="pendingKeyAction.action === 'delete' ? 'dialog-delete' : 'dialog-disable'"><IconBan v-if="pendingKeyAction.action === 'disable'" :size="17" /><IconTrash v-else :size="17" /></span><div><span class="source-tag demo">Key 操作</span><h2>{{ pendingKeyAction.action === 'delete' ? '确认删除 Key' : '确认禁用 Key' }}</h2></div></div><button class="icon-button" aria-label="关闭确认窗口" :disabled="isKeyActionLoading" @click="closeKeyAction"><IconX :size="20" /></button></header>
+         <section class="person-action-dialog-body"><strong>{{ pendingKeyAction.key.masked }}</strong><p v-if="pendingKeyAction.action === 'disable'">禁用后，该 Key 将不能继续调用；人员、用途和历史用量仍会保留。</p><p v-else>删除后，该 Key 将从列表移除；历史用量和审计记录会保留，且不能恢复。</p><p v-if="pendingKeyAction.action === 'delete' && keyDeleteCountdown > 0" class="key-delete-countdown">为避免误删，请等待 {{ keyDeleteCountdown }} 秒后确认。</p><div v-if="keyActionError" class="create-person-error"><IconAlertTriangle :size="16" />{{ keyActionError }}</div></section>
+         <footer class="person-action-dialog-footer"><button class="btn btn-white" type="button" :disabled="isKeyActionLoading" @click="closeKeyAction">取消</button><button class="btn" :class="pendingKeyAction.action === 'delete' ? 'danger-outline' : 'person-action-confirm-disable'" type="button" :disabled="isKeyActionLoading || (pendingKeyAction.action === 'delete' && keyDeleteCountdown > 0)" @click="submitKeyAction">{{ isKeyActionLoading ? (pendingKeyAction.action === 'delete' ? '删除中…' : '禁用中…') : pendingKeyAction.action === 'delete' && keyDeleteCountdown > 0 ? `确认删除（${keyDeleteCountdown}s）` : pendingKeyAction.action === 'delete' ? '确认删除' : '确认禁用' }}</button></footer>
       </aside>
     </div>
   </div>

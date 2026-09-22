@@ -5,9 +5,9 @@ import { GatewayUpstreamError } from './openai-compatible.js'
 
 describe('gateway connector boundaries', () => {
   it('describes each connector with an explicit environment', () => {
-    expect(describeGatewayConnector(loadGatewayConfig({}))).toMatchObject({ id: 'standalone', label: '独立网关', environment: 'production', configured: false })
+    expect(describeGatewayConnector(loadGatewayConfig({}))).toMatchObject({ id: 'cpa', label: 'CPA Codex OAuth', environment: 'production', configured: false })
     expect(describeGatewayConnector(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'new_api' }))).toMatchObject({ id: 'new_api', label: 'New API 连接器', environment: 'production' })
-    expect(describeGatewayConnector(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'cpa' }))).toMatchObject({ id: 'cpa', label: 'CPA 连接器', environment: 'experiment' })
+    expect(describeGatewayConnector(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'cpa' }))).toMatchObject({ id: 'cpa', label: 'CPA Codex OAuth', environment: 'production' })
   })
 
   it('keeps an unconfigured connector unavailable instead of falling through to another mode', async () => {

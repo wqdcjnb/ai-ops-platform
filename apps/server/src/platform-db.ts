@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { createHash } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import { createConversationAuditMetadataSeeds, createConversationUsageLinkSeeds, type ConversationAuditMetadataSeed, type ConversationUsageLinkSeed } from './conversation-audit-seeds.js'
 
@@ -90,54 +90,10 @@ const migrationSql = [
   );
   CREATE INDEX IF NOT EXISTS usage_requests_occurred_at_idx ON usage_requests(occurred_at DESC);
   CREATE INDEX IF NOT EXISTS usage_requests_owner_idx ON usage_requests(owner_user_id, occurred_at DESC);`,
-  `CREATE TABLE IF NOT EXISTS alert_rules (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    category TEXT NOT NULL CHECK (category IN ('quota', 'traffic', 'error_rate', 'balance', 'credential', 'upstream')),
-    severity TEXT NOT NULL CHECK (severity IN ('critical', 'warning', 'info')),
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    environment TEXT NOT NULL CHECK (environment IN ('production', 'experiment')),
-    scope TEXT NOT NULL,
-    condition_label TEXT NOT NULL,
-    window_label TEXT NOT NULL,
-    cooldown_minutes INTEGER NOT NULL CHECK (cooldown_minutes >= 0),
-    notification_channel TEXT NOT NULL CHECK (notification_channel IN ('none', 'wecom', 'dingtalk')),
-    last_triggered_at TEXT,
-    trigger_count_7d INTEGER NOT NULL CHECK (trigger_count_7d >= 0),
-    description TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS alert_events (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    severity TEXT NOT NULL CHECK (severity IN ('critical', 'warning', 'info')),
-    status TEXT NOT NULL CHECK (status IN ('open', 'acknowledged', 'closed')),
-    environment TEXT NOT NULL CHECK (environment IN ('production', 'experiment')),
-    source TEXT NOT NULL CHECK (source IN ('quota', 'traffic', 'error_rate', 'balance', 'credential', 'upstream')),
-    subject_type TEXT NOT NULL CHECK (subject_type IN ('company', 'department', 'person', 'key', 'channel', 'upstream')),
-    subject_id TEXT NOT NULL,
-    subject_name TEXT NOT NULL,
-    rule_id TEXT NOT NULL REFERENCES alert_rules(id),
-    rule_name TEXT NOT NULL,
-    rule_metric TEXT NOT NULL,
-    threshold_label TEXT NOT NULL,
-    trigger_value_label TEXT NOT NULL,
-    trigger_comparator TEXT NOT NULL CHECK (trigger_comparator IN ('gte', 'gt', 'lte', 'eq')),
-    first_occurred_at TEXT NOT NULL,
-    last_occurred_at TEXT NOT NULL,
-    occurrences INTEGER NOT NULL CHECK (occurrences > 0),
-    assignee_user_id TEXT REFERENCES users(id),
-    acknowledged_at TEXT,
-    closed_at TEXT,
-    notification_state TEXT NOT NULL CHECK (notification_state IN ('not_configured', 'not_sent', 'sent', 'failed')),
-    notification_channel TEXT NOT NULL CHECK (notification_channel IN ('none', 'wecom', 'dingtalk')),
-    notification_sent_at TEXT,
-    silence_active INTEGER NOT NULL CHECK (silence_active IN (0, 1)),
-    silence_until TEXT,
-    related_request_ids_json TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS alert_events_last_occurred_at_idx ON alert_events(last_occurred_at DESC);
-  CREATE INDEX IF NOT EXISTS alert_events_status_idx ON alert_events(status, severity, environment);`,
+  // This slot originally created the alert-center tables. Keep the migration
+  // number stable for existing SQLite files, but do not create the retired
+  // tables for new installations.
+  `SELECT 1;`,
   `CREATE TABLE IF NOT EXISTS conversation_access_events (
     id TEXT PRIMARY KEY,
     actor_user_id TEXT NOT NULL REFERENCES users(id),
@@ -280,7 +236,7 @@ const migrationSql = [
   `CREATE TABLE IF NOT EXISTS conversation_usage_links (
     record_id TEXT PRIMARY KEY REFERENCES conversation_audit_records(id),
     usage_request_id TEXT NOT NULL REFERENCES usage_requests(request_id),
-    link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed'))
+    link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed', 'gateway_capture'))
   );
   CREATE INDEX IF NOT EXISTS conversation_usage_links_usage_idx ON conversation_usage_links(usage_request_id);`,
   `CREATE TABLE IF NOT EXISTS route_policy_overrides (
@@ -354,6 +310,63 @@ const migrationSql = [
   CREATE INDEX IF NOT EXISTS quota_reservations_status_idx ON quota_reservations(status, requested_at DESC);`,
   `ALTER TABLE api_keys ADD COLUMN secret_hash TEXT;
   CREATE INDEX IF NOT EXISTS api_keys_secret_hash_idx ON api_keys(secret_hash);`,
+  `ALTER TABLE api_keys ADD COLUMN secret_ciphertext TEXT;
+  CREATE INDEX IF NOT EXISTS api_keys_secret_ciphertext_idx ON api_keys(secret_ciphertext);`,
+  // Preserve the numbered migration slot without modifying historical alert data.
+  `SELECT 1;`,
+  `ALTER TABLE users ADD COLUMN external_user_id TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS users_external_user_id_idx ON users(external_user_id) WHERE external_user_id IS NOT NULL;
+  ALTER TABLE api_keys ADD COLUMN external_token_id TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS api_keys_external_token_id_idx ON api_keys(external_token_id) WHERE external_token_id IS NOT NULL;
+  ALTER TABLE api_keys ADD COLUMN quota_mode TEXT NOT NULL DEFAULT 'legacy' CHECK (quota_mode IN ('unlimited', 'legacy'));
+  ALTER TABLE api_keys ADD COLUMN last_used_at TEXT;
+  ALTER TABLE api_keys ADD COLUMN last_synced_at TEXT;
+  ALTER TABLE api_keys ADD COLUMN secret_revealed_at TEXT;
+  CREATE TABLE IF NOT EXISTS api_key_operations (
+    idempotency_key TEXT PRIMARY KEY,
+    person_id TEXT NOT NULL REFERENCES users(id),
+    model TEXT NOT NULL,
+    key_id TEXT NOT NULL REFERENCES api_keys(id),
+    created_at TEXT NOT NULL
+  );`,
+  `CREATE TABLE IF NOT EXISTS person_sync_records (
+    person_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    external_user_id TEXT NOT NULL UNIQUE,
+    source_username TEXT,
+    source_status TEXT NOT NULL CHECK (source_status IN ('active', 'disabled', 'unknown')),
+    source_created_at TEXT,
+    source_last_used_at TEXT,
+    sync_state TEXT NOT NULL CHECK (sync_state IN ('synced', 'external_missing', 'stale')),
+    synced_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS person_sync_records_state_idx ON person_sync_records(sync_state, synced_at DESC);
+  CREATE TABLE IF NOT EXISTS person_sync_operations (
+    idempotency_key TEXT PRIMARY KEY,
+    snapshot_hash TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );`,
+  `ALTER TABLE person_sync_records ADD COLUMN is_excluded INTEGER NOT NULL DEFAULT 0;
+  CREATE INDEX IF NOT EXISTS person_sync_records_excluded_idx ON person_sync_records(is_excluded, updated_at DESC);`,
+  `ALTER TABLE person_sync_records ADD COLUMN source_display_name TEXT;
+  ALTER TABLE person_sync_records ADD COLUMN source_group TEXT;
+  ALTER TABLE person_sync_records ADD COLUMN source_role TEXT;
+  CREATE INDEX IF NOT EXISTS person_sync_records_source_role_idx ON person_sync_records(source_role, updated_at DESC);`,
+  `CREATE TABLE IF NOT EXISTS managed_channel_mappings (
+    marker TEXT PRIMARY KEY,
+    external_channel_id TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL CHECK (source IN ('cpa')),
+    model_snapshot_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_request_id TEXT
+  );
+  CREATE TABLE IF NOT EXISTS channel_sync_operations (
+    idempotency_key TEXT PRIMARY KEY,
+    snapshot_hash TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -407,6 +420,7 @@ export interface PlatformUserSeed {
   employeeCode?: string | null
   managerName?: string | null
   joinedAt?: string | null
+  externalUserId?: string | null
 }
 
 export interface PlatformDepartmentSeed {
@@ -421,10 +435,15 @@ export interface PlatformApiKeySeed {
   ownerUserId: string
   maskedValue: string
   secretHash?: string | null
+  secretValue?: string | null
   purpose: string
   status: 'active' | 'expiring' | 'revoked'
   expiresAt?: string | null
   models?: string[]
+  externalTokenId?: string | null
+  quotaMode?: 'unlimited' | 'legacy'
+  lastUsedAt?: string | null
+  lastSyncedAt?: string | null
 }
 
 export interface PlatformQuotaPolicySeed {
@@ -563,21 +582,6 @@ export interface PlatformSyntheticChannelCheckResult extends PlatformSyntheticCh
   idempotent: boolean
 }
 
-export interface PlatformLocalAlertAction {
-  id: string
-  action: 'acknowledge' | 'close'
-  actorUserId: string
-}
-
-export interface PlatformLocalAlertActionResult {
-  id: string
-  status: 'acknowledged' | 'closed'
-  assigneeUserId: string | null
-  acknowledgedAt: string | null
-  closedAt: string | null
-  idempotent: boolean
-}
-
 export interface PlatformAuditEventSeed {
   id: string
   actorUserId?: string | null
@@ -611,70 +615,56 @@ export interface PlatformUsageRequestSeed {
   client: { name: 'Codex Desktop' | 'WorkBuddy'; mode: 'stream' | 'non_stream' }
 }
 
-export interface PlatformAlertRuleSeed {
-  id: string
-  name: string
-  category: 'quota' | 'traffic' | 'error_rate' | 'balance' | 'credential' | 'upstream'
-  severity: 'critical' | 'warning' | 'info'
-  enabled: boolean
-  environment: 'production' | 'experiment'
-  scope: string
-  condition: string
-  window: string
-  cooldownMinutes: number
-  notificationChannel?: 'none' | 'wecom' | 'dingtalk'
-  lastTriggeredAt?: string | null
-  triggerCount7d: number
-  description: string
-}
-
-export interface PlatformAlertRuleUpdate {
-  id: string
-  severity: PlatformAlertRuleSeed['severity']
-  enabled: boolean
-  condition: string
-  window: string
-  cooldownMinutes: number
-}
-
-export interface PlatformAlertRuleUpdateResult {
-  id: string
-  previousSeverity: PlatformAlertRuleSeed['severity']
-  previousEnabled: boolean
-  previousCondition: string
-  previousWindow: string
-  previousCooldownMinutes: number
-  idempotent: boolean
-}
-
-export interface PlatformAlertEventSeed {
-  id: string
-  title: string
-  summary: string
-  severity: 'critical' | 'warning' | 'info'
-  status: 'open' | 'acknowledged' | 'closed'
-  environment: 'production' | 'experiment'
-  source: PlatformAlertRuleSeed['category']
-  subject: { type: 'company' | 'department' | 'person' | 'key' | 'channel' | 'upstream'; id: string; name: string }
-  rule: { id: string; name: string; metric: string; thresholdLabel: string }
-  trigger: { valueLabel: string; comparator: 'gte' | 'gt' | 'lte' | 'eq' }
-  firstOccurredAt: string
-  lastOccurredAt: string
-  occurrences: number
-  assigneeUserId?: string | null
-  acknowledgedAt?: string | null
-  closedAt?: string | null
-  notification?: { state: 'not_configured' | 'not_sent' | 'sent' | 'failed'; channel: 'none' | 'wecom' | 'dingtalk'; sentAt?: string | null }
-  silence?: { active: boolean; until?: string | null }
-  relatedRequestIds?: string[]
-}
-
 export interface PlatformPersonCreate {
   id: string
   username: string
   displayName: string
   departmentId: string
   password: string
+  externalUserId?: string | null
+}
+
+export type PlatformExternalPersonStatus = 'active' | 'disabled' | 'unknown'
+export type PlatformExternalPersonSyncState = 'synced' | 'external_missing' | 'stale'
+
+export interface PlatformSyncedPersonInput {
+  externalUserId: string
+  username: string | null
+  displayName: string
+  departmentId: string
+  departmentName: string
+  status: PlatformExternalPersonStatus
+  createdAt: string | null
+  lastUsedAt: string | null
+  sourceDisplayName?: string | null
+  sourceGroup?: string | null
+  sourceRole?: string | null
+}
+
+export interface PlatformSyncedPerson {
+  id: string
+  externalUserId: string
+  username: string | null
+  displayName: string
+  sourceStatus: PlatformExternalPersonStatus
+  syncState: PlatformExternalPersonSyncState
+  createdAt: string | null
+  lastUsedAt: string | null
+  syncedAt: string
+  departmentId: string
+  departmentName: string
+  sourceDisplayName: string | null
+  sourceGroup: string | null
+  sourceRole: string | null
+}
+
+export interface PlatformManagedChannelMapping {
+  marker: string
+  externalChannelId: string
+  source: 'cpa'
+  modelSnapshot: string[]
+  updatedAt: string
+  lastRequestId: string | null
 }
 
 export interface PlatformPersonDisableResult {
@@ -682,6 +672,13 @@ export interface PlatformPersonDisableResult {
   idempotent: boolean
   person: ReturnType<PlatformDatabase['listPeople']>[number]
   keysDisabled: number
+}
+
+export interface PlatformPersonEnableResult {
+  state: 'enabled' | 'already_enabled'
+  idempotent: boolean
+  person: ReturnType<PlatformDatabase['listPeople']>[number]
+  keysEnabled: number
 }
 
 export interface PlatformPersonDeleteResult {
@@ -694,11 +691,20 @@ export interface PlatformApiKeyCreate {
   id: string
   ownerUserId: string
   maskedValue: string
-  secretHash: string
+  secretHash?: string | null
+  secretValue?: string | null
   purpose: string
-  expiresAt: string
+  status?: 'active' | 'expiring' | 'revoked'
+  expiresAt: string | null
   model?: string
   models: string[]
+  externalTokenId?: string | null
+  quotaMode?: 'unlimited' | 'legacy'
+  createdAt?: string | null
+  lastUsedAt?: string | null
+  lastSyncedAt?: string | null
+  secretRevealedAt?: string | null
+  idempotencyKey?: string | null
 }
 
 export interface PlatformGatewayKey {
@@ -707,6 +713,7 @@ export interface PlatformGatewayKey {
   ownerName: string
   departmentName: string
   maskedValue: string
+  externalTokenId: string | null
   purpose: string
   model: string
   models: string[]
@@ -720,11 +727,36 @@ export interface PlatformApiKeyDisableResult {
   key: ReturnType<PlatformDatabase['listApiKeys']>[number]
 }
 
+export interface PlatformApiKeyEnableResult {
+  state: 'enabled' | 'already_enabled'
+  idempotent: boolean
+  key: ReturnType<PlatformDatabase['listApiKeys']>[number]
+}
+
+export interface PlatformApiKeyDeleteResult {
+  state: 'deleted' | 'already_deleted'
+  idempotent: boolean
+  key: ReturnType<PlatformDatabase['listApiKeys']>[number]
+}
+
 export interface PlatformApiKeyRotateResult {
   state: 'rotated' | 'already_disabled'
   idempotent: boolean
   oldKey: ReturnType<PlatformDatabase['listApiKeys']>[number]
   newKey?: ReturnType<PlatformDatabase['listApiKeys']>[number]
+}
+
+export interface PlatformApiKeyReset {
+  maskedValue: string
+  secretHash: string
+  secretValue: string
+}
+
+export interface PlatformApiKeyResetResult {
+  state: 'reset' | 'already_disabled'
+  idempotent: boolean
+  key: ReturnType<PlatformDatabase['listApiKeys']>[number]
+  secret: string | null
 }
 
 export interface PlatformConversationAccessCreate {
@@ -736,6 +768,68 @@ export interface PlatformConversationAccessCreate {
   reasonProvided: boolean
   reasonLength: number
   acknowledgedSensitiveScope: boolean
+}
+
+export type PlatformConversationAuditStatus = 'streaming' | 'succeeded' | 'failed' | 'cancelled' | 'body_unavailable'
+
+export interface PlatformConversationAuditCaptureInput {
+  id: string
+  requestId: string
+  keyId: string
+  externalTokenId: string | null
+  personId: string
+  keyMasked: string
+  purpose: string
+  model: string
+  endpoint: string
+  startedAt: string
+  prompt: unknown
+  streamed: boolean
+  groupingType?: 'conversation' | 'independent_call'
+  groupingReliable?: boolean
+  groupingLabel?: string
+  httpStatus?: number | null
+  retentionUntil?: string
+}
+
+export interface PlatformConversationAuditCompletion {
+  status: PlatformConversationAuditStatus
+  completedAt: string
+  httpStatus?: number | null
+  response?: unknown
+  responseChunks?: unknown[]
+  terminationReason?: string | null
+  captureError?: string | null
+  turns?: number
+  toolCalls?: number
+  totalTokens?: number
+  promptBytes?: number | null
+  responseBytes?: number | null
+}
+
+export interface PlatformConversationAuditContent {
+  prompt: unknown | null
+  response: unknown | null
+  chunks: unknown[]
+  promptAvailable: boolean
+  responseAvailable: boolean
+  promptBytes: number | null
+  responseBytes: number | null
+  promptHash: string | null
+  responseHash: string | null
+}
+
+export interface PlatformConversationAuditOperation {
+  id: string
+  actorUserId: string
+  recordId: string
+  requestId: string
+  keyId: string
+  action: 'view' | 'copy' | 'export'
+  fieldType: 'prompt' | 'response' | 'both' | 'metadata'
+  result: 'success' | 'failed' | 'denied'
+  reasonLength: number
+  scope: string
 }
 
 export interface PlatformConversationAuditRecord {
@@ -765,6 +859,24 @@ export interface PlatformConversationAuditRecord {
   toolCalls: number
   totalTokens: number
   contentAccessAvailable: number
+  externalTokenId: string | null
+  endpoint: string | null
+  startedAt: string | null
+  completedAt: string | null
+  auditStatus: PlatformConversationAuditStatus | null
+  httpStatus: number | null
+  promptBodyRef: string | null
+  responseBodyRef: string | null
+  promptBytes: number | null
+  responseBytes: number | null
+  retentionUntil: string | null
+  exportCount: number
+  streamed: number
+  chunkCount: number
+  terminationReason: string | null
+  promptHash: string | null
+  responseHash: string | null
+  captureError: string | null
 }
 
 export interface ConversationAuditCleanupStatus {
@@ -774,12 +886,12 @@ export interface ConversationAuditCleanupStatus {
 
 export interface PlatformConversationUsageLink {
   usageRequestId: string
-  linkSource: 'synthetic_seed'
+  linkSource: 'synthetic_seed' | 'gateway_capture'
 }
 
 export interface PlatformUsageConversationLink {
   recordId: string
-  linkSource: 'synthetic_seed'
+  linkSource: 'synthetic_seed' | 'gateway_capture'
 }
 
 export interface PlatformAuthSessionCreate {
@@ -924,6 +1036,134 @@ export function hashPlatformApiKey(value: string) {
   return createHash('sha256').update(`ai-ops-gateway:${value}`).digest('hex')
 }
 
+export function stableNewApiPersonId(externalUserId: string) {
+  return `person-new-api-${createHash('sha256').update(`new-api-user:${externalUserId}`).digest('hex').slice(0, 24)}`
+}
+
+// The gateway still authenticates with a one-way hash. The encrypted copy is
+// only for the super-admin's explicit "查看 Key" action, so a local operator
+// can recover a credential without putting it in the list, audit log, or
+// request telemetry. Set AI_OPS_KEY_ENCRYPTION_SECRET outside local demos;
+// the fallback keeps a fresh local SQLite database usable without extra setup.
+function platformKeyEncryptionKey() {
+  return createHash('sha256')
+    .update(`ai-ops-key-view:${process.env.AI_OPS_KEY_ENCRYPTION_SECRET?.trim() || 'local-development-only-change-me'}`)
+    .digest()
+}
+
+export function encryptPlatformApiKey(value: string) {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', platformKeyEncryptionKey(), iv)
+  const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return `v1.${iv.toString('base64url')}.${tag.toString('base64url')}.${ciphertext.toString('base64url')}`
+}
+
+export function decryptPlatformApiKey(value: string) {
+  try {
+    const [version, ivValue, tagValue, ciphertextValue] = value.split('.')
+    if (version !== 'v1' || !ivValue || !tagValue || !ciphertextValue) return null
+    const decipher = createDecipheriv('aes-256-gcm', platformKeyEncryptionKey(), Buffer.from(ivValue, 'base64url'))
+    decipher.setAuthTag(Buffer.from(tagValue, 'base64url'))
+    return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, 'base64url')), decipher.final()]).toString('utf8')
+  } catch {
+    return null
+  }
+}
+
+function auditEncryptionKey() {
+  return createHash('sha256')
+    .update(`ai-ops-conversation-audit:${process.env.AI_OPS_AUDIT_ENCRYPTION_SECRET?.trim() || process.env.AI_OPS_KEY_ENCRYPTION_SECRET?.trim() || 'local-development-only-change-me'}`)
+    .digest()
+}
+
+/** Encrypts audit payloads before they are written to SQLite. The database never
+ * receives the JSON/plaintext body; the key is supplied at server runtime. */
+export function encryptConversationAuditPayload(value: string) {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', auditEncryptionKey(), iv)
+  const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return `v1.${iv.toString('base64url')}.${tag.toString('base64url')}.${ciphertext.toString('base64url')}`
+}
+
+export function decryptConversationAuditPayload(value: string) {
+  try {
+    const [version, ivValue, tagValue, ciphertextValue] = value.split('.')
+    if (version !== 'v1' || !ivValue || !tagValue || !ciphertextValue) return null
+    const decipher = createDecipheriv('aes-256-gcm', auditEncryptionKey(), Buffer.from(ivValue, 'base64url'))
+    decipher.setAuthTag(Buffer.from(tagValue, 'base64url'))
+    return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, 'base64url')), decipher.final()]).toString('utf8')
+  } catch {
+    return null
+  }
+}
+
+const AUDIT_RETENTION_DAYS = 30
+
+function auditSafeValue(value: unknown, depth = 0): unknown {
+  if (depth > 12) return '[TRUNCATED]'
+  if (typeof value === 'string') return value.length > 2_000_000 ? `${value.slice(0, 2_000_000)}…[TRUNCATED]` : value
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (Array.isArray(value)) return value.map((item) => auditSafeValue(item, depth + 1))
+  if (typeof value === 'object') {
+    const output: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (/^(authorization|proxy-authorization|access_token|refresh_token|id_token|api[_-]?key|secret|password|cookie)$/i.test(key)) {
+        output[key] = '[REDACTED]'
+      } else if (typeof item === 'string' && /^(data:application\/octet-stream|data:application\/pdf|data:image\/)/i.test(item)) {
+        output[key] = { type: 'binary', mediaType: item.slice(5, item.indexOf(';') > 0 ? item.indexOf(';') : item.indexOf(',') > 0 ? item.indexOf(',') : undefined), bytes: Buffer.byteLength(item) }
+      } else {
+        output[key] = auditSafeValue(item, depth + 1)
+      }
+    }
+    return output
+  }
+  return String(value)
+}
+
+function auditJson(value: unknown) {
+  try {
+    const text = JSON.stringify(auditSafeValue(value))
+    if (text === undefined) return null
+    return { text, bytes: Buffer.byteLength(text, 'utf8'), hash: createHash('sha256').update(text).digest('hex') }
+  } catch {
+    return null
+  }
+}
+
+function auditParse(value: string | null | undefined): unknown | null {
+  if (!value) return null
+  try { return JSON.parse(value) as unknown } catch { return null }
+}
+
+function safeAuditError(value: unknown) {
+  const text = value instanceof Error ? value.message : String(value ?? '')
+  return text.replace(/Bearer\s+[A-Za-z0-9._~+\-/]+=*/gi, 'Bearer [REDACTED]').slice(0, 240)
+}
+
+function extractStreamText(chunks: unknown[]) {
+  let text = ''
+  const append = (chunk: unknown, depth = 0) => {
+    if (depth > 8 || !chunk || typeof chunk !== 'object' || Array.isArray(chunk)) return
+    const value = chunk as Record<string, unknown>
+    if (value.data && typeof value.data === 'object') append(value.data, depth + 1)
+    if (typeof value.delta === 'string') text += value.delta
+    if (typeof value.output_text === 'string') text += value.output_text
+    const choices = Array.isArray(value.choices) ? value.choices : []
+    for (const choice of choices) {
+      if (!choice || typeof choice !== 'object') continue
+      const item = choice as Record<string, unknown>
+      const delta = item.delta && typeof item.delta === 'object' ? item.delta as Record<string, unknown> : null
+      const message = item.message && typeof item.message === 'object' ? item.message as Record<string, unknown> : null
+      if (delta && typeof delta.content === 'string') text += delta.content
+      if (message && typeof message.content === 'string') text += message.content
+    }
+  }
+  for (const chunk of chunks) append(chunk)
+  return text
+}
+
 export interface PlatformDatabaseOptions {
   filename?: string
   now?: () => Date
@@ -942,6 +1182,7 @@ export class PlatformDatabase {
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;')
     if (this.filename !== ':memory:') this.db.exec('PRAGMA journal_mode = WAL;')
     this.migrate()
+    this.ensureConversationAuditSchema()
   }
 
   migrate() {
@@ -963,6 +1204,124 @@ export class PlatformDatabase {
         throw error
       }
     }
+  }
+
+  /**
+   * Conversation capture was introduced after the original demo schema. Keep
+   * this idempotent bootstrap separate from the numbered demo migrations so an
+   * existing local SQLite file can be upgraded without dropping its records.
+   */
+  private ensureConversationAuditSchema() {
+    const hasColumn = (table: string, column: string) => {
+      const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      return rows.some((row) => row.name === column)
+    }
+    const addColumn = (table: string, definition: string, column: string) => {
+      if (!hasColumn(table, column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`)
+    }
+
+    addColumn('conversation_audit_records', 'external_token_id TEXT', 'external_token_id')
+    addColumn('conversation_audit_records', 'endpoint TEXT', 'endpoint')
+    addColumn('conversation_audit_records', 'started_at TEXT', 'started_at')
+    addColumn('conversation_audit_records', 'completed_at TEXT', 'completed_at')
+    addColumn('conversation_audit_records', "audit_status TEXT CHECK (audit_status IS NULL OR audit_status IN ('streaming', 'succeeded', 'failed', 'cancelled', 'body_unavailable'))", 'audit_status')
+    addColumn('conversation_audit_records', 'http_status INTEGER', 'http_status')
+    addColumn('conversation_audit_records', 'prompt_body_ref TEXT', 'prompt_body_ref')
+    addColumn('conversation_audit_records', 'response_body_ref TEXT', 'response_body_ref')
+    addColumn('conversation_audit_records', 'prompt_bytes INTEGER', 'prompt_bytes')
+    addColumn('conversation_audit_records', 'response_bytes INTEGER', 'response_bytes')
+    addColumn('conversation_audit_records', 'retention_until TEXT', 'retention_until')
+    addColumn('conversation_audit_records', 'export_count INTEGER NOT NULL DEFAULT 0', 'export_count')
+    addColumn('conversation_audit_records', 'streamed INTEGER NOT NULL DEFAULT 0', 'streamed')
+    addColumn('conversation_audit_records', 'chunk_count INTEGER NOT NULL DEFAULT 0', 'chunk_count')
+    addColumn('conversation_audit_records', 'termination_reason TEXT', 'termination_reason')
+    addColumn('conversation_audit_records', 'prompt_hash TEXT', 'prompt_hash')
+    addColumn('conversation_audit_records', 'response_hash TEXT', 'response_hash')
+    addColumn('conversation_audit_records', 'capture_error TEXT', 'capture_error')
+    this.db.exec(`CREATE INDEX IF NOT EXISTS conversation_audit_records_key_idx ON conversation_audit_records(key_id, captured_at DESC);`)
+    this.db.exec(`CREATE INDEX IF NOT EXISTS conversation_audit_records_status_idx ON conversation_audit_records(audit_status, retention_until);`)
+    // Direct content access no longer requires a reason. Rebuild the legacy
+    // table once so existing SQLite files accept zero-length reason metadata.
+    const accessEventsSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversation_access_events'").get() as { sql: string } | undefined
+    if (accessEventsSql?.sql.includes('reason_length BETWEEN 8 AND 200')) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        this.db.exec(`CREATE TABLE conversation_access_events_next (
+          id TEXT PRIMARY KEY,
+          actor_user_id TEXT NOT NULL REFERENCES users(id),
+          record_id TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          action TEXT NOT NULL CHECK (action IN ('view_synthetic')),
+          reason_provided INTEGER NOT NULL CHECK (reason_provided IN (0, 1)),
+          reason_length INTEGER NOT NULL CHECK (reason_length BETWEEN 0 AND 200),
+          acknowledged_sensitive_scope INTEGER NOT NULL CHECK (acknowledged_sensitive_scope IN (0, 1)),
+          occurred_at TEXT NOT NULL
+        );
+        INSERT INTO conversation_access_events_next(
+          id, actor_user_id, record_id, request_id, action, reason_provided, reason_length,
+          acknowledged_sensitive_scope, occurred_at
+        ) SELECT id, actor_user_id, record_id, request_id, action, reason_provided, reason_length,
+          acknowledged_sensitive_scope, occurred_at FROM conversation_access_events;
+        DROP TABLE conversation_access_events;
+        ALTER TABLE conversation_access_events_next RENAME TO conversation_access_events;
+        CREATE INDEX conversation_access_events_record_idx ON conversation_access_events(record_id, occurred_at DESC);
+        CREATE INDEX conversation_access_events_actor_idx ON conversation_access_events(actor_user_id, occurred_at DESC);`)
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }
+    this.db.exec(`CREATE TABLE IF NOT EXISTS conversation_audit_contents (
+      ref TEXT PRIMARY KEY,
+      record_id TEXT NOT NULL REFERENCES conversation_audit_records(id) ON DELETE CASCADE,
+      field_type TEXT NOT NULL CHECK (field_type IN ('prompt', 'response', 'chunks')),
+      encrypted_payload TEXT NOT NULL,
+      sha256 TEXT NOT NULL,
+      byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_audit_contents_record_idx ON conversation_audit_contents(record_id, field_type);
+    CREATE TABLE IF NOT EXISTS conversation_audit_operation_events (
+      id TEXT PRIMARY KEY,
+      actor_user_id TEXT NOT NULL REFERENCES users(id),
+      record_id TEXT NOT NULL REFERENCES conversation_audit_records(id),
+      request_id TEXT NOT NULL,
+      key_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('view', 'copy', 'export')),
+      field_type TEXT NOT NULL CHECK (field_type IN ('prompt', 'response', 'both', 'metadata')),
+      result TEXT NOT NULL CHECK (result IN ('success', 'failed', 'denied')),
+      reason_length INTEGER NOT NULL CHECK (reason_length >= 0),
+      scope TEXT NOT NULL,
+      occurred_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_audit_operation_record_idx ON conversation_audit_operation_events(record_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS conversation_audit_operation_actor_idx ON conversation_audit_operation_events(actor_user_id, occurred_at DESC);`)
+    // SQLite cannot alter a CHECK constraint in place. Preserve historical
+    // synthetic links while widening the source enum for real gateway
+    // captures, so an upgraded database can join request metadata correctly.
+    const usageLinkSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversation_usage_links'").get() as { sql: string } | undefined
+    if (usageLinkSql && !usageLinkSql.sql.includes("'gateway_capture'")) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        this.db.exec(`CREATE TABLE conversation_usage_links_next (
+          record_id TEXT PRIMARY KEY REFERENCES conversation_audit_records(id),
+          usage_request_id TEXT NOT NULL REFERENCES usage_requests(request_id),
+          link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed', 'gateway_capture'))
+        );
+        INSERT INTO conversation_usage_links_next(record_id, usage_request_id, link_source)
+          SELECT record_id, usage_request_id, link_source FROM conversation_usage_links;
+        DROP TABLE conversation_usage_links;
+        ALTER TABLE conversation_usage_links_next RENAME TO conversation_usage_links;
+        CREATE INDEX conversation_usage_links_usage_idx ON conversation_usage_links(usage_request_id);`)
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }
+    addColumn('conversation_audit_cleanup_runs', 'deleted_content_bytes INTEGER NOT NULL DEFAULT 0', 'deleted_content_bytes')
+    addColumn('conversation_audit_expiry_proofs', 'deleted_content_bytes INTEGER NOT NULL DEFAULT 0', 'deleted_content_bytes')
   }
 
   status(): DatabaseStatus {
@@ -1018,6 +1377,10 @@ export class PlatformDatabase {
       WHERE action = 'delete' AND resource_type = 'person' AND resource_id = ? AND result = 'success' LIMIT 1`).get(personId))
   }
 
+  hasAuditEvent(id: string) {
+    return Boolean(this.db.prepare('SELECT 1 FROM audit_events WHERE id = ? LIMIT 1').get(id))
+  }
+
   verifyAuditChain(now = this.now()): AuditChainVerification {
     let previousHash: string | null = null
     const rows = this.auditChainRows()
@@ -1057,14 +1420,14 @@ export class PlatformDatabase {
   seedUser(seed: PlatformUserSeed, now = this.now()) {
     if (this.isPersonDeleted(seed.id)) return
     const timestamp = now.toISOString()
-    this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, employee_code, manager_name, joined_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, employee_code, manager_name, joined_at, external_user_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(username) DO UPDATE SET id = excluded.id, display_name = excluded.display_name,
       role = excluded.role, password_hash = excluded.password_hash, status = excluded.status,
       department_id = excluded.department_id, employee_code = excluded.employee_code,
-      manager_name = excluded.manager_name, joined_at = excluded.joined_at, updated_at = excluded.updated_at`).run(
+      manager_name = excluded.manager_name, joined_at = excluded.joined_at, external_user_id = excluded.external_user_id, updated_at = excluded.updated_at`).run(
       seed.id, seed.username, seed.displayName, seed.role, hashPlatformPassword(seed.password), seed.status ?? 'active', seed.departmentId ?? null,
-      seed.employeeCode ?? null, seed.managerName ?? null, seed.joinedAt ?? null, timestamp, timestamp,
+      seed.employeeCode ?? null, seed.managerName ?? null, seed.joinedAt ?? null, seed.externalUserId ?? null, timestamp, timestamp,
     )
   }
 
@@ -1080,13 +1443,14 @@ export class PlatformDatabase {
     if (this.isPersonDeleted(seed.ownerUserId)) return
     const model = seed.models?.[0] ?? 'ecommerce-general'
     const timestamp = now.toISOString()
-    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, purpose, status, expires_at, models_json, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, secret_ciphertext, purpose, status, expires_at, models_json, external_token_id, quota_mode, last_used_at, last_synced_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET owner_user_id = excluded.owner_user_id, masked_value = excluded.masked_value,
-      secret_hash = COALESCE(excluded.secret_hash, api_keys.secret_hash), purpose = excluded.purpose, status = excluded.status,
-      expires_at = excluded.expires_at, models_json = excluded.models_json, updated_at = excluded.updated_at`).run(
-      seed.id, seed.ownerUserId, seed.maskedValue, seed.secretHash ?? null, seed.purpose, seed.status, seed.expiresAt ?? null,
-      JSON.stringify([model]), timestamp, timestamp,
+      secret_hash = COALESCE(excluded.secret_hash, api_keys.secret_hash), secret_ciphertext = COALESCE(excluded.secret_ciphertext, api_keys.secret_ciphertext), purpose = excluded.purpose, status = excluded.status,
+      expires_at = excluded.expires_at, models_json = excluded.models_json, external_token_id = COALESCE(excluded.external_token_id, api_keys.external_token_id), quota_mode = excluded.quota_mode,
+      last_used_at = COALESCE(excluded.last_used_at, api_keys.last_used_at), last_synced_at = COALESCE(excluded.last_synced_at, api_keys.last_synced_at), updated_at = excluded.updated_at`).run(
+      seed.id, seed.ownerUserId, seed.maskedValue, seed.secretHash ?? (seed.secretValue ? hashPlatformApiKey(seed.secretValue) : null), seed.secretValue ? encryptPlatformApiKey(seed.secretValue) : null, seed.purpose, seed.status, seed.expiresAt ?? null,
+      JSON.stringify([model]), seed.externalTokenId ?? null, seed.quotaMode ?? 'legacy', seed.lastUsedAt ?? null, seed.lastSyncedAt ?? null, timestamp, timestamp,
     )
   }
 
@@ -1150,10 +1514,23 @@ export class PlatformDatabase {
   }
 
   recordGatewayUsage(seed: PlatformUsageRequestSeed, auditEvent: PlatformAuditEventSeed, now = this.now()) {
-    if (this.db.prepare('SELECT 1 FROM usage_requests WHERE request_id = ? LIMIT 1').get(seed.requestId)) return false
+    const linkConversationAudit = () => {
+      const audit = this.db.prepare('SELECT id FROM conversation_audit_records WHERE request_id = ? LIMIT 1').get(seed.requestId) as { id: string } | undefined
+      if (!audit) return
+      this.db.prepare(`INSERT INTO conversation_usage_links(record_id, usage_request_id, link_source)
+        VALUES (?, ?, 'gateway_capture')
+        ON CONFLICT(record_id) DO UPDATE SET usage_request_id = excluded.usage_request_id, link_source = excluded.link_source`).run(
+        audit.id, seed.requestId,
+      )
+    }
+    if (this.db.prepare('SELECT 1 FROM usage_requests WHERE request_id = ? LIMIT 1').get(seed.requestId)) {
+      linkConversationAudit()
+      return false
+    }
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.insertUsageRequest(seed)
+      linkConversationAudit()
       this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
       return true
@@ -1225,86 +1602,6 @@ export class PlatformDatabase {
       ON CONFLICT(record_id) DO UPDATE SET usage_request_id = excluded.usage_request_id, link_source = excluded.link_source`).run(
       seed.recordId, seed.usageRequestId, seed.linkSource,
     )
-  }
-
-  seedAlertRule(seed: PlatformAlertRuleSeed) {
-    this.db.prepare(`INSERT INTO alert_rules(
-      id, name, category, severity, enabled, environment, scope, condition_label, window_label,
-      cooldown_minutes, notification_channel, last_triggered_at, trigger_count_7d, description
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name, category = excluded.category, severity = excluded.severity, enabled = excluded.enabled,
-      environment = excluded.environment, scope = excluded.scope, condition_label = excluded.condition_label,
-      window_label = excluded.window_label, cooldown_minutes = excluded.cooldown_minutes,
-      notification_channel = excluded.notification_channel, last_triggered_at = excluded.last_triggered_at,
-      trigger_count_7d = excluded.trigger_count_7d, description = excluded.description`).run(
-      seed.id, seed.name, seed.category, seed.severity, Number(seed.enabled), seed.environment, seed.scope,
-      seed.condition, seed.window, seed.cooldownMinutes, seed.notificationChannel ?? 'none',
-      seed.lastTriggeredAt ?? null, seed.triggerCount7d, seed.description,
-    )
-  }
-
-  seedAlertEvent(seed: PlatformAlertEventSeed) {
-    this.db.prepare(`INSERT INTO alert_events(
-      id, title, summary, severity, status, environment, source, subject_type, subject_id, subject_name,
-      rule_id, rule_name, rule_metric, threshold_label, trigger_value_label, trigger_comparator,
-      first_occurred_at, last_occurred_at, occurrences, assignee_user_id, acknowledged_at, closed_at,
-      notification_state, notification_channel, notification_sent_at, silence_active, silence_until,
-      related_request_ids_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO NOTHING`).run(
-      seed.id, seed.title, seed.summary, seed.severity, seed.status, seed.environment, seed.source,
-      seed.subject.type, seed.subject.id, seed.subject.name, seed.rule.id, seed.rule.name, seed.rule.metric,
-      seed.rule.thresholdLabel, seed.trigger.valueLabel, seed.trigger.comparator, seed.firstOccurredAt,
-      seed.lastOccurredAt, seed.occurrences, seed.assigneeUserId ?? null, seed.acknowledgedAt ?? null,
-      seed.closedAt ?? null, seed.notification?.state ?? 'not_configured', seed.notification?.channel ?? 'none',
-      seed.notification?.sentAt ?? null, Number(seed.silence?.active ?? false), seed.silence?.until ?? null,
-      JSON.stringify(seed.relatedRequestIds ?? []),
-    )
-  }
-
-  updateAlertRule(rule: PlatformAlertRuleUpdate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformAlertRuleUpdateResult {
-    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
-    const current = () => this.listAlertRules().find((item) => item.id === rule.id) ?? null
-    const fingerprint = auditEvent.summary.idempotencyFingerprint
-    if (previousOperation) {
-      const previousSummary = JSON.parse(previousOperation.summaryJson) as Partial<PlatformAlertRuleUpdateResult> & { idempotencyFingerprint?: unknown }
-      if (previousOperation.resourceId !== rule.id || previousSummary.idempotencyFingerprint !== fingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
-      const stored = current()
-      if (!stored) throw new Error('ALERT_RULE_NOT_FOUND')
-      return {
-        id: stored.id,
-        previousSeverity: previousSummary.previousSeverity ?? stored.severity,
-        previousEnabled: previousSummary.previousEnabled ?? Boolean(stored.enabled),
-        previousCondition: previousSummary.previousCondition ?? stored.condition,
-        previousWindow: previousSummary.previousWindow ?? stored.window,
-        previousCooldownMinutes: previousSummary.previousCooldownMinutes ?? stored.cooldownMinutes,
-        idempotent: true,
-      }
-    }
-    const before = current()
-    if (!before) throw new Error('ALERT_RULE_NOT_FOUND')
-    const timestamp = now.toISOString()
-    this.db.exec('BEGIN IMMEDIATE')
-    try {
-      this.db.prepare(`UPDATE alert_rules SET severity = ?, enabled = ?, condition_label = ?, window_label = ?, cooldown_minutes = ? WHERE id = ?`).run(
-        rule.severity, Number(rule.enabled), rule.condition, rule.window, rule.cooldownMinutes, rule.id,
-      )
-      this.appendAuditEvent(auditEvent, now)
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
-    return {
-      id: rule.id,
-      previousSeverity: before.severity,
-      previousEnabled: Boolean(before.enabled),
-      previousCondition: before.condition,
-      previousWindow: before.window,
-      previousCooldownMinutes: before.cooldownMinutes,
-      idempotent: false,
-    }
   }
 
   seedBusinessRule(seed: PlatformBusinessRuleSeed, now = this.now()) {
@@ -1379,7 +1676,7 @@ export class PlatformDatabase {
 
   listPeople() {
     return this.db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.status,
-      d.id AS departmentId, d.name AS departmentName
+      u.external_user_id AS externalUserId, d.id AS departmentId, d.name AS departmentName
       FROM users u LEFT JOIN departments d ON d.id = u.department_id
       WHERE u.role = 'employee' AND NOT EXISTS (
         SELECT 1 FROM audit_events deleted
@@ -1391,9 +1688,187 @@ export class PlatformDatabase {
         username: string
         displayName: string
         status: 'active' | 'disabled'
+        externalUserId: string | null
         departmentId: string | null
         departmentName: string | null
       }>
+  }
+
+  listSyncedPeople() {
+    return this.db.prepare(`SELECT u.id, u.display_name AS displayName,
+      s.external_user_id AS externalUserId, s.source_username AS username,
+      s.source_status AS sourceStatus, s.sync_state AS syncState,
+      s.source_created_at AS createdAt, s.source_last_used_at AS lastUsedAt,
+      s.synced_at AS syncedAt, d.id AS departmentId, d.name AS departmentName,
+      s.source_display_name AS sourceDisplayName, s.source_group AS sourceGroup,
+      s.source_role AS sourceRole
+      FROM person_sync_records s
+      JOIN users u ON u.id = s.person_id
+      LEFT JOIN departments d ON d.id = u.department_id
+      WHERE s.is_excluded = 0
+      ORDER BY u.display_name, u.id`).all() as unknown as PlatformSyncedPerson[]
+  }
+
+  upsertSyncedPerson(person: PlatformSyncedPersonInput, now = this.now()) {
+    const timestamp = now.toISOString()
+    const existing = this.db.prepare(`SELECT u.id, u.username AS localUsername, u.status AS localStatus
+      FROM users u
+      WHERE u.external_user_id = ? OR u.id = ?
+      ORDER BY CASE WHEN u.external_user_id = ? THEN 0 ELSE 1 END
+      LIMIT 1`).get(person.externalUserId, stableNewApiPersonId(person.externalUserId), person.externalUserId) as { id: string; localUsername: string; localStatus: 'active' | 'disabled' } | undefined
+    const personId = existing?.id ?? stableNewApiPersonId(person.externalUserId)
+    const localUsername = existing?.localUsername ?? `new-api-${createHash('sha256').update(person.externalUserId).digest('hex').slice(0, 28)}`
+    const localStatus = person.status === 'disabled' ? 'disabled' : person.status === 'active' ? 'active' : existing?.localStatus ?? 'active'
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (existing) {
+        this.db.prepare(`UPDATE users SET display_name = ?, status = ?, department_id = ?, external_user_id = ?, updated_at = ?
+          WHERE id = ?`).run(person.displayName, localStatus, person.departmentId, person.externalUserId, timestamp, personId)
+      } else {
+        this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, external_user_id, created_at, updated_at)
+          VALUES (?, ?, ?, 'employee', ?, ?, ?, ?, ?, ?)`).run(
+          personId, localUsername, person.displayName, hashPlatformPassword(`new-api-sync:${person.externalUserId}`), localStatus,
+          person.departmentId, person.externalUserId, timestamp, timestamp,
+        )
+      }
+      this.db.prepare(`INSERT INTO person_sync_records(
+        person_id, external_user_id, source_username, source_status, source_created_at,
+        source_last_used_at, source_display_name, source_group, source_role,
+        sync_state, synced_at, updated_at, is_excluded
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?, ?, 0)
+      ON CONFLICT(external_user_id) DO UPDATE SET person_id = excluded.person_id,
+        source_username = excluded.source_username, source_status = excluded.source_status,
+        source_created_at = excluded.source_created_at, source_last_used_at = excluded.source_last_used_at,
+        source_display_name = excluded.source_display_name, source_group = excluded.source_group,
+        source_role = excluded.source_role,
+        sync_state = excluded.sync_state, synced_at = excluded.synced_at, updated_at = excluded.updated_at,
+        is_excluded = 0`).run(
+        personId, person.externalUserId, person.username, person.status, person.createdAt, person.lastUsedAt,
+        person.sourceDisplayName ?? null, person.sourceGroup ?? null, person.sourceRole ?? null,
+        timestamp, timestamp,
+      )
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.listSyncedPeople().find((item) => item.externalUserId === person.externalUserId) ?? null
+  }
+
+  markSyncedPeopleExcluded(externalUserIds: Set<string>, now = this.now()) {
+    if (!externalUserIds.size) return 0
+    const update = this.db.prepare('UPDATE person_sync_records SET is_excluded = 1, updated_at = ? WHERE external_user_id = ?')
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      let count = 0
+      for (const externalUserId of externalUserIds) count += Number(update.run(timestamp, externalUserId).changes)
+      this.db.exec('COMMIT')
+      return count
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  markSyncedPeopleMissing(externalUserIds: Set<string>, now = this.now()) {
+    const timestamp = now.toISOString()
+    const rows = this.db.prepare('SELECT external_user_id AS externalUserId FROM person_sync_records WHERE is_excluded = 0').all() as Array<{ externalUserId: string }>
+    const missing = rows.filter((row) => !externalUserIds.has(row.externalUserId)).map((row) => row.externalUserId)
+    if (!missing.length) return 0
+    const update = this.db.prepare(`UPDATE person_sync_records SET sync_state = 'external_missing', updated_at = ? WHERE external_user_id = ?`)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const externalUserId of missing) update.run(timestamp, externalUserId)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return missing.length
+  }
+
+  markSyncedPeopleStale(now = this.now()) {
+    const result = this.db.prepare("UPDATE person_sync_records SET sync_state = 'stale', updated_at = ? WHERE is_excluded = 0 AND sync_state <> 'external_missing'").run(now.toISOString())
+    return Number(result.changes)
+  }
+
+  getPersonSyncOperation(idempotencyKey: string) {
+    return this.db.prepare('SELECT snapshot_hash AS snapshotHash, result_json AS resultJson FROM person_sync_operations WHERE idempotency_key = ? LIMIT 1').get(idempotencyKey) as { snapshotHash: string; resultJson: string } | undefined
+  }
+
+  recordPersonSyncOperation(idempotencyKey: string, snapshotHash: string, result: unknown, auditEvent: PlatformAuditEventSeed, now = this.now()) {
+    const previous = this.getPersonSyncOperation(idempotencyKey)
+    if (previous) return { idempotent: true, result: JSON.parse(previous.resultJson) as unknown }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('INSERT INTO person_sync_operations(idempotency_key, snapshot_hash, result_json, created_at) VALUES (?, ?, ?, ?)').run(idempotencyKey, snapshotHash, JSON.stringify(result), timestamp)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { idempotent: false, result }
+  }
+
+  getManagedChannelMapping(marker: string): PlatformManagedChannelMapping | undefined {
+    const row = this.db.prepare(`SELECT marker, external_channel_id AS externalChannelId, source,
+      model_snapshot_json AS modelSnapshotJson, updated_at AS updatedAt, last_request_id AS lastRequestId
+      FROM managed_channel_mappings WHERE marker = ? LIMIT 1`).get(marker) as {
+        marker: string
+        externalChannelId: string
+        source: 'cpa'
+        modelSnapshotJson: string
+        updatedAt: string
+        lastRequestId: string | null
+      } | undefined
+    if (!row) return undefined
+    try {
+      const modelSnapshot = JSON.parse(row.modelSnapshotJson) as unknown
+      if (!Array.isArray(modelSnapshot) || !modelSnapshot.every((item) => typeof item === 'string')) return undefined
+      return { marker: row.marker, externalChannelId: row.externalChannelId, source: row.source, modelSnapshot, updatedAt: row.updatedAt, lastRequestId: row.lastRequestId }
+    } catch {
+      return undefined
+    }
+  }
+
+  upsertManagedChannelMapping(mapping: PlatformManagedChannelMapping, now = this.now()) {
+    const updatedAt = mapping.updatedAt || now.toISOString()
+    this.db.prepare(`INSERT INTO managed_channel_mappings(marker, external_channel_id, source, model_snapshot_json, updated_at, last_request_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(marker) DO UPDATE SET external_channel_id = excluded.external_channel_id,
+      source = excluded.source, model_snapshot_json = excluded.model_snapshot_json,
+      updated_at = excluded.updated_at, last_request_id = excluded.last_request_id`).run(
+      mapping.marker,
+      mapping.externalChannelId,
+      mapping.source,
+      JSON.stringify(mapping.modelSnapshot),
+      updatedAt,
+      mapping.lastRequestId,
+    )
+    return this.getManagedChannelMapping(mapping.marker)
+  }
+
+  getChannelSyncOperation(idempotencyKey: string) {
+    return this.db.prepare('SELECT snapshot_hash AS snapshotHash, result_json AS resultJson FROM channel_sync_operations WHERE idempotency_key = ? LIMIT 1').get(idempotencyKey) as { snapshotHash: string; resultJson: string } | undefined
+  }
+
+  recordChannelSyncOperation(idempotencyKey: string, snapshotHash: string, result: unknown, auditEvent: PlatformAuditEventSeed, now = this.now()) {
+    const previous = this.getChannelSyncOperation(idempotencyKey)
+    if (previous) return { idempotent: true, result: JSON.parse(previous.resultJson) as unknown }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('INSERT INTO channel_sync_operations(idempotency_key, snapshot_hash, result_json, created_at) VALUES (?, ?, ?, ?)').run(idempotencyKey, snapshotHash, JSON.stringify(result), timestamp)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { idempotent: false, result }
   }
 
   getEmployeeProfile(userId: string) {
@@ -1428,6 +1903,11 @@ export class PlatformDatabase {
       LIMIT 1`).get(normalizedName) as { id: string; name: string } | undefined ?? null
   }
 
+  findActiveDepartmentName(departmentId: string) {
+    const row = this.db.prepare("SELECT name FROM departments WHERE id = ? AND status = 'active' LIMIT 1").get(departmentId.trim()) as { name: string } | undefined
+    return row?.name ?? null
+  }
+
   ensureDepartment(nameOrId: string, now = this.now()) {
     const normalized = nameOrId.trim()
     if (!normalized) throw new Error('DEPARTMENT_NAME_REQUIRED')
@@ -1447,9 +1927,9 @@ export class PlatformDatabase {
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, created_at, updated_at)
-        VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?)`).run(
-        person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, timestamp, timestamp,
+      this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, external_user_id, created_at, updated_at)
+        VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?, ?)`).run(
+        person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, person.externalUserId ?? null, timestamp, timestamp,
       )
       if (auditEvent) this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
@@ -1470,10 +1950,10 @@ export class PlatformDatabase {
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const insert = this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, created_at, updated_at)
-        VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?)`)
+      const insert = this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, external_user_id, created_at, updated_at)
+        VALUES (?, ?, ?, 'employee', ?, 'active', ?, ?, ?, ?)`)
       for (const person of people) {
-        insert.run(person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, timestamp, timestamp)
+        insert.run(person.id, person.username, person.displayName, hashPlatformPassword(person.password), person.departmentId, person.externalUserId ?? null, timestamp, timestamp)
       }
       this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
@@ -1555,13 +2035,15 @@ export class PlatformDatabase {
     const person = current()
     if (!person) return null
     if (person.status === 'disabled') return { state: 'already_disabled', idempotent: false, person, keysDisabled: 0 }
-    const keysDisabled = (this.db.prepare("SELECT COUNT(*) AS count FROM api_keys WHERE owner_user_id = ? AND status <> 'revoked'").get(personId) as { count: number }).count
+    const keyRows = this.db.prepare("SELECT id, status FROM api_keys WHERE owner_user_id = ? AND status <> 'revoked'").all(personId) as Array<{ id: string; status: 'active' | 'expiring' }>
+    const keysDisabled = keyRows.length
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.db.prepare("UPDATE users SET status = 'disabled', updated_at = ? WHERE id = ? AND role = 'employee'").run(timestamp, personId)
       this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE owner_user_id = ? AND status <> 'revoked'").run(timestamp, personId)
-      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, keysDisabled } }, now)
+      this.db.prepare("UPDATE person_sync_records SET source_status = 'disabled', sync_state = 'synced', synced_at = ?, updated_at = ? WHERE person_id = ? AND is_excluded = 0").run(timestamp, timestamp, personId)
+      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, keysDisabled, disabledKeys: keyRows } }, now)
       this.db.exec('COMMIT')
     } catch (error) {
       this.db.exec('ROLLBACK')
@@ -1571,7 +2053,89 @@ export class PlatformDatabase {
     return disabledPerson ? { state: 'disabled', idempotent: false, person: disabledPerson, keysDisabled } : null
   }
 
-  deletePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonDeleteResult | null {
+  enablePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonEnableResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listPeople().find((item) => item.id === personId) ?? null
+    if (previousOperation) {
+      if (previousOperation.resourceId !== personId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const person = current()
+      let keysEnabled = 0
+      try {
+        const value = (JSON.parse(previousOperation.summaryJson) as { keysEnabled?: unknown }).keysEnabled
+        if (typeof value === 'number' && Number.isInteger(value) && value >= 0) keysEnabled = value
+      } catch { /* use the stable zero fallback below */ }
+      return person ? { state: 'enabled', idempotent: true, person, keysEnabled } : null
+    }
+
+    const person = current()
+    if (!person) return null
+    if (person.status === 'active') return { state: 'already_enabled', idempotent: false, person, keysEnabled: 0 }
+
+    const previousDisable = this.db.prepare(`SELECT occurred_at AS occurredAt, summary_json AS summaryJson
+      FROM audit_events
+      WHERE action = 'disable' AND resource_type = 'person' AND resource_id = ? AND result = 'success'
+      ORDER BY occurred_at DESC, rowid DESC LIMIT 1`).get(personId) as { occurredAt: string; summaryJson: string } | undefined
+    let restorableKeys: Array<{ id: string; status: 'active' | 'expiring' }> = []
+    let hasRecordedKeyState = false
+    if (previousDisable) {
+      try {
+        const stored = (JSON.parse(previousDisable.summaryJson) as { disabledKeys?: unknown }).disabledKeys
+        if (Array.isArray(stored)) {
+          const parsed = stored.map((item) => {
+            if (!item || typeof item !== 'object') return null
+            const candidate = item as { id?: unknown; status?: unknown }
+            return typeof candidate.id === 'string' && (candidate.status === 'active' || candidate.status === 'expiring')
+              ? { id: candidate.id, status: candidate.status }
+              : null
+          })
+          if (parsed.every((item): item is { id: string; status: 'active' | 'expiring' } => item !== null)) {
+            restorableKeys = parsed
+            hasRecordedKeyState = true
+          }
+        }
+      } catch { /* use the timestamp-scoped legacy fallback below */ }
+    }
+
+    // Older disable events only stored a count. Restrict the fallback to keys
+    // whose updated_at matches that disable event so a separately revoked or
+    // rotated Key is not unexpectedly reactivated.
+    if (!hasRecordedKeyState) {
+      const legacyRows = previousDisable
+        ? this.db.prepare("SELECT id FROM api_keys WHERE owner_user_id = ? AND status = 'revoked' AND updated_at = ?").all(personId, previousDisable.occurredAt) as Array<{ id: string }>
+        : this.db.prepare("SELECT id FROM api_keys WHERE owner_user_id = ? AND status = 'revoked'").all(personId) as Array<{ id: string }>
+      restorableKeys = legacyRows.map((row) => ({ id: row.id, status: 'active' as const }))
+    }
+
+    const timestamp = now.toISOString()
+    let keysEnabled = 0
+    const restoredKeyIds: string[] = []
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare("UPDATE users SET status = 'active', updated_at = ? WHERE id = ? AND role = 'employee' AND status = 'disabled'").run(timestamp, personId)
+      const updateKey = previousDisable
+        ? this.db.prepare("UPDATE api_keys SET status = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND status = 'revoked' AND updated_at = ?")
+        : this.db.prepare("UPDATE api_keys SET status = ?, updated_at = ? WHERE id = ? AND owner_user_id = ? AND status = 'revoked'")
+      for (const key of restorableKeys) {
+        const result = previousDisable
+          ? updateKey.run(key.status, timestamp, key.id, personId, previousDisable.occurredAt)
+          : updateKey.run(key.status, timestamp, key.id, personId)
+        if (Number(result.changes) > 0) {
+          keysEnabled += 1
+          restoredKeyIds.push(key.id)
+        }
+      }
+      this.db.prepare("UPDATE person_sync_records SET source_status = 'active', sync_state = 'synced', synced_at = ?, updated_at = ? WHERE person_id = ? AND is_excluded = 0").run(timestamp, timestamp, personId)
+      this.appendAuditEvent({ ...auditEvent, summary: { ...auditEvent.summary, keysEnabled, restoredKeyIds } }, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const enabledPerson = current()
+    return enabledPerson ? { state: 'enabled', idempotent: false, person: enabledPerson, keysEnabled } : null
+  }
+
+  deletePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now(), options: { allowActive?: boolean } = {}): PlatformPersonDeleteResult | null {
     const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
     if (previousOperation) {
       if (previousOperation.resourceId !== personId) throw new Error('IDEMPOTENCY_KEY_REUSED')
@@ -1584,19 +2148,24 @@ export class PlatformDatabase {
     const person = this.db.prepare(`SELECT id, display_name AS displayName, status
       FROM users WHERE id = ? AND role = 'employee' LIMIT 1`).get(personId) as { id: string; displayName: string; status: 'active' | 'disabled' } | undefined
     if (!person || this.isPersonDeleted(personId)) return null
-    if (person.status !== 'disabled') return { state: 'not_disabled', idempotent: false, person: { id: person.id, displayName: person.displayName } }
+    if (!options.allowActive && person.status !== 'disabled') return { state: 'not_disabled', idempotent: false, person: { id: person.id, displayName: person.displayName } }
 
     this.db.exec('BEGIN IMMEDIATE')
     try {
+      const message = typeof auditEvent.summary.message === 'string'
+        ? auditEvent.summary.message
+        : '已从人员目录移除本地 SQLite 人员；历史审计与用量记录保留，关联 Key 继续保持已回收状态。'
       this.appendAuditEvent({
         ...auditEvent,
         summary: {
           ...auditEvent.summary,
           code: 'PERSON_DELETED',
-          message: '已从人员目录移除本地 SQLite 人员；历史审计与用量记录保留，关联 Key 继续保持已回收状态。',
+          message,
           resourceName: person.displayName,
         },
       }, now)
+      this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE owner_user_id = ? AND status <> 'revoked'").run(now.toISOString(), personId)
+      this.db.prepare("UPDATE person_sync_records SET is_excluded = 1, updated_at = ? WHERE person_id = ?").run(now.toISOString(), personId)
       this.db.prepare(`DELETE FROM quota_policies
         WHERE (level = 'person' AND subject_id = ?)
            OR (level = 'key' AND subject_id IN (SELECT id FROM api_keys WHERE owner_user_id = ?))`).run(personId, personId)
@@ -1609,18 +2178,25 @@ export class PlatformDatabase {
     return { state: 'deleted', idempotent: false, person: { id: person.id, displayName: person.displayName } }
   }
 
-  listApiKeys() {
+  listApiKeys(options: { includeDeleted?: boolean } = {}) {
+    const deletedFilter = options.includeDeleted ? '' : `
+       AND NOT EXISTS (
+         SELECT 1 FROM audit_events deleted_key
+         WHERE deleted_key.action = 'delete' AND deleted_key.resource_type = 'key'
+           AND deleted_key.resource_id = k.id AND deleted_key.result = 'success'
+       )`
       const rows = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
-      k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson, k.created_at AS createdAt,
+      k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson, k.secret_ciphertext AS secretCiphertext,
+      k.external_token_id AS externalTokenId, k.quota_mode AS quotaMode, k.last_used_at AS lastUsedAt, k.last_synced_at AS lastSyncedAt, k.secret_revealed_at AS secretRevealedAt, k.created_at AS createdAt,
       u.display_name AS ownerName, d.id AS departmentId, d.name AS departmentName
       FROM api_keys k JOIN users u ON u.id = k.owner_user_id
       LEFT JOIN departments d ON d.id = u.department_id
-      WHERE NOT EXISTS (
-        SELECT 1 FROM audit_events deleted
-        WHERE deleted.action = 'delete' AND deleted.resource_type = 'person'
-          AND deleted.resource_id = u.id AND deleted.result = 'success'
-      )
-      ORDER BY k.created_at DESC, k.id`).all() as Array<{
+       WHERE NOT EXISTS (
+         SELECT 1 FROM audit_events deleted
+         WHERE deleted.action = 'delete' AND deleted.resource_type = 'person'
+           AND deleted.resource_id = u.id AND deleted.result = 'success'
+       )${deletedFilter}
+       ORDER BY k.created_at DESC, k.id`).all() as Array<{
         id: string
         ownerUserId: string
         maskedValue: string
@@ -1628,6 +2204,12 @@ export class PlatformDatabase {
         status: 'active' | 'expiring' | 'revoked'
         expiresAt: string | null
         modelsJson: string
+        secretCiphertext: string | null
+        externalTokenId: string | null
+        quotaMode: 'unlimited' | 'legacy'
+        lastUsedAt: string | null
+        lastSyncedAt: string | null
+        secretRevealedAt: string | null
         createdAt: string
         ownerName: string
         departmentId: string | null
@@ -1636,7 +2218,8 @@ export class PlatformDatabase {
     return rows.map((row) => {
       const stored = JSON.parse(row.modelsJson) as unknown
       const model = Array.isArray(stored) && typeof stored[0] === 'string' ? stored[0] : 'ecommerce-general'
-      return { ...row, model, models: [model] }
+      const { secretCiphertext, ...safeRow } = row
+      return { ...safeRow, model, models: [model], secretAvailable: Boolean(secretCiphertext), externalTokenId: row.externalTokenId, quotaMode: row.quotaMode, lastUsedAt: row.lastUsedAt, lastSyncedAt: row.lastSyncedAt, secretRevealedAt: row.secretRevealedAt }
     })
   }
 
@@ -1683,9 +2266,72 @@ export class PlatformDatabase {
       }>
   }
 
+  listPersonUsageByDay(ownerUserId: string, since: string) {
+    return this.db.prepare(`SELECT strftime('%Y-%m-%d', r.occurred_at, '+8 hours') AS day,
+      COUNT(r.request_id) AS requests,
+      COALESCE(SUM(r.input_tokens), 0) AS inputTokens,
+      COALESCE(SUM(r.output_tokens), 0) AS outputTokens,
+      COALESCE(SUM(r.points), 0) AS points
+      FROM usage_requests r
+      WHERE r.owner_user_id = ? AND r.occurred_at >= ?
+      GROUP BY strftime('%Y-%m-%d', r.occurred_at, '+8 hours')
+      ORDER BY day`).all(ownerUserId, since) as Array<{
+        day: string
+        requests: number
+        inputTokens: number
+        outputTokens: number
+        points: number
+      }>
+  }
+
+  listPersonUsageByDayAndModel(ownerUserId: string, since: string) {
+    return this.db.prepare(`SELECT r.model_display_name AS model,
+      strftime('%Y-%m-%d', r.occurred_at, '+8 hours') AS day,
+      COUNT(r.request_id) AS requests,
+      COALESCE(SUM(r.input_tokens), 0) AS inputTokens,
+      COALESCE(SUM(r.output_tokens), 0) AS outputTokens,
+      COALESCE(SUM(r.points), 0) AS points
+      FROM usage_requests r
+      WHERE r.owner_user_id = ? AND r.occurred_at >= ?
+      GROUP BY r.model_display_name, strftime('%Y-%m-%d', r.occurred_at, '+8 hours')
+      ORDER BY r.model_display_name, day`).all(ownerUserId, since) as Array<{
+        model: string
+        day: string
+        requests: number
+        inputTokens: number
+        outputTokens: number
+        points: number
+      }>
+  }
+
+  listPersonUsageByKeyAndModel(ownerUserId: string, since: string) {
+    return this.db.prepare(`SELECT r.api_key_id AS keyId,
+      k.masked_value AS masked,
+      k.purpose AS purpose,
+      r.model_display_name AS model,
+      r.route_alias AS alias,
+      COUNT(r.request_id) AS requests,
+      COALESCE(SUM(r.input_tokens), 0) AS inputTokens,
+      COALESCE(SUM(r.output_tokens), 0) AS outputTokens
+      FROM usage_requests r
+      JOIN api_keys k ON k.id = r.api_key_id AND k.owner_user_id = r.owner_user_id
+      WHERE r.owner_user_id = ? AND r.occurred_at >= ?
+      GROUP BY r.api_key_id, k.masked_value, k.purpose, r.model_id, r.model_display_name, r.route_alias
+      ORDER BY (COALESCE(SUM(r.input_tokens), 0) + COALESCE(SUM(r.output_tokens), 0)) DESC, k.created_at DESC, r.api_key_id, r.route_alias`).all(ownerUserId, since) as Array<{
+        keyId: string
+        masked: string
+        purpose: string
+        model: string
+        alias: string
+        requests: number
+        inputTokens: number
+        outputTokens: number
+      }>
+  }
+
   findGatewayKey(secret: string, now = this.now()): PlatformGatewayKey | null {
     const row = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
-      k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson,
+      k.external_token_id AS externalTokenId, k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson,
       u.display_name AS ownerName, d.name AS departmentName
       FROM api_keys k JOIN users u ON u.id = k.owner_user_id
       LEFT JOIN departments d ON d.id = u.department_id
@@ -1694,6 +2340,7 @@ export class PlatformDatabase {
         id: string
         ownerUserId: string
         maskedValue: string
+        externalTokenId: string | null
         purpose: string
         status: 'active' | 'expiring'
         expiresAt: string | null
@@ -1708,6 +2355,7 @@ export class PlatformDatabase {
       ownerName: row.ownerName,
       departmentName: row.departmentName ?? '未分配部门',
       maskedValue: row.maskedValue,
+      externalTokenId: row.externalTokenId ?? null,
       purpose: row.purpose,
       model: (() => {
         const stored = JSON.parse(row.modelsJson) as unknown
@@ -1727,6 +2375,18 @@ export class PlatformDatabase {
     return row?.departmentId ?? null
   }
 
+  findPerson(personId: string) {
+    return this.listPeople().find((person) => person.id === personId) ?? null
+  }
+
+  findPersonByExternalId(externalUserId: string) {
+    return this.listPeople().find((person) => person.externalUserId === externalUserId) ?? null
+  }
+
+  setPersonExternalUserId(personId: string, externalUserId: string | null) {
+    this.db.prepare('UPDATE users SET external_user_id = ?, updated_at = ? WHERE id = ? AND role = \'employee\'').run(externalUserId, this.now().toISOString(), personId)
+  }
+
   findKeyDepartmentId(keyId: string) {
     const row = this.db.prepare(`SELECT u.department_id AS departmentId FROM api_keys k
       JOIN users u ON u.id = k.owner_user_id WHERE k.id = ? LIMIT 1`).get(keyId) as { departmentId: string | null } | undefined
@@ -1737,16 +2397,48 @@ export class PlatformDatabase {
     return Boolean(this.db.prepare("SELECT 1 FROM users WHERE id = ? AND role = 'employee' AND status = 'active' LIMIT 1").get(ownerUserId))
   }
 
+  findApiKeyOperation(idempotencyKey: string) {
+    return this.db.prepare(`SELECT idempotency_key AS idempotencyKey, person_id AS personId, model, key_id AS keyId
+      FROM api_key_operations WHERE idempotency_key = ? LIMIT 1`).get(idempotencyKey) as { idempotencyKey: string; personId: string; model: string; keyId: string } | undefined ?? null
+  }
+
+  findApiKeyByExternalTokenId(externalTokenId: string) {
+    return this.listApiKeys().find((key) => key.externalTokenId === externalTokenId) ?? null
+  }
+
+  markApiKeySecretRevealed(keyId: string, now = this.now()) {
+    this.db.prepare('UPDATE api_keys SET secret_revealed_at = ?, updated_at = ? WHERE id = ?').run(now.toISOString(), now.toISOString(), keyId)
+  }
+
+  upsertExternalApiKey(key: PlatformApiKeyCreate, now = this.now()) {
+    if (!key.externalTokenId) throw new Error('EXTERNAL_TOKEN_ID_REQUIRED')
+    if (this.isPersonDeleted(key.ownerUserId)) return null
+    const existing = this.findApiKeyByExternalTokenId(key.externalTokenId)
+    const timestamp = now.toISOString()
+    if (existing) {
+      const model = key.model ?? (key.models.length === 1 ? key.models[0] : null)
+      if (!model) throw new Error('KEY_SINGLE_MODEL_REQUIRED')
+      this.db.prepare(`UPDATE api_keys SET owner_user_id = ?, masked_value = ?, purpose = ?, status = ?, expires_at = ?, models_json = ?, quota_mode = ?, last_used_at = ?, last_synced_at = ?, created_at = COALESCE(?, created_at), updated_at = ? WHERE id = ?`)
+        .run(key.ownerUserId, key.maskedValue, key.purpose, key.status ?? 'active', key.expiresAt, JSON.stringify([model]), key.quotaMode ?? 'unlimited', key.lastUsedAt ?? null, key.lastSyncedAt ?? timestamp, key.createdAt ?? null, timestamp, existing.id)
+      return this.listApiKeys().find((item) => item.id === existing.id) ?? null
+    }
+    return this.createApiKey({ ...key, quotaMode: key.quotaMode ?? 'unlimited', lastSyncedAt: key.lastSyncedAt ?? timestamp }, undefined, now)
+  }
+
   createApiKey(key: PlatformApiKeyCreate, auditEvent?: PlatformAuditEventSeed, now = this.now()) {
     const model = key.model ?? (key.models.length === 1 ? key.models[0] : null)
     if (!model) throw new Error('KEY_SINGLE_MODEL_REQUIRED')
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, purpose, status, expires_at, models_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
-        key.id, key.ownerUserId, key.maskedValue, key.secretHash, key.purpose, key.expiresAt, JSON.stringify([model]), timestamp, timestamp,
+      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, secret_ciphertext, purpose, status, expires_at, models_json, external_token_id, quota_mode, last_used_at, last_synced_at, secret_revealed_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        key.id, key.ownerUserId, key.maskedValue, key.secretHash ?? null, key.secretValue ? encryptPlatformApiKey(key.secretValue) : null, key.purpose, key.status ?? 'active', key.expiresAt, JSON.stringify([model]), key.externalTokenId ?? null, key.quotaMode ?? 'legacy', key.lastUsedAt ?? null, key.lastSyncedAt ?? timestamp, key.secretRevealedAt ?? null, key.createdAt ?? timestamp, timestamp,
       )
+      if (key.idempotencyKey) {
+        this.db.prepare(`INSERT INTO api_key_operations(idempotency_key, person_id, model, key_id, created_at) VALUES (?, ?, ?, ?, ?)`)
+          .run(key.idempotencyKey, key.ownerUserId, model, key.id, timestamp)
+      }
       if (auditEvent) this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
     } catch (error) {
@@ -1754,6 +2446,38 @@ export class PlatformDatabase {
       throw error
     }
     return this.listApiKeys().find((item) => item.id === key.id) ?? null
+  }
+
+  readApiKeySecret(keyId: string) {
+    const row = this.db.prepare('SELECT secret_ciphertext AS secretCiphertext FROM api_keys WHERE id = ? LIMIT 1').get(keyId) as { secretCiphertext: string | null } | undefined
+    return row?.secretCiphertext ? decryptPlatformApiKey(row.secretCiphertext) : null
+  }
+
+  resetApiKey(keyId: string, replacement: PlatformApiKeyReset, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyResetResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    const current = () => this.listApiKeys().find((item) => item.id === keyId) ?? null
+    if (previousOperation) {
+      const previousFingerprint = (JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown }).idempotencyFingerprint
+      if (previousOperation.resourceId !== keyId || previousFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const key = current()
+      return key ? { state: 'reset', idempotent: true, key, secret: this.readApiKeySecret(keyId) } : null
+    }
+    const before = current()
+    if (!before) return null
+    if (before.status === 'revoked') return { state: 'already_disabled', idempotent: false, key: before, secret: null }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE api_keys SET masked_value = ?, secret_hash = ?, secret_ciphertext = ?, status = 'active', updated_at = ? WHERE id = ?`)
+        .run(replacement.maskedValue, replacement.secretHash, encryptPlatformApiKey(replacement.secretValue), timestamp, keyId)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const key = current()
+    return key ? { state: 'reset', idempotent: false, key, secret: replacement.secretValue } : null
   }
 
   disableApiKey(keyId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyDisableResult | null {
@@ -1780,6 +2504,60 @@ export class PlatformDatabase {
     return key ? { state: 'disabled', idempotent: false, key } : null
   }
 
+  enableApiKey(keyId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyEnableResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null } | undefined
+    const current = () => this.listApiKeys({ includeDeleted: true }).find((item) => item.id === keyId) ?? null
+    if (previousOperation) {
+      if (previousOperation.resourceId !== keyId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const key = current()
+      return key ? { state: 'enabled', idempotent: true, key } : null
+    }
+    const before = current()
+    if (!before) return null
+    if (before.status !== 'revoked') return { state: 'already_enabled', idempotent: false, key: before }
+    const timestamp = now.toISOString()
+    const nextStatus = before.expiresAt && new Date(before.expiresAt).getTime() - now.getTime() <= 30 * 86_400_000 ? 'expiring' : 'active'
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('UPDATE api_keys SET status = ?, updated_at = ? WHERE id = ? AND status = \'revoked\'').run(nextStatus, timestamp, keyId)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const key = current()
+    return key ? { state: 'enabled', idempotent: false, key } : null
+  }
+
+  deleteApiKey(keyId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyDeleteResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null } | undefined
+    const current = () => this.listApiKeys({ includeDeleted: true }).find((item) => item.id === keyId) ?? null
+    if (previousOperation) {
+      if (previousOperation.resourceId !== keyId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const key = current()
+      return key ? { state: 'deleted', idempotent: true, key } : null
+    }
+    const before = current()
+    if (!before) return null
+    const alreadyDeleted = this.db.prepare(`SELECT 1 FROM audit_events
+      WHERE action = 'delete' AND resource_type = 'key' AND resource_id = ? AND result = 'success' LIMIT 1`).get(keyId)
+    if (alreadyDeleted) return { state: 'already_deleted', idempotent: false, key: before }
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ?").run(timestamp, keyId)
+      this.appendAuditEvent(auditEvent, now)
+      this.db.prepare("DELETE FROM quota_policies WHERE level = 'key' AND subject_id = ?").run(keyId)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    const key = current()
+    return key ? { state: 'deleted', idempotent: false, key } : null
+  }
+
   rotateApiKey(keyId: string, replacement: PlatformApiKeyCreate, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformApiKeyRotateResult | null {
     const model = replacement.model ?? (replacement.models.length === 1 ? replacement.models[0] : null)
     if (!model) throw new Error('KEY_SINGLE_MODEL_REQUIRED')
@@ -1798,9 +2576,9 @@ export class PlatformDatabase {
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, purpose, status, expires_at, models_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
-        replacement.id, replacement.ownerUserId, replacement.maskedValue, replacement.secretHash, replacement.purpose, replacement.expiresAt, JSON.stringify([model]), timestamp, timestamp,
+      this.db.prepare(`INSERT INTO api_keys(id, owner_user_id, masked_value, secret_hash, secret_ciphertext, purpose, status, expires_at, models_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`).run(
+        replacement.id, replacement.ownerUserId, replacement.maskedValue, replacement.secretHash ?? null, replacement.secretValue ? encryptPlatformApiKey(replacement.secretValue) : null, replacement.purpose, replacement.expiresAt ?? null, JSON.stringify([model]), timestamp, timestamp,
       )
       this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ?").run(timestamp, keyId)
       this.appendAuditEvent(auditEvent, now)
@@ -2149,46 +2927,6 @@ export class PlatformDatabase {
     return { ...stored, idempotent: false }
   }
 
-  applyLocalAlertAction(action: PlatformLocalAlertAction, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformLocalAlertActionResult | null {
-    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
-    const current = () => this.listAlertEvents().find((item) => item.id === action.id) ?? null
-    if (previousOperation) {
-      const previousSummary = JSON.parse(previousOperation.summaryJson) as { idempotencyFingerprint?: unknown }
-      if (previousOperation.resourceId !== auditEvent.resourceId || previousSummary.idempotencyFingerprint !== auditEvent.summary.idempotencyFingerprint) throw new Error('IDEMPOTENCY_KEY_REUSED')
-      const stored = current()
-      if (!stored || (stored.status !== 'acknowledged' && stored.status !== 'closed')) throw new Error('ALERT_ACTION_NOT_FOUND')
-      return { id: stored.id, status: stored.status, assigneeUserId: stored.assigneeUserId, acknowledgedAt: stored.acknowledgedAt, closedAt: stored.closedAt, idempotent: true }
-    }
-    const existing = current()
-    if (!existing) return null
-    if (existing.status === 'closed') throw new Error('ALERT_ALREADY_CLOSED')
-    if (action.action === 'acknowledge' && existing.status === 'acknowledged') throw new Error('ALERT_ALREADY_ACKNOWLEDGED')
-
-    const timestamp = now.toISOString()
-    this.db.exec('BEGIN IMMEDIATE')
-    try {
-      let changes: number | bigint = 0
-      if (action.action === 'acknowledge') {
-        changes = this.db.prepare(`UPDATE alert_events SET status = 'acknowledged', assignee_user_id = ?, acknowledged_at = ?
-          WHERE id = ? AND status = 'open'`).run(action.actorUserId, timestamp, action.id).changes
-      } else {
-        changes = this.db.prepare(`UPDATE alert_events SET status = 'closed', assignee_user_id = COALESCE(assignee_user_id, ?),
-          acknowledged_at = COALESCE(acknowledged_at, ?), closed_at = ? WHERE id = ? AND status IN ('open', 'acknowledged')`).run(
-          action.actorUserId, timestamp, timestamp, action.id,
-        ).changes
-      }
-      if (changes !== 1) throw new Error('ALERT_ACTION_CONFLICT')
-      this.appendAuditEvent(auditEvent, now)
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
-    const stored = current()
-    if (!stored || (stored.status !== 'acknowledged' && stored.status !== 'closed')) throw new Error('ALERT_ACTION_NOT_FOUND')
-    return { id: stored.id, status: stored.status, assigneeUserId: stored.assigneeUserId, acknowledgedAt: stored.acknowledgedAt, closedAt: stored.closedAt, idempotent: false }
-  }
-
   listAuditEvents() {
     const rows = this.db.prepare(`SELECT a.id, a.actor_user_id AS actorUserId, u.display_name AS actorName, u.role AS actorRole,
       a.action, a.resource_type AS resourceType, a.resource_id AS resourceId, a.result, a.request_id AS requestId,
@@ -2254,41 +2992,6 @@ export class PlatformDatabase {
         status: 'succeeded' | 'failed' | 'cancelled'; errorCategory: 'rate_limit' | 'timeout' | 'authentication' | 'server' | 'cancelled' | null; errorSummary: string | null
         routeAlias: string; retryCount: number; requestIdPropagated: number; clientName: 'Codex Desktop' | 'WorkBuddy'; clientMode: 'stream' | 'non_stream'
       }>
-  }
-
-  listAlertRules() {
-    return this.db.prepare(`SELECT id, name, category, severity, enabled, environment, scope,
-      condition_label AS condition, window_label AS window, cooldown_minutes AS cooldownMinutes,
-      notification_channel AS notificationChannel, last_triggered_at AS lastTriggeredAt,
-      trigger_count_7d AS triggerCount7d, description
-      FROM alert_rules ORDER BY environment, category, id`).all() as Array<{
-        id: string; name: string; category: PlatformAlertRuleSeed['category']; severity: PlatformAlertRuleSeed['severity']; enabled: number
-        environment: 'production' | 'experiment'; scope: string; condition: string; window: string; cooldownMinutes: number
-        notificationChannel: 'none' | 'wecom' | 'dingtalk'; lastTriggeredAt: string | null; triggerCount7d: number; description: string
-      }>
-  }
-
-  listAlertEvents() {
-    const rows = this.db.prepare(`SELECT e.id, e.title, e.summary, e.severity, e.status, e.environment, e.source,
-      e.subject_type AS subjectType, e.subject_id AS subjectId, e.subject_name AS subjectName,
-      e.rule_id AS ruleId, e.rule_name AS ruleName, e.rule_metric AS ruleMetric, e.threshold_label AS thresholdLabel,
-      e.trigger_value_label AS triggerValueLabel, e.trigger_comparator AS triggerComparator,
-      e.first_occurred_at AS firstOccurredAt, e.last_occurred_at AS lastOccurredAt, e.occurrences,
-      e.assignee_user_id AS assigneeUserId, u.display_name AS assigneeName, e.acknowledged_at AS acknowledgedAt,
-      e.closed_at AS closedAt, e.notification_state AS notificationState, e.notification_channel AS notificationChannel,
-      e.notification_sent_at AS notificationSentAt, e.silence_active AS silenceActive, e.silence_until AS silenceUntil,
-      e.related_request_ids_json AS relatedRequestIdsJson
-      FROM alert_events e LEFT JOIN users u ON u.id = e.assignee_user_id
-      ORDER BY e.last_occurred_at DESC, e.id DESC`).all() as Array<{
-        id: string; title: string; summary: string; severity: PlatformAlertRuleSeed['severity']; status: 'open' | 'acknowledged' | 'closed'
-        environment: 'production' | 'experiment'; source: PlatformAlertRuleSeed['category']; subjectType: PlatformAlertEventSeed['subject']['type']
-        subjectId: string; subjectName: string; ruleId: string; ruleName: string; ruleMetric: string; thresholdLabel: string
-        triggerValueLabel: string; triggerComparator: PlatformAlertEventSeed['trigger']['comparator']; firstOccurredAt: string
-        lastOccurredAt: string; occurrences: number; assigneeUserId: string | null; assigneeName: string | null; acknowledgedAt: string | null
-        closedAt: string | null; notificationState: 'not_configured' | 'not_sent' | 'sent' | 'failed'; notificationChannel: 'none' | 'wecom' | 'dingtalk'
-        notificationSentAt: string | null; silenceActive: number; silenceUntil: string | null; relatedRequestIdsJson: string
-      }>
-    return rows.map((row) => ({ ...row, relatedRequestIds: JSON.parse(row.relatedRequestIdsJson) as string[] }))
   }
 
   listBusinessRules() {
@@ -2539,6 +3242,209 @@ export class PlatformDatabase {
     } : null
   }
 
+  startConversationAuditCapture(input: PlatformConversationAuditCaptureInput) {
+    const existing = this.db.prepare('SELECT id FROM conversation_audit_records WHERE request_id = ? LIMIT 1').get(input.requestId) as { id: string } | undefined
+    if (existing) return existing.id
+    const prompt = auditJson(input.prompt)
+    const capturedAt = input.startedAt
+    const retentionUntil = input.retentionUntil ?? new Date(new Date(capturedAt).getTime() + AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
+    const promptRef = prompt ? `${input.id}:prompt` : null
+    const turns = input.prompt && typeof input.prompt === 'object'
+      ? Array.isArray((input.prompt as { messages?: unknown }).messages)
+        ? ((input.prompt as { messages: unknown[] }).messages.length)
+        : Array.isArray((input.prompt as { input?: unknown }).input)
+          ? ((input.prompt as { input: unknown[] }).input.length)
+          : 0
+      : 0
+    const toolCalls = input.prompt && typeof input.prompt === 'object'
+      ? Number(Array.isArray((input.prompt as { tools?: unknown }).tools) ? (input.prompt as { tools: unknown[] }).tools.length : 0)
+      : 0
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO conversation_audit_records(
+        id, request_id, captured_at, person_id, key_id, key_masked, purpose_id, purpose_label,
+        model_id, model_label, policy_id, policy_label, policy_scope, policy_expires_at,
+        capture_state, redaction_status, redaction_findings, grouping_type, grouping_reliable,
+        grouping_label, turns, tool_calls, total_tokens, content_access_available,
+        external_token_id, endpoint, started_at, completed_at, audit_status, http_status,
+        prompt_body_ref, response_body_ref, prompt_bytes, response_bytes, retention_until,
+        export_count, streamed, chunk_count, termination_reason, prompt_hash, response_hash, capture_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'passed', 0, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'streaming', ?, ?, NULL, ?, NULL, ?, 0, ?, 0, NULL, ?, NULL, NULL)
+      `).run(
+        input.id, input.requestId, capturedAt, input.personId, input.keyId, input.keyMasked,
+        `gateway-${input.keyId}`, input.purpose, input.model, input.model, 'audit-default', '真实请求正文采集', '已鉴权网关请求', retentionUntil,
+        prompt ? 'captured' : 'metadata_only', input.groupingType ?? 'independent_call', Number(input.groupingReliable ?? input.groupingType === 'conversation'), input.groupingLabel ?? '独立调用',
+        turns, toolCalls, Number(Boolean(prompt)), input.externalTokenId, input.endpoint, input.startedAt, null,
+        input.httpStatus ?? null, promptRef, prompt?.bytes ?? null, retentionUntil, Number(input.streamed), prompt?.hash ?? null,
+      )
+      if (prompt && promptRef) {
+        this.db.prepare(`INSERT INTO conversation_audit_contents(ref, record_id, field_type, encrypted_payload, sha256, byte_length, created_at)
+          VALUES (?, ?, 'prompt', ?, ?, ?, ?)`).run(promptRef, input.id, encryptConversationAuditPayload(prompt.text), prompt.hash, prompt.bytes, capturedAt)
+      }
+      this.db.exec('COMMIT')
+      return input.id
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      const retry = this.db.prepare('SELECT id FROM conversation_audit_records WHERE request_id = ? LIMIT 1').get(input.requestId) as { id: string } | undefined
+      if (retry) return retry.id
+      throw error
+    }
+  }
+
+  appendConversationAuditChunk(requestId: string, chunk: unknown, now = this.now()) {
+    const row = this.db.prepare(`SELECT id FROM conversation_audit_records WHERE request_id = ? LIMIT 1`).get(requestId) as { id: string } | undefined
+    if (!row) return false
+    const ref = `${row.id}:chunks`
+    const existing = this.db.prepare(`SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE ref = ? LIMIT 1`).get(ref) as { encryptedPayload: string } | undefined
+    const parsed = existing ? auditParse(decryptConversationAuditPayload(existing.encryptedPayload)) : []
+    const chunks = Array.isArray(parsed) ? parsed : []
+    chunks.push(auditSafeValue(chunk))
+    const encoded = auditJson(chunks)
+    if (!encoded) return false
+    this.db.prepare(`INSERT INTO conversation_audit_contents(ref, record_id, field_type, encrypted_payload, sha256, byte_length, created_at)
+      VALUES (?, ?, 'chunks', ?, ?, ?, ?)
+      ON CONFLICT(ref) DO UPDATE SET encrypted_payload = excluded.encrypted_payload, sha256 = excluded.sha256,
+      byte_length = excluded.byte_length, created_at = excluded.created_at`).run(
+      ref, row.id, encryptConversationAuditPayload(encoded.text), encoded.hash, encoded.bytes, now.toISOString(),
+    )
+    this.db.prepare(`UPDATE conversation_audit_records SET chunk_count = chunk_count + 1 WHERE id = ?`).run(row.id)
+    return true
+  }
+
+  completeConversationAuditCapture(requestId: string, completion: PlatformConversationAuditCompletion) {
+    const row = this.db.prepare(`SELECT id, prompt_body_ref AS promptBodyRef, response_body_ref AS responseBodyRef,
+      retention_until AS retentionUntil, streamed, chunk_count AS chunkCount, turns, tool_calls AS toolCalls,
+      total_tokens AS totalTokens FROM conversation_audit_records WHERE request_id = ? LIMIT 1`).get(requestId) as {
+        id: string; promptBodyRef: string | null; responseBodyRef: string | null; retentionUntil: string | null; streamed: number; chunkCount: number; turns: number; toolCalls: number; totalTokens: number
+      } | undefined
+    if (!row) return null
+    const chunksRef = `${row.id}:chunks`
+    const chunkRow = this.db.prepare(`SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE ref = ? LIMIT 1`).get(chunksRef) as { encryptedPayload: string } | undefined
+    const storedChunks = chunkRow ? auditParse(decryptConversationAuditPayload(chunkRow.encryptedPayload)) : null
+    const chunks = Array.isArray(completion.responseChunks) ? completion.responseChunks : Array.isArray(storedChunks) ? storedChunks : []
+    let responseValue: unknown = completion.response
+    if (responseValue === undefined && chunks.length > 0) responseValue = { protocol: 'stream', chunks, text: extractStreamText(chunks) }
+    const response = responseValue === undefined ? null : auditJson(responseValue)
+    const effectiveStatus: PlatformConversationAuditStatus = response || completion.status !== 'succeeded'
+      ? completion.status
+      : 'body_unavailable'
+    const completedAt = completion.completedAt
+    const retentionUntil = new Date(new Date(completedAt).getTime() + AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
+    const expired = new Date(retentionUntil).getTime() <= new Date(completedAt).getTime()
+    const contentAvailable = Boolean(row.promptBodyRef || response)
+    const responseRef = response ? `${row.id}:response` : null
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (responseRef && response) {
+        this.db.prepare(`INSERT INTO conversation_audit_contents(ref, record_id, field_type, encrypted_payload, sha256, byte_length, created_at)
+          VALUES (?, ?, 'response', ?, ?, ?, ?)
+          ON CONFLICT(ref) DO UPDATE SET encrypted_payload = excluded.encrypted_payload, sha256 = excluded.sha256,
+          byte_length = excluded.byte_length, created_at = excluded.created_at`).run(
+          responseRef, row.id, encryptConversationAuditPayload(response.text), response.hash, response.bytes, completedAt,
+        )
+      } else if (row.responseBodyRef) {
+        this.db.prepare('DELETE FROM conversation_audit_contents WHERE ref = ?').run(row.responseBodyRef)
+      }
+      this.db.prepare(`UPDATE conversation_audit_records SET completed_at = ?, audit_status = ?, http_status = ?,
+        response_body_ref = ?, prompt_bytes = COALESCE(prompt_bytes, ?), response_bytes = ?, retention_until = ?,
+        policy_expires_at = ?, capture_state = ?, content_access_available = ?, chunk_count = ?,
+        turns = COALESCE(?, turns), tool_calls = COALESCE(?, tool_calls), total_tokens = COALESCE(?, total_tokens),
+        termination_reason = ?, capture_error = ?, response_hash = ?, streamed = ? WHERE id = ?`).run(
+        completedAt, effectiveStatus, completion.httpStatus ?? null, responseRef, completion.promptBytes ?? null,
+        response?.bytes ?? completion.responseBytes ?? null, retentionUntil, retentionUntil,
+        expired ? 'expired' : contentAvailable ? 'captured' : 'metadata_only', Number(contentAvailable && !expired),
+        completion.responseChunks?.length ?? row.chunkCount,
+        completion.turns ?? null, completion.toolCalls ?? null, completion.totalTokens ?? null,
+        completion.terminationReason ?? null, response ? null : safeAuditError(completion.captureError ?? (effectiveStatus === 'body_unavailable' ? '上游未返回可保存的正文' : '未收到完整回复正文')),
+        response?.hash ?? null, Number(Boolean(row.streamed)), row.id,
+      )
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return this.getConversationAuditRecordById(row.id)
+  }
+
+  getConversationAuditContent(recordId: string): PlatformConversationAuditContent | null {
+    const row = this.db.prepare(`SELECT prompt_body_ref AS promptBodyRef, response_body_ref AS responseBodyRef,
+      prompt_bytes AS promptBytes, response_bytes AS responseBytes, prompt_hash AS promptHash, response_hash AS responseHash
+      FROM conversation_audit_records WHERE id = ? LIMIT 1`).get(recordId) as {
+        promptBodyRef: string | null; responseBodyRef: string | null; promptBytes: number | null; responseBytes: number | null; promptHash: string | null; responseHash: string | null
+      } | undefined
+    if (!row) return null
+    const read = (ref: string | null) => {
+      if (!ref) return null
+      const item = this.db.prepare('SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE ref = ? LIMIT 1').get(ref) as { encryptedPayload: string } | undefined
+      return item ? auditParse(decryptConversationAuditPayload(item.encryptedPayload)) : null
+    }
+    const prompt = read(row.promptBodyRef)
+    const response = read(row.responseBodyRef)
+    const chunksRow = this.db.prepare(`SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE record_id = ? AND field_type = 'chunks' LIMIT 1`).get(recordId) as { encryptedPayload: string } | undefined
+    const chunksValue = chunksRow ? auditParse(decryptConversationAuditPayload(chunksRow.encryptedPayload)) : []
+    return {
+      prompt, response, chunks: Array.isArray(chunksValue) ? chunksValue : [],
+      promptAvailable: prompt !== null, responseAvailable: response !== null,
+      promptBytes: row.promptBytes, responseBytes: row.responseBytes,
+      promptHash: row.promptHash, responseHash: row.responseHash,
+    }
+  }
+
+  getConversationAuditRecordById(id: string): PlatformConversationAuditRecord | null {
+    const row = this.db.prepare(`SELECT r.id, r.request_id AS requestId, r.captured_at AS capturedAt,
+      r.person_id AS personId, u.display_name AS personName, COALESCE(d.name, '未归属部门') AS departmentName,
+      r.key_id AS keyId, r.key_masked AS keyMasked, r.purpose_id AS purposeId, r.purpose_label AS purposeLabel,
+      r.model_id AS modelId, r.model_label AS modelLabel, r.policy_id AS policyId, r.policy_label AS policyLabel,
+      r.policy_scope AS policyScope, r.policy_expires_at AS policyExpiresAt, r.capture_state AS state,
+      r.redaction_status AS redactionStatus, r.redaction_findings AS redactionFindings,
+      r.grouping_type AS groupingType, r.grouping_reliable AS groupingReliable, r.grouping_label AS groupingLabel,
+      r.turns, r.tool_calls AS toolCalls, r.total_tokens AS totalTokens, r.content_access_available AS contentAccessAvailable,
+      r.external_token_id AS externalTokenId, r.endpoint, r.started_at AS startedAt, r.completed_at AS completedAt,
+      r.audit_status AS auditStatus, r.http_status AS httpStatus, r.prompt_body_ref AS promptBodyRef,
+      r.response_body_ref AS responseBodyRef, r.prompt_bytes AS promptBytes, r.response_bytes AS responseBytes,
+      r.retention_until AS retentionUntil, r.export_count AS exportCount, r.streamed, r.chunk_count AS chunkCount,
+      r.termination_reason AS terminationReason, r.prompt_hash AS promptHash, r.response_hash AS responseHash,
+      r.capture_error AS captureError
+      FROM conversation_audit_records r JOIN users u ON u.id = r.person_id LEFT JOIN departments d ON d.id = u.department_id
+      WHERE r.id = ? LIMIT 1`).get(id) as PlatformConversationAuditRecord | undefined
+    return row ?? null
+  }
+
+  listConversationAuditRecordsByKey(keyId: string) {
+    return this.listConversationAuditRecords().filter((item) => item.keyId === keyId)
+  }
+
+  recordConversationAuditOperation(operation: PlatformConversationAuditOperation, now = this.now(), auditEvent?: PlatformAuditEventSeed) {
+    const occurredAt = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO conversation_audit_operation_events(
+        id, actor_user_id, record_id, request_id, key_id, action, field_type, result, reason_length, scope, occurred_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        operation.id, operation.actorUserId, operation.recordId, operation.requestId, operation.keyId, operation.action,
+        operation.fieldType, operation.result, operation.reasonLength, operation.scope, occurredAt,
+      )
+      if (auditEvent) this.appendAuditEvent(auditEvent, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { id: operation.id, occurredAt }
+  }
+
+  listConversationAuditOperations(recordId?: string) {
+    return this.db.prepare(`SELECT e.id, e.actor_user_id AS actorUserId, u.display_name AS actorName,
+      e.record_id AS recordId, e.request_id AS requestId, e.key_id AS keyId, e.action, e.field_type AS fieldType,
+      e.result, e.reason_length AS reasonLength, e.scope, e.occurred_at AS occurredAt
+      FROM conversation_audit_operation_events e JOIN users u ON u.id = e.actor_user_id
+      WHERE (? IS NULL OR e.record_id = ?) ORDER BY e.occurred_at DESC, e.id DESC LIMIT 50`).all(recordId ?? null, recordId ?? null) as unknown as Array<PlatformConversationAuditOperation & { actorName: string; occurredAt: string }>
+  }
+
+  incrementConversationAuditExportCount(recordId: string) {
+    this.db.prepare('UPDATE conversation_audit_records SET export_count = export_count + 1 WHERE id = ?').run(recordId)
+  }
+
   recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now(), auditEvent?: PlatformAuditEventSeed) {
     const occurredAt = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
@@ -2580,7 +3486,13 @@ export class PlatformDatabase {
       r.redaction_status AS redactionStatus, r.redaction_findings AS redactionFindings,
       r.grouping_type AS groupingType, r.grouping_reliable AS groupingReliable, r.grouping_label AS groupingLabel,
       r.turns, r.tool_calls AS toolCalls, r.total_tokens AS totalTokens,
-      r.content_access_available AS contentAccessAvailable
+      r.content_access_available AS contentAccessAvailable,
+      r.external_token_id AS externalTokenId, r.endpoint, r.started_at AS startedAt, r.completed_at AS completedAt,
+      r.audit_status AS auditStatus, r.http_status AS httpStatus, r.prompt_body_ref AS promptBodyRef,
+      r.response_body_ref AS responseBodyRef, r.prompt_bytes AS promptBytes, r.response_bytes AS responseBytes,
+      r.retention_until AS retentionUntil, r.export_count AS exportCount, r.streamed, r.chunk_count AS chunkCount,
+      r.termination_reason AS terminationReason, r.prompt_hash AS promptHash, r.response_hash AS responseHash,
+      r.capture_error AS captureError
       FROM conversation_audit_records r
       JOIN users u ON u.id = r.person_id
       LEFT JOIN departments d ON d.id = u.department_id
@@ -2604,7 +3516,7 @@ export class PlatformDatabase {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const candidates = this.db.prepare(`SELECT id FROM conversation_audit_records r
-        WHERE policy_expires_at <= ? AND capture_state IN ('captured', 'expired')
+        WHERE COALESCE(retention_until, policy_expires_at) <= ?
         AND NOT EXISTS (SELECT 1 FROM conversation_audit_expiry_proofs p WHERE p.record_id = r.id)
         ORDER BY id`).all(completedAt) as Array<{ id: string }>
       if (!candidates.length) {
@@ -2618,16 +3530,23 @@ export class PlatformDatabase {
       const expire = this.db.prepare(`UPDATE conversation_audit_records
         SET capture_state = 'expired', content_access_available = 0
         WHERE id = ? AND capture_state = 'captured'`)
+      const contentBytes = this.db.prepare(`SELECT COALESCE(SUM(byte_length), 0) AS bytes
+        FROM conversation_audit_contents WHERE record_id = ?`)
+      const deleteContent = this.db.prepare('DELETE FROM conversation_audit_contents WHERE record_id = ?')
       const proof = this.db.prepare(`INSERT INTO conversation_audit_expiry_proofs(
-        record_id, cleanup_run_id, expired_at, no_content_was_stored, notice
-      ) VALUES (?, ?, ?, 1, ?)`)
+        record_id, cleanup_run_id, expired_at, no_content_was_stored, notice, deleted_content_bytes
+      ) VALUES (?, ?, ?, 1, ?, ?)`)
+      let deletedContentBytes = 0
       for (const candidate of candidates) {
+        const bytes = Number((contentBytes.get(candidate.id) as { bytes: number }).bytes ?? 0)
+        deletedContentBytes += bytes
+        deleteContent.run(candidate.id)
         expiredRecords += Number(expire.run(candidate.id).changes)
-        proof.run(candidate.id, Number(run.lastInsertRowid), completedAt, '仅保存合成审计元数据；本地 SQLite 从未存储对话正文，因此没有正文删除操作。')
+        proof.run(candidate.id, Number(run.lastInsertRowid), completedAt, '已删除该记录在本地 SQLite 中保存的加密正文；元数据保留为到期证明。', bytes)
       }
-      this.db.prepare('UPDATE conversation_audit_cleanup_runs SET expired_records = ? WHERE id = ?').run(expiredRecords, Number(run.lastInsertRowid))
+      this.db.prepare('UPDATE conversation_audit_cleanup_runs SET expired_records = ?, deleted_content_bytes = ? WHERE id = ?').run(expiredRecords, deletedContentBytes, Number(run.lastInsertRowid))
       this.db.exec('COMMIT')
-      return { triggeredBy, completedAt, expiredRecords, proofRecords: candidates.length }
+      return { triggeredBy, completedAt, expiredRecords, proofRecords: candidates.length, deletedContentBytes }
     } catch (error) {
       this.db.exec('ROLLBACK')
       throw error
@@ -2714,8 +3633,6 @@ export class PlatformDatabase {
       channelHealthSnapshots: count('channel_health_snapshots'),
       auditEvents: count('audit_events'),
       usageRequests: count('usage_requests'),
-      alertRules: count('alert_rules'),
-      alertEvents: count('alert_events'),
       conversationAccessEvents: count('conversation_access_events'),
       conversationAuditRecords: count('conversation_audit_records'),
       conversationAuditCleanupRuns: count('conversation_audit_cleanup_runs'),
@@ -2916,34 +3833,13 @@ export function seedDemoData(database: PlatformDatabase, now = new Date()) {
   ]
   for (const { minutes, ...request } of usageSeeds) database.seedUsageRequest({ ...request, occurredAt: new Date(now.getTime() - minutes * 60_000).toISOString() })
 
-  for (const record of createConversationAuditMetadataSeeds(now)) database.seedConversationAuditRecord(record)
-  for (const link of createConversationUsageLinkSeeds()) database.seedConversationUsageLink(link)
-
-  const at = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString()
-  const later = (minutes: number) => new Date(now.getTime() + minutes * 60_000).toISOString()
-  const alertRules: PlatformAlertRuleSeed[] = [
-    { id: 'rule-quota-warning', name: '软额度 80% 预警', category: 'quota', severity: 'warning', enabled: true, environment: 'production', scope: '公司 / 部门 / 人员 / 用途 / Key', condition: '使用率 ≥ 80%', window: '小时 / 日 / 周 / 月', cooldownMinutes: 60, lastTriggeredAt: at(120), triggerCount7d: 9, description: '提前提示额度接近目标，不会阻断调用。' },
-    { id: 'rule-quota-critical', name: '软额度 100% 告警', category: 'quota', severity: 'critical', enabled: true, environment: 'production', scope: '公司 / 部门 / 人员 / 用途 / Key', condition: '使用率 ≥ 100%', window: '小时 / 日 / 周 / 月', cooldownMinutes: 30, lastTriggeredAt: at(1270), triggerCount7d: 3, description: '达到软目标后记录严重告警，硬阻断仍未启用。' },
-    { id: 'rule-traffic-spike', name: '流量突增提示', category: 'traffic', severity: 'info', enabled: true, environment: 'production', scope: '全公司请求', condition: '请求量 ≥ 同期基线 2.5 倍', window: '10 分钟', cooldownMinutes: 30, lastTriggeredAt: at(132), triggerCount7d: 4, description: '识别异常请求增长，辅助核对活动或自动化任务。' },
-    { id: 'rule-error-critical', name: '错误率严重告警', category: 'error_rate', severity: 'critical', enabled: true, environment: 'production', scope: '官方生产渠道', condition: '5xx 错误率 ≥ 5%', window: '5 分钟', cooldownMinutes: 15, lastTriggeredAt: at(3), triggerCount7d: 7, description: '监控生产渠道服务异常，不展示上游完整错误正文。' },
-    { id: 'rule-balance-low', name: '上游余额预警', category: 'balance', severity: 'warning', enabled: true, environment: 'production', scope: '官方上游账号', condition: '预计可用天数 ≤ 3 天', window: '每天', cooldownMinutes: 720, lastTriggeredAt: at(35), triggerCount7d: 2, description: '按近期消耗估算余额安全天数。' },
-    { id: 'rule-credential-expiry', name: '凭证到期告警', category: 'credential', severity: 'critical', enabled: true, environment: 'experiment', scope: 'CPA 实验账号', condition: '剩余有效时间 ≤ 24 小时', window: '每小时', cooldownMinutes: 360, lastTriggeredAt: at(88), triggerCount7d: 2, description: '仅返回凭证状态与到期时间，不返回任何凭证内容。' },
-    { id: 'rule-upstream-failure', name: '上游连续失败', category: 'upstream', severity: 'warning', enabled: true, environment: 'experiment', scope: 'CPA 实验上游', condition: '连续失败次数 ≥ 3', window: '10 分钟', cooldownMinutes: 30, lastTriggeredAt: at(21), triggerCount7d: 4, description: '实验流量出现上游异常时提醒，不会回退至生产渠道。' },
-    { id: 'rule-upstream-latency', name: '上游延迟异常', category: 'upstream', severity: 'info', enabled: true, environment: 'production', scope: '官方生产渠道', condition: 'P95 总耗时 ≥ 10 秒', window: '10 分钟', cooldownMinutes: 30, lastTriggeredAt: at(2770), triggerCount7d: 6, description: '记录并跟踪上游延迟恢复状态。' },
-  ]
-  for (const rule of alertRules) database.seedAlertRule(rule)
-
-  const alertEvents: PlatformAlertEventSeed[] = [
-    { id: 'alert-error-global', title: '官方全球组错误率持续升高', summary: '近 5 分钟 5xx 错误率超过严重阈值，路由仍限定在官方生产组。', severity: 'critical', status: 'open', environment: 'production', source: 'error_rate', subject: { type: 'channel', id: 'channel-official-global-1', name: 'Official Global · 01' }, rule: { id: 'rule-error-critical', name: '错误率严重告警', metric: '5xx 错误率', thresholdLabel: '≥ 5% / 5 分钟' }, trigger: { valueLabel: '8.4%', comparator: 'gte' }, firstOccurredAt: at(42), lastOccurredAt: at(3), occurrences: 7 },
-    { id: 'alert-balance-low', title: '官方全球账号余额偏低', summary: '按近 7 天消耗速度估算，可用余额低于 3 天安全线。', severity: 'warning', status: 'open', environment: 'production', source: 'balance', subject: { type: 'upstream', id: 'upstream-official-global-1', name: 'Official Global · 01' }, rule: { id: 'rule-balance-low', name: '上游余额预警', metric: '预计可用天数', thresholdLabel: '≤ 3 天' }, trigger: { valueLabel: '2.1 天', comparator: 'lte' }, firstOccurredAt: at(310), lastOccurredAt: at(35), occurrences: 3 },
-    { id: 'alert-cpa-credential', title: 'CPA 实验凭证即将到期', summary: '实验渠道凭证预计 18 小时后失效，生产路由不会回退至该渠道。', severity: 'critical', status: 'acknowledged', environment: 'experiment', source: 'credential', subject: { type: 'upstream', id: 'upstream-cpa-lab-2', name: 'CPA Lab · 02' }, rule: { id: 'rule-credential-expiry', name: '凭证到期告警', metric: '剩余有效时间', thresholdLabel: '≤ 24 小时' }, trigger: { valueLabel: '18 小时', comparator: 'lte' }, firstOccurredAt: at(520), lastOccurredAt: at(88), occurrences: 2, assigneeUserId: 'user-super-admin', acknowledgedAt: at(76) },
-    { id: 'alert-quota-content', title: '内容运营部门本月额度接近目标', summary: '部门月度软额度达到 84.7%，当前仅提示，不会阻断请求。', severity: 'warning', status: 'open', environment: 'production', source: 'quota', subject: { type: 'department', id: 'content', name: '内容运营' }, rule: { id: 'rule-quota-warning', name: '软额度 80% 预警', metric: '月度额度使用率', thresholdLabel: '≥ 80%' }, trigger: { valueLabel: '84.7%', comparator: 'gte' }, firstOccurredAt: at(930), lastOccurredAt: at(120), occurrences: 5 },
-    { id: 'alert-traffic-copy', title: '商品文案用途请求量突增', summary: '10 分钟请求量较过去 7 天同时间段基线高 2.8 倍。', severity: 'info', status: 'acknowledged', environment: 'production', source: 'traffic', subject: { type: 'company', id: 'company-xinzhi', name: '新知科技' }, rule: { id: 'rule-traffic-spike', name: '流量突增提示', metric: '请求量基线倍数', thresholdLabel: '≥ 2.5 倍 / 10 分钟' }, trigger: { valueLabel: '2.8 倍', comparator: 'gte' }, firstOccurredAt: at(160), lastOccurredAt: at(132), occurrences: 2, assigneeUserId: 'user-super-admin', acknowledgedAt: at(128), silence: { active: true, until: later(45) }, relatedRequestIds: ['req-demo-004'] },
-    { id: 'alert-cpa-upstream', title: 'CPA Lab · 01 出现短时 5xx', summary: '实验流量独立运行，异常未跨组影响官方生产渠道。', severity: 'warning', status: 'open', environment: 'experiment', source: 'upstream', subject: { type: 'upstream', id: 'upstream-cpa-lab-1', name: 'CPA Lab · 01' }, rule: { id: 'rule-upstream-failure', name: '上游连续失败', metric: '连续失败次数', thresholdLabel: '≥ 3 次' }, trigger: { valueLabel: '4 次', comparator: 'gte' }, firstOccurredAt: at(68), lastOccurredAt: at(21), occurrences: 4, relatedRequestIds: ['req-demo-007', 'req-demo-012'] },
-    { id: 'alert-key-limit', title: '林筱雨 Key 达到单小时软目标', summary: 'Key 仅保存掩码；本次达到目标后继续放行，并记录告警。', severity: 'critical', status: 'closed', environment: 'production', source: 'quota', subject: { type: 'key', id: 'key-lin-1', name: 'sk-ops••••••7F2A' }, rule: { id: 'rule-quota-critical', name: '软额度 100% 告警', metric: '小时额度使用率', thresholdLabel: '≥ 100%' }, trigger: { valueLabel: '102.3%', comparator: 'gte' }, firstOccurredAt: at(1320), lastOccurredAt: at(1270), occurrences: 2, assigneeUserId: 'user-super-admin', acknowledgedAt: at(1260), closedAt: at(1190), relatedRequestIds: ['req-demo-001'] },
-    { id: 'alert-channel-recovered', title: 'Official CN · 02 延迟已恢复', summary: 'P95 延迟回落至正常区间，事件已自动关闭。', severity: 'info', status: 'closed', environment: 'production', source: 'upstream', subject: { type: 'channel', id: 'channel-official-cn-2', name: 'Official CN · 02' }, rule: { id: 'rule-upstream-latency', name: '上游延迟异常', metric: 'P95 总耗时', thresholdLabel: '≥ 10 秒 / 10 分钟' }, trigger: { valueLabel: '已恢复至 3.2 秒', comparator: 'lte' }, firstOccurredAt: at(2880), lastOccurredAt: at(2770), occurrences: 6, closedAt: at(2760), relatedRequestIds: ['req-demo-003'] },
-  ]
-  for (const event of alertEvents) database.seedAlertEvent(event)
+  // Conversation audit rows must represent an actual authenticated gateway
+  // request in a running environment. Keep the legacy fixtures available only
+  // to the unit-test database, where the historical contract is exercised.
+  if (process.env.NODE_ENV === 'test' || process.env.AI_OPS_SEED_LEGACY_AUDIT_DATA === 'true') {
+    for (const record of createConversationAuditMetadataSeeds(now)) database.seedConversationAuditRecord(record)
+    for (const link of createConversationUsageLinkSeeds()) database.seedConversationUsageLink(link)
+  }
 
   return database.tableCounts()
 }

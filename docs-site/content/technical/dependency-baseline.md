@@ -1,7 +1,7 @@
 # 依赖基线
 
 ::: info 当前状态
-前端与 BFF 的第一批依赖已安装并写入根目录 `package-lock.json`。运营总览页面和只读 BFF 接口已经完成演示数据原型；真实 New API/CPA 接入和业务数据库尚未开始实现。
+前端与 BFF 的第一批依赖已安装并写入根目录 `package-lock.json`。当前产品方向是单一超级管理员 AI OPS；New API 和 CPA 随 Docker Compose 启动，由 BFF/服务端适配器统一调用，管理员不进入上游管理网站。运营总览页面和部分只读 BFF 接口仍是原型；真实 Token 写入、渠道同步、正文采集和生产审计尚未完成。
 :::
 
 ## 工作区结构
@@ -34,7 +34,7 @@ ai-ops-platform/
 
 | 分类 | 依赖 | 用途 |
 | --- | --- | --- |
-| 服务框架 | Fastify | 聚合 New API 与 CPA 管理接口 |
+| 服务框架 | Fastify | 通过服务端适配器聚合 New API 与 CPA 管理接口，浏览器不直连上游 |
 | 浏览器边界 | `@fastify/cors` | 限制允许访问 BFF 的控制台来源 |
 | 安全响应头 | `@fastify/helmet` | 设置常用浏览器安全响应头 |
 | 限流 | `@fastify/rate-limit` | 管理接口的基础请求频率限制 |
@@ -42,7 +42,7 @@ ai-ops-platform/
 | 开发 | TypeScript、tsx、Node 类型 | 类型检查、本地运行和构建 |
 | 测试 | Vitest | 数据转换、权限和路由测试 |
 
-浏览器仍然不能直接持有 New API 或 CPA 管理密钥。BFF 将在服务端读取凭据，并只向前端返回平台定义的脱敏数据。
+浏览器仍然不能直接持有 New API 或 CPA 管理密钥。BFF 在服务端读取凭据，负责健康/版本/认证/渠道同步和幂等写入，并只向前端返回平台定义的脱敏数据。New API/CPA 的管理网站不属于产品工作流。
 
 ## 版本与安装规则
 

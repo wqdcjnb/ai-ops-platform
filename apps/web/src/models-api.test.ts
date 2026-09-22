@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { channelCheckBodySchema, channelCheckResponseSchema, channelFiltersSchema, channelsResponseSchema, modelFiltersSchema, modelsResponseSchema } from './models-api'
+import { channelCheckBodySchema, channelCheckResponseSchema, channelFiltersSchema, channelSyncBodySchema, channelSyncPreviewSchema, channelSyncResponseSchema, channelsResponseSchema, modelFiltersSchema, modelsResponseSchema } from './models-api'
 
 const model = { id: 'model-1', displayName: '模型', provider: 'Provider', actualModel: 'model-1', aliases: ['ecommerce-copy'], capabilities: ['text'], contextWindow: 128000, region: '中国区', environment: 'production', status: 'available', pricing: { inputPerMillion: 1, outputPerMillion: 2, currency: 'USD', basis: 'official', updatedAt: '2026-09-15T00:00:00.000Z' }, purposes: [{ name: '文案', alias: 'ecommerce-copy', role: 'primary' }], channelIds: ['channel-1'] }
 const channel = { id: 'channel-1', name: 'Official 01', provider: 'Provider', type: 'official_api', environment: 'production', status: 'healthy', modelIds: ['model-1'], latencyMs: 1000, successRate: 99, balanceState: 'sufficient', rateLimits: { rpm: 100, tpm: 100000 }, recentError: null, checkedAt: '2026-09-15T10:00:00.000Z', credentialConfigured: true }
@@ -26,5 +26,14 @@ describe('model and channel API contracts', () => {
     expect(channelCheckBodySchema.safeParse(body).success).toBe(true)
     expect(channelCheckBodySchema.safeParse({ ...body, acknowledgeSynthetic: false }).success).toBe(false)
     expect(channelCheckResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地模拟' }, channel, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-channel-check-1a2b3c4d' } }).success).toBe(true)
+  })
+
+  it('validates the redacted CPA channel preview and confirmation contract', () => {
+    const body = { idempotencyKey: 'channel-sync-1a2b3c4d' }
+    const preview = { cpa: { state: 'ready', baseUrl: 'http://cpa:8317/v1', modelIds: ['gpt-codex'], credentialConfigured: true, checkedAt: '2026-09-17T10:00:00.000Z' }, target: { marker: 'ai-ops:cpa:codex', externalChannelId: null, action: 'create' }, changes: ['创建 AI OPS · CPA Codex'], canApply: true, requestId: 'req-sync-1' }
+    expect(channelSyncBodySchema.safeParse(body).success).toBe(true)
+    expect(channelSyncPreviewSchema.safeParse(preview).success).toBe(true)
+    expect(channelSyncResponseSchema.safeParse({ ...preview, status: 'succeeded', target: { ...preview.target, externalChannelId: '91' }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-sync-1' } }).success).toBe(true)
+    expect(channelSyncBodySchema.safeParse({ idempotencyKey: 'sync-invalid' }).success).toBe(false)
   })
 })

@@ -1,23 +1,23 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
-import { isAlertVisible, isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
+import { isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
+import type { NewApiDatabaseReader, NewApiLogRecord } from './new-api-database.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const periodSchema = z.enum(['7d', '30d'])
 export type Period = z.infer<typeof periodSchema>
 
-const trendPointSchema = z.object({ date: z.string(), requests: z.number().int().nonnegative(), points: z.number().int().nonnegative() })
-const alertSchema = z.object({ id: z.string(), level: z.enum(['warning', 'danger', 'experiment']), title: z.string(), detail: z.string(), occurredAt: z.string().datetime(), action: z.string() })
-const personSchema = z.object({ id: z.string(), name: z.string(), initials: z.string(), department: z.string(), purpose: z.string(), requests: z.number().int().nonnegative(), usagePercent: z.number().min(0), points: z.number().int().nonnegative(), targetConfigured: z.boolean(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']) })
+const trendPointSchema = z.object({ date: z.string(), requests: z.number().int().nonnegative() })
+const personSchema = z.object({ id: z.string(), name: z.string(), initials: z.string(), department: z.string(), purpose: z.string(), requests: z.number().int().nonnegative(), tokens: z.number().int().nonnegative(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']) })
 const channelSchema = z.object({ id: z.string(), name: z.string(), model: z.string(), type: z.enum(['production', 'experiment']), status: z.enum(['healthy', 'auth_required']), latencyMs: z.number().int().nonnegative().nullable(), successRate: z.number().min(0).max(100), requests: z.number().int().nonnegative() })
 
 export const overviewResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), simulated: z.literal(true), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), period: periodSchema, notice: z.string() }),
+  meta: z.object({ source: z.enum(['database', 'new_api']), simulated: z.boolean(), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), period: periodSchema, notice: z.string() }),
   service: z.object({ bff: z.literal('healthy'), newApi: z.object({ state: z.enum(['offline', 'reachable', 'auth_required', 'ready']), authConfigured: z.boolean(), checkedAt: z.string().datetime() }) }),
   metrics: z.object({
-    todayRequests: z.number().int().nonnegative(), todayRequestDeltaPercent: z.number(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), tokenDeltaPercent: z.number(), monthPoints: z.number().int().nonnegative(), monthPointLimit: z.number().int().positive(), successRate: z.number().min(0).max(100), successDeltaPercent: z.number(), p95LatencyMs: z.number().int().nonnegative(), p95LatencyDeltaMs: z.number(), firstTokenLatencyMs: z.number().int().nonnegative(),
+    todayRequests: z.number().int().nonnegative(), todayRequestDeltaPercent: z.number(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), tokenDeltaPercent: z.number(), successRate: z.number().min(0).max(100), successDeltaPercent: z.number(), p95LatencyMs: z.number().int().nonnegative(), p95LatencyDeltaMs: z.number(), firstTokenLatencyMs: z.number().int().nonnegative(),
   }),
-  trend: z.array(trendPointSchema), alerts: z.array(alertSchema), people: z.array(personSchema), channels: z.array(channelSchema), limits: z.object({ mode: z.literal('soft'), blocking: z.literal(false) }),
+  trend: z.array(trendPointSchema), people: z.array(personSchema), channels: z.array(channelSchema), limits: z.object({ mode: z.literal('soft'), blocking: z.literal(false) }),
 })
 
 export type OverviewResponse = z.infer<typeof overviewResponseSchema>
@@ -67,13 +67,10 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
   const visibleRecords = records.filter((item) => visibleDates.has(shanghaiDate(item.occurredAt)))
   const trend = dates.map(({ key, label }) => {
     const items = visibleRecords.filter((item) => shanghaiDate(item.occurredAt) === key)
-    return { date: label, requests: items.length, points: rounded(sum(items, (item) => item.points)) }
+    return { date: label, requests: items.length }
   })
-  const monthlyPoints = sum(month, (item) => item.points)
-  const companyTarget = database.listQuotaPolicies().find((item) => item.level === (scope.mode === 'department' ? 'department' : 'company') && item.subjectId === (scope.mode === 'department' ? scope.departmentId : 'company-xinzhi') && item.period === 'month')?.targetPoints ?? 1
 
   const peopleById = new Map(database.listPeople().filter((person) => isDepartmentVisible(scope, person.departmentId)).map((person) => [person.id, person]))
-  const quotas = new Map(database.listQuotaPolicies().filter((item) => item.level === 'person' && item.period === 'month').map((item) => [item.subjectId, item.targetPoints]))
   const people = [...peopleById.values()].map((person) => {
     const items = month.filter((item) => item.personId === person.id)
     const purposes = new Map<string, { name: string; count: number }>()
@@ -83,10 +80,9 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
       purposes.set(item.purposeId, current)
     }
     const mainPurpose = [...purposes.values()].sort((left, right) => right.count - left.count)[0]?.name ?? '暂无调用'
-    const target = quotas.get(person.id)
-    const points = sum(items, (item) => item.points)
-    return { id: person.id, name: person.displayName, initials: person.displayName.slice(0, 1) || '我', department: person.departmentName ?? '未分配部门', purpose: mainPurpose, requests: items.length, usagePercent: target ? Math.round((points / target) * 1_000) / 10 : 0, points: rounded(points), targetConfigured: Boolean(target), tone: tones[0] }
-  }).filter((person) => person.requests > 0).sort((left, right) => right.points - left.points).slice(0, 5).map((person, index) => ({ ...person, tone: tones[index % tones.length] ?? 'coral' }))
+    const tokens = sum(items, (item) => item.inputTokens + item.outputTokens)
+    return { id: person.id, name: person.displayName, initials: person.displayName.slice(0, 1) || '我', department: person.departmentName ?? '未分配部门', purpose: mainPurpose, requests: items.length, tokens, tone: tones[0] }
+  }).filter((person) => person.requests > 0).sort((left, right) => right.requests - left.requests || right.tokens - left.tokens).slice(0, 5).map((person, index) => ({ ...person, tone: tones[index % tones.length] ?? 'coral' }))
 
   const channelGroups = new Map<string, typeof visibleRecords>()
   for (const item of visibleRecords) channelGroups.set(item.channelId, [...(channelGroups.get(item.channelId) ?? []), item])
@@ -107,21 +103,12 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
     }
   }).sort((left, right) => right.requests - left.requests)
 
-  const alerts = database.listAlertEvents().filter((item) => item.status !== 'closed' && isAlertVisible(database, scope, { type: item.subjectType, id: item.subjectId })).slice(0, 3).map((item) => ({
-    id: item.id,
-    level: item.environment === 'experiment' ? 'experiment' as const : item.severity === 'critical' ? 'danger' as const : 'warning' as const,
-    title: item.title,
-    detail: `${item.subjectName} · ${item.triggerValueLabel}`,
-    occurredAt: item.lastOccurredAt,
-    action: '查看告警',
-  }))
-
   const currentP95 = rounded(percentile(todayLatency, .95))
   const previousP95 = rounded(percentile(yesterdayLatency, .95))
   return {
     meta: {
       source: 'database', simulated: true, generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', period,
-      notice: `核心指标、趋势、人员排行、渠道摘要和告警摘要来自 SQLite 可重复模拟记录；不等同于实时网关健康状态、真实调用日志或供应商账单。${scopeNotice(scope)}`,
+      notice: `核心指标、趋势、人员排行和渠道摘要来自 SQLite 可重复模拟记录；不等同于实时网关健康状态、真实调用日志或供应商账单。${scopeNotice(scope)}`,
     },
     service: { bff: 'healthy', newApi },
     metrics: {
@@ -130,8 +117,6 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
       inputTokens: sum(today, (item) => item.inputTokens),
       outputTokens: sum(today, (item) => item.outputTokens),
       tokenDeltaPercent: percentageDelta(todayTokens, yesterdayTokens),
-      monthPoints: rounded(monthlyPoints),
-      monthPointLimit: Math.max(1, companyTarget),
       successRate: rate(today),
       successDeltaPercent: rate(today) - rate(yesterday),
       p95LatencyMs: currentP95,
@@ -139,9 +124,111 @@ export function createDatabaseOverview(period: Period, database: PlatformDatabas
       firstTokenLatencyMs: rounded(sum(todayFirstToken, (item) => item) / Math.max(1, todayFirstToken.length)),
     },
     trend,
-    alerts,
     people,
     channels,
     limits: { mode: 'soft', blocking: false },
   }
+}
+
+type NewApiOverviewRecord = {
+  occurredAt: string
+  status: 'succeeded' | 'failed'
+  inputTokens: number
+  outputTokens: number
+  latencyMs: number
+  userId: string
+  userName: string
+  model: string
+  channelId: string
+  channelName: string
+  channelType: 'production' | 'experiment'
+}
+
+function newApiOverviewRecord(record: NewApiLogRecord): NewApiOverviewRecord {
+  const channelName = record.channelName || `New API channel ${record.channelId ?? 'unknown'}`
+  const cpa = channelName.toLocaleLowerCase('en-US').includes('cpa')
+  return {
+    occurredAt: record.occurredAt ?? new Date(0).toISOString(),
+    status: record.type === 2 ? 'succeeded' : 'failed',
+    inputTokens: record.promptTokens,
+    outputTokens: record.completionTokens,
+    latencyMs: Math.max(0, Math.round(record.useTime)),
+    userId: record.userId ?? 'unknown',
+    userName: record.username ?? 'New API 用户',
+    model: record.modelName || 'unknown-model',
+    channelId: record.channelId ?? 'unknown',
+    channelName,
+    channelType: cpa ? 'experiment' : 'production',
+  }
+}
+
+export function createNewApiOverview(period: Period, reader: Pick<NewApiDatabaseReader, 'listLogs'>, now = new Date(), newApi: NewApiStatus = { state: 'ready', authConfigured: false, checkedAt: now.toISOString() }, scope: DataScope = { mode: 'global' }): OverviewResponse {
+  const records = reader.listLogs().map(newApiOverviewRecord).filter((item) => isDepartmentVisible(scope, 'unassigned'))
+  const todayKey = shanghaiDate(now)
+  const yesterdayKey = shanghaiDate(new Date(now.getTime() - 86_400_000))
+  const monthStart = `${todayKey.slice(0, 7)}-01`
+  const today = records.filter((item) => shanghaiDate(item.occurredAt) === todayKey)
+  const yesterday = records.filter((item) => shanghaiDate(item.occurredAt) === yesterdayKey)
+  const month = records.filter((item) => shanghaiDate(item.occurredAt) >= monthStart)
+  const todayTokens = sum(today, (item) => item.inputTokens + item.outputTokens)
+  const yesterdayTokens = sum(yesterday, (item) => item.inputTokens + item.outputTokens)
+  const todayLatency = today.map((item) => item.latencyMs)
+  const yesterdayLatency = yesterday.map((item) => item.latencyMs)
+  const dates = datesFor(period, now)
+  const visibleDates = new Set(dates.map((item) => item.key))
+  const visibleRecords = records.filter((item) => visibleDates.has(shanghaiDate(item.occurredAt)))
+  const trend = dates.map(({ key, label }) => ({ date: label, requests: visibleRecords.filter((item) => shanghaiDate(item.occurredAt) === key).length }))
+
+  const people = [...new Map(month.map((item) => [item.userId, item])).values()].map((person) => {
+    const items = month.filter((item) => item.userId === person.userId)
+    return {
+      id: `person-${person.userId}`,
+      name: person.userName,
+      initials: person.userName.slice(0, 1) || '用',
+      department: '未分配',
+      purpose: items[0]?.model ?? '暂无调用',
+      requests: items.length,
+      tokens: sum(items, (item) => item.inputTokens + item.outputTokens),
+      tone: tones[0],
+    }
+  }).filter((person) => person.requests > 0).sort((left, right) => right.requests - left.requests).slice(0, 5).map((person, index) => ({ ...person, tone: tones[index % tones.length] ?? 'coral' }))
+
+  const channels = [...new Map(visibleRecords.map((item) => [item.channelId, item])).keys()].map((id) => {
+    const items = visibleRecords.filter((item) => item.channelId === id)
+    const successRate = rate(items)
+    const type = items[0]?.channelType ?? 'production'
+    return {
+      id: `new-api-channel-${id}`,
+      name: items[0]?.channelName ?? id,
+      model: items[0]?.model ?? 'unknown-model',
+      type,
+      status: type === 'experiment' && successRate < 100 ? 'auth_required' as const : 'healthy' as const,
+      latencyMs: rounded(percentile(items.map((item) => item.latencyMs), .95)),
+      successRate,
+      requests: items.length,
+    }
+  }).sort((left, right) => right.requests - left.requests)
+
+  const currentP95 = rounded(percentile(todayLatency, .95))
+  const previousP95 = rounded(percentile(yesterdayLatency, .95))
+  return overviewResponseSchema.parse({
+    meta: { source: 'new_api', simulated: false, generatedAt: now.toISOString(), timezone: 'Asia/Shanghai', period, notice: `核心指标、趋势、人员排行和渠道摘要来自 New API SQLite 网关日志；对话正文和审计记录仍由 AI OPS 本地库保存。${scopeNotice(scope)}` },
+    service: { bff: 'healthy', newApi },
+    metrics: {
+      todayRequests: today.length,
+      todayRequestDeltaPercent: percentageDelta(today.length, yesterday.length),
+      inputTokens: sum(today, (item) => item.inputTokens),
+      outputTokens: sum(today, (item) => item.outputTokens),
+      tokenDeltaPercent: percentageDelta(todayTokens, yesterdayTokens),
+      successRate: rate(today),
+      successDeltaPercent: rate(today) - rate(yesterday),
+      p95LatencyMs: currentP95,
+      p95LatencyDeltaMs: currentP95 - previousP95,
+      firstTokenLatencyMs: 0,
+    },
+    trend,
+    people,
+    channels,
+    limits: { mode: 'soft', blocking: false },
+  })
 }

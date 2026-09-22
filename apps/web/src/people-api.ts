@@ -5,7 +5,7 @@ import { quotaUpdateBodySchema, quotaUpdateResponseSchema, type QuotaUpdateBody,
 export const peopleFilterSchema = z.object({
   search: z.string(),
   department: z.string(),
-  status: z.enum(['all', 'active', 'disabled', 'offboarding']),
+  status: z.enum(['all', 'active', 'disabled', 'offboarding', 'unknown', 'external_missing']),
   goal: z.enum(['all', 'normal', 'near', 'reached']),
   page: z.number().int().positive(),
   pageSize: z.number().int().positive().max(50),
@@ -13,7 +13,7 @@ export const peopleFilterSchema = z.object({
 
 export const peopleResponseSchema = z.object({
   meta: z.object({
-    source: z.enum(['demo', 'database']),
+    source: z.enum(['demo', 'database', 'new_api']),
     generatedAt: z.string(),
     timezone: z.literal('Asia/Shanghai'),
     notice: z.string(),
@@ -23,6 +23,8 @@ export const peopleResponseSchema = z.object({
     active: z.number().int().nonnegative(),
     disabled: z.number().int().nonnegative(),
     offboarding: z.number().int().nonnegative(),
+    unknown: z.number().int().nonnegative().optional(),
+    externalMissing: z.number().int().nonnegative().optional(),
     departments: z.number().int().nonnegative(),
   }),
   departments: z.array(z.object({
@@ -39,7 +41,8 @@ export const peopleResponseSchema = z.object({
     department: z.object({ id: z.string(), name: z.string() }),
     title: z.string(),
     manager: z.string(),
-    status: z.enum(['active', 'disabled', 'offboarding']),
+    status: z.enum(['active', 'disabled', 'offboarding', 'unknown', 'external_missing']),
+    username: z.string().nullable().optional(), externalUserId: z.string().nullable().optional(), source: z.enum(['new-api', 'local']).optional(), syncState: z.enum(['synced', 'external_missing', 'stale']).optional(), createdAt: z.string().nullable().optional(), lastUsedAt: z.string().nullable().optional(),
     keyCount: z.number().int().nonnegative(),
     goal: z.object({
       used: z.number().int().nonnegative(),
@@ -56,10 +59,10 @@ export const peopleResponseSchema = z.object({
 })
 
 export const personDetailResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'database', 'new_api']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
   profile: z.object({
     id: z.string(), name: z.string(), initials: z.string(), department: z.object({ id: z.string(), name: z.string() }), title: z.string(), manager: z.string(),
-    status: z.enum(['active', 'disabled', 'offboarding']), keyCount: z.number().int().nonnegative(),
+    status: z.enum(['active', 'disabled', 'offboarding', 'unknown', 'external_missing']), username: z.string().nullable().optional(), externalUserId: z.string().nullable().optional(), source: z.enum(['new-api', 'local']).optional(), syncState: z.enum(['synced', 'external_missing', 'stale']).optional(), createdAt: z.string().nullable().optional(), lastUsedAt: z.string().nullable().optional(), keyCount: z.number().int().nonnegative(),
     goal: z.object({ used: z.number().int().nonnegative(), limit: z.number().int().positive(), percent: z.number().min(0), state: z.enum(['normal', 'near', 'reached']) }),
     lastActiveAt: z.string().nullable(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
   }),
@@ -68,14 +71,41 @@ export const personDetailResponseSchema = z.object({
     monthPointLimit: z.number().int().positive(), successRate: z.number().min(0).max(100), p95LatencyMs: z.number().int().nonnegative(),
   }),
   keys: z.array(z.object({
-    id: z.string(), masked: z.string(), purpose: z.string(), model: z.string(), status: z.enum(['active', 'disabled']), models: z.array(z.string()), expiresAt: z.string(), lastUsedAt: z.string().nullable(),
+    id: z.string(), masked: z.string(), purpose: z.string(), model: z.string(), status: z.enum(['active', 'disabled']), models: z.array(z.string()), expiresAt: z.string().nullable(), lastUsedAt: z.string().nullable(),
     usage: z.object({ requests: z.number().int().nonnegative(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }),
   })),
 })
 
 export const personUsageResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), period: z.enum(['7d', '30d']) }),
-  items: z.array(z.object({ date: z.string(), requests: z.number().int().nonnegative(), tokens: z.number().int().nonnegative(), points: z.number().int().nonnegative() })),
+  meta: z.object({ source: z.enum(['demo', 'database', 'new_api']), generatedAt: z.string(), timezone: z.literal('Asia/Shanghai'), period: z.enum(['1d', '7d', '30d']) }),
+  summary: z.object({
+    requests: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+  }),
+  items: z.array(z.object({ date: z.string(), requests: z.number().int().nonnegative(), inputTokens: z.number().int().nonnegative().default(0), outputTokens: z.number().int().nonnegative().default(0), tokens: z.number().int().nonnegative(), points: z.number().int().nonnegative() })),
+  modelItems: z.array(z.object({
+    model: z.string(),
+    summary: z.object({
+      requests: z.number().int().nonnegative(),
+      inputTokens: z.number().int().nonnegative(),
+      outputTokens: z.number().int().nonnegative(),
+      totalTokens: z.number().int().nonnegative(),
+    }),
+    items: z.array(z.object({ date: z.string(), requests: z.number().int().nonnegative(), inputTokens: z.number().int().nonnegative().default(0), outputTokens: z.number().int().nonnegative().default(0), tokens: z.number().int().nonnegative(), points: z.number().int().nonnegative() })),
+  })),
+  breakdown: z.array(z.object({
+    keyId: z.string(),
+    masked: z.string(),
+    purpose: z.string(),
+    model: z.string(),
+    alias: z.string(),
+    requests: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+  })),
 })
 
 export type PeopleFilters = z.infer<typeof peopleFilterSchema>
@@ -86,7 +116,7 @@ export const personCreateBodySchema = z.object({
   password: z.string().min(8).max(200).optional(),
 })
 export const personCreateResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['database', 'new_api']), createdAt: z.string(), notice: z.string() }),
   person: z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) }),
   operation: z.object({ auditEventId: z.string() }),
 })
@@ -95,28 +125,37 @@ export const personBatchCreateBodySchema = z.object({
   items: z.array(personCreateBodySchema.partial({ username: true, password: true }).required({ displayName: true, departmentId: true })).min(1).max(200),
 })
 export const personBatchCreateResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), createdAt: z.string(), notice: z.string(), createdCount: z.number().int().positive() }),
+  meta: z.object({ source: z.enum(['database', 'new_api']), createdAt: z.string(), notice: z.string(), createdCount: z.number().int().positive() }),
   people: z.array(z.object({ id: z.string(), username: z.string(), displayName: z.string(), department: z.object({ id: z.string(), name: z.string() }) })),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
 export const personDisableBodySchema = z.object({
   idempotencyKey: z.string().regex(/^person-disable-[a-z0-9-]{8,96}$/),
-  reason: z.string().trim().min(8).max(200),
   acknowledgeImpact: z.literal(true),
 })
 export const personDisableResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['database', 'new_api']), completedAt: z.string(), notice: z.string() }),
   person: z.object({ id: z.string(), name: z.string(), status: z.literal('disabled') }),
   keysDisabled: z.number().int().nonnegative(),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
+export const personEnableBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^person-enable-[a-z0-9-]{8,96}$/),
+  acknowledgeImpact: z.literal(true),
+})
+export const personEnableResponseSchema = z.object({
+  meta: z.object({ source: z.enum(['database', 'new_api']), completedAt: z.string(), notice: z.string() }),
+  person: z.object({ id: z.string(), name: z.string(), status: z.literal('active') }),
+  keysEnabled: z.number().int().nonnegative(),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
+})
 export const personDeleteBodySchema = z.object({
   idempotencyKey: z.string().regex(/^person-delete-[a-z0-9-]{8,96}$/),
-  reason: z.string().trim().min(8).max(200),
+  reason: z.union([z.literal(''), z.string().trim().min(8).max(200)]).optional().default(''),
   acknowledgeImpact: z.literal(true),
 })
 export const personDeleteResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), completedAt: z.string(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['database', 'new_api']), completedAt: z.string(), notice: z.string() }),
   person: z.object({ id: z.string(), name: z.string(), status: z.literal('deleted') }),
   operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
 })
@@ -127,6 +166,8 @@ export type PersonBatchCreateBody = z.infer<typeof personBatchCreateBodySchema>
 export type PersonBatchCreateResponse = z.infer<typeof personBatchCreateResponseSchema>
 export type PersonDisableBody = z.infer<typeof personDisableBodySchema>
 export type PersonDisableResponse = z.infer<typeof personDisableResponseSchema>
+export type PersonEnableBody = z.infer<typeof personEnableBodySchema>
+export type PersonEnableResponse = z.infer<typeof personEnableResponseSchema>
 export type PersonDeleteBody = z.infer<typeof personDeleteBodySchema>
 export type PersonDeleteResponse = z.infer<typeof personDeleteResponseSchema>
 export type PersonGoalUpdateBody = QuotaUpdateBody
@@ -135,6 +176,23 @@ export type Person = PeopleResponse['items'][number]
 export type PersonDetailResponse = z.infer<typeof personDetailResponseSchema>
 export type PersonUsageResponse = z.infer<typeof personUsageResponseSchema>
 export type PersonUsagePeriod = PersonUsageResponse['meta']['period']
+
+const personSyncPersonSchema = z.object({
+  id: z.string(), externalUserId: z.string(), name: z.string(), department: z.object({ id: z.string(), name: z.string() }),
+  username: z.string().nullable(), status: z.enum(['active', 'disabled', 'unknown']), createdAt: z.string().nullable(), lastUsedAt: z.string().nullable(), syncState: z.enum(['synced', 'external_missing', 'stale']),
+})
+const personSyncSummarySchema = z.object({ total: z.number().int().nonnegative(), added: z.number().int().nonnegative(), changed: z.number().int().nonnegative(), missing: z.number().int().nonnegative(), unknown: z.number().int().nonnegative(), unchanged: z.number().int().nonnegative(), skipped: z.number().int().nonnegative() })
+const personSyncPreviewResponseSchema = z.object({
+  meta: z.object({ source: z.literal('new-api'), generatedAt: z.string(), stale: z.boolean(), notice: z.string() }),
+  summary: personSyncSummarySchema,
+  items: z.array(z.object({ action: z.enum(['add', 'update', 'missing', 'unknown', 'unchanged']), person: personSyncPersonSchema, changes: z.array(z.string()) })),
+})
+const personSyncBodySchema = z.object({ idempotencyKey: z.string().regex(/^people-sync-[a-z0-9-]{8,96}$/) })
+const personSyncResponseSchema = personSyncPreviewResponseSchema.extend({ operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }) })
+
+export type PersonSyncPreviewResponse = z.infer<typeof personSyncPreviewResponseSchema>
+export type PersonSyncBody = z.infer<typeof personSyncBodySchema>
+export type PersonSyncResponse = z.infer<typeof personSyncResponseSchema>
 
 export class PeopleApiError extends Error {
   constructor(message: string, readonly requestId?: string) {
@@ -159,6 +217,31 @@ export async function fetchPeople(filters: PeopleFilters, signal?: AbortSignal):
 
   const result = peopleResponseSchema.safeParse(await response.json())
   if (!result.success) throw new PeopleApiError('人员数据格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function fetchPeopleSyncPreview(signal?: AbortSignal): Promise<PersonSyncPreviewResponse> {
+  const response = await fetch('/api/people/sync/preview', { headers: { accept: 'application/json' }, signal })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '人员同步预览暂时无法加载', requestId)
+  }
+  const result = personSyncPreviewResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('人员同步预览格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function syncPeople(payload: PersonSyncBody): Promise<PersonSyncResponse> {
+  const body = personSyncBodySchema.parse(payload)
+  const response = await fetch('/api/people/sync', { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '人员同步未完成', requestId)
+  }
+  const result = personSyncResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('人员同步响应格式不符合接口约定', requestId)
   return result.data
 }
 
@@ -198,6 +281,19 @@ export async function disablePerson(id: string, payload: PersonDisableBody): Pro
   }
   const result = personDisableResponseSchema.safeParse(await response.json())
   if (!result.success) throw new PeopleApiError('停用人员响应格式不符合接口约定', requestId)
+  return result.data
+}
+
+export async function enablePerson(id: string, payload: PersonEnableBody): Promise<PersonEnableResponse> {
+  const body = personEnableBodySchema.parse(payload)
+  const response = await fetch(`/api/people/${encodeURIComponent(id)}/enable`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body) })
+  const requestId = response.headers.get('x-request-id') ?? undefined
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null) as { error?: { message?: string } } | null
+    throw new PeopleApiError(detail?.error?.message ?? '启用人员失败', requestId)
+  }
+  const result = personEnableResponseSchema.safeParse(await response.json())
+  if (!result.success) throw new PeopleApiError('启用人员响应格式不符合接口约定', requestId)
   return result.data
 }
 

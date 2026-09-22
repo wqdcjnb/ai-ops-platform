@@ -59,7 +59,8 @@ export async function login(username: string, password: string, signal?: AbortSi
 export async function bootstrapAdmin(signal?: AbortSignal) {
   return parseAuthResponse(await fetch('/api/auth/bootstrap', {
     method: 'POST',
-    headers: { accept: 'application/json' },
+    headers: { accept: 'application/json', 'content-type': 'application/json' },
+    body: '{}',
     signal,
   }), '自动进入管理控制台失败')
 }

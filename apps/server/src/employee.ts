@@ -58,12 +58,14 @@ const commonErrors = [
 ]
 
 const connection = {
-  baseUrl: 'http://127.0.0.1:3000/v1',
+  // Employee clients must use the AI OPS gateway so conversation capture is
+  // on the request path; the gateway forwards to New API internally.
+  baseUrl: process.env.AI_OPS_PUBLIC_GATEWAY_BASE_URL?.trim() || 'http://127.0.0.1:4175/v1',
   credentialDelivery: '完整个人 Key 仅在创建时通过受控渠道交付；页面不支持再次显示或复制。',
   upstreamDetailsAvailable: false as const,
   guides: [
-    { id: 'codex' as const, name: 'Codex Desktop', description: '使用 OpenAI 兼容接口连接个人授权模型。', steps: ['在客户端打开模型提供商设置', '将 Base URL 设置为平台统一地址', '粘贴受控渠道收到的个人 Key', '模型填写“可用模型”中的业务别名'] },
-    { id: 'workbuddy' as const, name: 'WorkBuddy', description: '按用途配置个人 Key 与业务模型别名。', steps: ['新建 OpenAI 兼容连接', '填写平台统一 Base URL', '粘贴个人 Key 并保存', '发送测试消息并记录失败请求 ID'] },
+    { id: 'codex' as const, name: 'Codex Desktop', description: '使用 OpenAI 兼容接口连接个人授权模型。', steps: ['在客户端打开模型提供商设置', '将 Base URL 设置为 AI OPS 网关统一地址', '粘贴受控渠道收到的个人 Key', '模型填写“可用模型”中的业务别名'] },
+    { id: 'workbuddy' as const, name: 'WorkBuddy', description: '按用途配置个人 Key 与业务模型别名。', steps: ['新建 OpenAI 兼容连接', '填写 AI OPS 网关统一 Base URL', '粘贴个人 Key 并保存', '发送测试消息并记录失败请求 ID'] },
   ],
 }
 

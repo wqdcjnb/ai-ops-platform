@@ -3,7 +3,7 @@ import type { NewApiStatus } from './new-api-status.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const modelsQuerySchema = z.object({
-  source: z.enum(['demo', 'new_api']).default('demo'),
+  source: z.enum(['demo', 'new_api', 'cpa']).default('demo'),
   search: z.string().trim().max(60).default(''),
   capability: z.enum(['all', 'text', 'reasoning', 'translation', 'vision', 'batch']).default('all'),
   environment: z.enum(['all', 'production', 'experiment', 'unassigned']).default('all'),
@@ -11,7 +11,7 @@ export const modelsQuerySchema = z.object({
 })
 
 export const channelsQuerySchema = z.object({
-  source: z.enum(['demo', 'new_api']).default('demo'),
+  source: z.enum(['demo', 'new_api', 'cpa']).default('demo'),
   environment: z.enum(['all', 'production', 'experiment', 'unassigned']).default('all'),
   status: z.enum(['all', 'healthy', 'degraded', 'offline', 'unverified']).default('all'),
 })
@@ -30,6 +30,21 @@ export const modelItemSchema = z.object({
   pricing: z.object({ inputPerMillion: z.number().nonnegative(), outputPerMillion: z.number().nonnegative(), currency: z.literal('USD'), basis: z.enum(['official', 'estimated']), updatedAt: z.string().datetime() }).nullable(),
   purposes: z.array(z.object({ name: z.string(), alias: z.string(), role: z.enum(['primary', 'fallback']) })),
   channelIds: z.array(z.string()),
+  // Optional live provenance fields. Legacy/demo adapters may omit them.
+  channels: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+    provider: z.string().optional(),
+    source: z.enum(['cpa_auth_file', 'new_api']).optional(),
+  })).optional(),
+  testResult: z.object({
+    status: z.enum(['passed', 'failed', 'not_tested', 'unavailable']),
+    latencyMs: z.number().int().nonnegative().nullable(),
+    testedAt: z.string().datetime().nullable(),
+    channelId: z.string().nullable(),
+    message: z.string().nullable(),
+    testPath: z.string().nullable(),
+  }).optional(),
 })
 
 export const channelItemSchema = z.object({
@@ -50,7 +65,7 @@ export const channelItemSchema = z.object({
 })
 
 export const modelsResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'new_api']), generatedAt: z.string().datetime(), notice: z.string() }),
+  meta: z.object({ source: z.enum(['demo', 'new_api', 'cpa']), generatedAt: z.string().datetime(), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), available: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), production: z.number().int().nonnegative(), experiment: z.number().int().nonnegative() }),
   options: z.object({ capabilities: z.array(z.object({ id: z.enum(['text', 'reasoning', 'translation', 'vision', 'batch']), label: z.string() })) }),
   items: z.array(modelItemSchema),
@@ -58,7 +73,7 @@ export const modelsResponseSchema = z.object({
 })
 
 export const channelsResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'new_api']), generatedAt: z.string().datetime(), notice: z.string(), healthCacheSeconds: z.number().int().nonnegative() }),
+  meta: z.object({ source: z.enum(['demo', 'new_api', 'cpa']), generatedAt: z.string().datetime(), notice: z.string(), healthCacheSeconds: z.number().int().nonnegative() }),
   summary: z.object({ total: z.number().int().nonnegative(), healthy: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }),
   items: z.array(channelItemSchema),
   total: z.number().int().nonnegative(),

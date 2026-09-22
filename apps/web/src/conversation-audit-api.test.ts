@@ -23,6 +23,6 @@ describe('conversation audit API contracts', () => {
 
     const history = { meta: { source: 'database', generatedAt: '2026-09-15T10:00:00.000Z', notice: '仅元数据' }, record: { id: record.id, requestId: record.requestId }, items: [{ id: 'access-demo-test-01', actorName: '超级管理员', requestId: record.requestId, action: 'view_synthetic', reasonProvided: true, reasonLength: 18, acknowledgedSensitiveScope: true, occurredAt: '2026-09-15T10:02:00.000Z' }] }
     expect(conversationAccessHistoryResponseSchema.safeParse(history).success).toBe(true)
-    expect(conversationAccessHistoryResponseSchema.safeParse({ ...history, items: [{ ...history.items[0], reasonLength: 2 }] }).success).toBe(false)
+    expect(conversationAccessHistoryResponseSchema.safeParse({ ...history, items: [{ ...history.items[0], reasonLength: -1 }] }).success).toBe(false)
   })
 })

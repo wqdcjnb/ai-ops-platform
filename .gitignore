@@ -6,6 +6,7 @@
 *.pem
 *.key
 auth/
+auths/
 credentials/
 secrets/
 
@@ -29,6 +30,19 @@ coverage/
 /apps/web/playwright-report/
 /apps/web/test-results/
 /output/
+/outputs/
+
+# Project-managed CPA/New API runtime state. These files contain OAuth,
+# management keys, session secrets, SQLite data and service logs.
+/deploy/cpa/config.yaml
+/deploy/cpa/.env
+/deploy/cpa/auths/
+/deploy/cpa/logs/
+/deploy/cpa/plugins/
+/deploy/cpa/static/
+/deploy/new-api/.env
+/deploy/new-api/data/
+/deploy/new-api/logs/
 
 # Local tools and editors
 .playwright-cli/

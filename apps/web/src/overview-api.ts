@@ -29,20 +29,15 @@ export const overviewResponseSchema = z.object({
     inputTokens: z.number(),
     outputTokens: z.number(),
     tokenDeltaPercent: z.number(),
-    monthPoints: z.number(),
-    monthPointLimit: z.number(),
     successRate: z.number(),
     successDeltaPercent: z.number(),
     p95LatencyMs: z.number(),
     p95LatencyDeltaMs: z.number(),
     firstTokenLatencyMs: z.number(),
   }),
-  trend: z.array(z.object({ date: z.string(), requests: z.number(), points: z.number() })),
-  alerts: z.array(z.object({
-    id: z.string(), level: z.enum(['warning', 'danger', 'experiment']), title: z.string(), detail: z.string(), occurredAt: z.string(), action: z.string(),
-  })),
+  trend: z.array(z.object({ date: z.string(), requests: z.number() })),
   people: z.array(z.object({
-    id: z.string(), name: z.string(), initials: z.string(), department: z.string(), purpose: z.string(), requests: z.number(), usagePercent: z.number(), points: z.number(), targetConfigured: z.boolean(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
+    id: z.string(), name: z.string(), initials: z.string(), department: z.string(), purpose: z.string(), requests: z.number(), tokens: z.number(), tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
   })),
   channels: z.array(z.object({
     id: z.string(), name: z.string(), model: z.string(), type: z.enum(['production', 'experiment']), status: z.enum(['healthy', 'auth_required']), latencyMs: z.number().nullable(), successRate: z.number(), requests: z.number(),

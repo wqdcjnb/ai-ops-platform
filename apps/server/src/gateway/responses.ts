@@ -5,7 +5,7 @@ import { z } from 'zod'
 // Responses input items are deliberately permissive. Native Responses clients
 // send typed items such as `message`, `function_call` and `file_search_call`,
 // while the legacy compatibility path only needs role/content pairs.
-const responseInputItemSchema = z.record(z.unknown())
+const responseInputItemSchema = z.record(z.string(), z.unknown())
 
 export const responsesRequestSchema = z.object({
   model: z.string().trim().min(1).max(128),
@@ -20,7 +20,7 @@ export const responsesRequestSchema = z.object({
 // CPA may return additional Responses fields (or omit the SDK-only
 // `output_text` convenience field). Keep the gateway response transparent so
 // Codex clients receive the native payload unchanged.
-export const responsesResponseSchema = z.record(z.unknown())
+export const responsesResponseSchema = z.record(z.string(), z.unknown())
 
 export type ResponsesRequest = z.infer<typeof responsesRequestSchema>
 

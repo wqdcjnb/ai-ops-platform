@@ -1,11 +1,12 @@
 import { z } from 'zod'
 import type { NewApiStatus } from './new-api-status.js'
+import type { NewApiDatabaseReader, NewApiLogRecord } from './new-api-database.js'
 import { isDepartmentVisible, scopeNotice, type DataScope } from './data-scope.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 const optionSchema = z.object({ id: z.string(), label: z.string() })
 const costTypeSchema = z.enum(['official_actual', 'platform_estimate', 'cpa_estimate'])
-const metadataSourceSchema = z.literal('database')
+const metadataSourceSchema = z.enum(['database', 'new_api'])
 
 export const usageQuerySchema = z.object({
   period: z.enum(['today', '7d', '30d']).default('7d'),
@@ -74,6 +75,8 @@ export type UsageDetailResponse = z.infer<typeof usageDetailResponseSchema>
 type UsageItem = z.infer<typeof usageItemSchema>
 type UsageRecord = ReturnType<PlatformDatabase['listUsageRequests']>[number]
 
+export type NewApiUsageReader = Pick<NewApiDatabaseReader, 'listLogs'>
+
 const costLabel = { official_actual: '官方实际', platform_estimate: '平台估算', cpa_estimate: 'CPA 估算' } as const
 const periodMinutes = (period: UsageQuery['period']) => period === 'today' ? 24 * 60 : period === '7d' ? 7 * 24 * 60 : 30 * 24 * 60
 const round = (value: number, digits = 2) => Number(value.toFixed(digits))
@@ -95,6 +98,36 @@ function toItem(record: UsageRecord): UsageItem {
     cost: { type: record.costType, amountUsd: record.costAmountUsd, label: costLabel[record.costType] },
     status: record.status,
     error: record.errorCategory && record.errorSummary ? { category: record.errorCategory, summary: record.errorSummary } : null,
+    conversationContentAvailable: false,
+  }
+}
+
+function newApiItem(record: NewApiLogRecord): UsageItem {
+  const model = record.modelName || 'unknown-model'
+  const channelId = record.channelId ?? 'unknown'
+  const channelName = record.channelName || `New API channel ${channelId}`
+  const channelType = channelName.toLocaleLowerCase('en-US').includes('cpa') ? 'cpa_oauth' as const : 'official_api' as const
+  const status = record.type === 2 ? 'succeeded' as const : 'failed' as const
+  const personId = `person-${record.userId ?? 'unknown'}`
+  const keyId = `key-new-api-${record.tokenId ?? 'unknown'}`
+  const purposeName = record.tokenName || record.group || 'New API'
+  const totalLatencyMs = Math.max(0, Math.round(record.useTime))
+  return {
+    requestId: record.requestId,
+    occurredAt: record.occurredAt ?? new Date(0).toISOString(),
+    person: { id: personId, name: record.username || 'New API 用户', department: { id: 'unassigned', name: '未分配' } },
+    key: { id: keyId, masked: record.tokenName ? `New API Token · ${record.tokenName}` : 'New API Token' },
+    purpose: { id: `purpose-${encodeURIComponent(purposeName)}`, name: purposeName, alias: purposeName },
+    model: { id: `new-api-model-${encodeURIComponent(model)}`, displayName: model, actualModel: model },
+    channel: { id: `new-api-channel-${channelId}`, name: channelName, type: channelType },
+    protocol: 'chat_completions',
+    streamed: record.streamed,
+    tokens: { input: record.promptTokens, output: record.completionTokens, total: record.promptTokens + record.completionTokens },
+    points: record.quota,
+    latency: { firstTokenMs: null, totalMs: totalLatencyMs },
+    cost: { type: channelType === 'cpa_oauth' ? 'cpa_estimate' : 'official_actual', amountUsd: 0, label: channelType === 'cpa_oauth' ? costLabel.cpa_estimate : costLabel.official_actual },
+    status,
+    error: status === 'failed' ? { category: 'server' as const, summary: `New API request type ${record.type ?? 'unknown'}` } : null,
     conversationContentAvailable: false,
   }
 }
@@ -171,6 +204,62 @@ export function createDatabaseUsageDetail(database: PlatformDatabase, requestId:
     route: { alias: record.routeAlias, retryCount: record.retryCount, requestIdPropagated: Boolean(record.requestIdPropagated) },
     client: { name: record.clientName, mode: record.clientMode },
     content: { stored: false, reason: '调用日志仅保存模拟的脱敏元数据；不保存认证 Header、完整 Key、请求正文或对话正文。' },
+    conversationAudit,
+  })
+}
+
+export function createNewApiUsage(reader: NewApiUsageReader, query: UsageQuery, now = new Date(), scope: DataScope = { mode: 'global' }): UsageResponse {
+  const all = reader.listLogs().map(newApiItem).filter((item) => isDepartmentVisible(scope, item.person.department.id))
+  const cutoff = now.getTime() - periodMinutes(query.period) * 60_000
+  const search = query.search.toLocaleLowerCase('zh-CN')
+  const filtered = all.filter((item) => {
+    const matchesSearch = !search || [item.requestId, item.key.masked, item.person.name, item.purpose.alias, item.model.actualModel].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
+    return new Date(item.occurredAt).getTime() >= cutoff && matchesSearch &&
+      (query.person === 'all' || item.person.id === query.person) &&
+      (query.department === 'all' || item.person.department.id === query.department) &&
+      (query.purpose === 'all' || item.purpose.id === query.purpose) &&
+      (query.key === 'all' || item.key.id === query.key) &&
+      (query.model === 'all' || item.model.id === query.model) &&
+      (query.channel === 'all' || item.channel.id === query.channel) &&
+      (query.status === 'all' || item.status === query.status) &&
+      (query.costType === 'all' || item.cost.type === query.costType)
+  })
+  const latency = filtered.map((item) => item.latency.totalMs).sort((a, b) => a - b)
+  const p95 = latency.length ? latency[Math.min(latency.length - 1, Math.ceil(latency.length * .95) - 1)]! : 0
+  const start = (query.page - 1) * query.pageSize
+  const costs = (type: UsageItem['cost']['type']) => round(filtered.filter((item) => item.cost.type === type).reduce((sum, item) => sum + item.cost.amountUsd, 0), 5)
+  return usageResponseSchema.parse({
+    meta: { source: 'new_api', simulated: false, generatedAt: now.toISOString(), period: query.period, notice: `当前读取 New API SQLite 中的真实网关日志；不读取 AI OPS 本地用量镜像。${scopeNotice(scope)}` },
+    summary: {
+      requests: filtered.length,
+      tokens: filtered.reduce((sum, item) => sum + item.tokens.total, 0),
+      points: round(filtered.reduce((sum, item) => sum + item.points, 0), 1),
+      successRate: filtered.length ? round(filtered.filter((item) => item.status === 'succeeded').length / filtered.length * 100, 1) : 0,
+      p95LatencyMs: p95,
+      costs: { officialActualUsd: costs('official_actual'), platformEstimateUsd: costs('platform_estimate'), cpaEstimateUsd: costs('cpa_estimate') },
+    },
+    options: optionsFor(all),
+    items: filtered.slice(start, start + query.pageSize),
+    pagination: { page: query.page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
+  })
+}
+
+export function createNewApiUsageDetail(reader: NewApiUsageReader, database: PlatformDatabase, requestId: string, now = new Date(), canAccessConversationAudit = false): UsageDetailResponse | null {
+  const record = reader.listLogs().find((item) => item.requestId === requestId)
+  if (!record) return null
+  const item = newApiItem(record)
+  const conversationLink = canAccessConversationAudit ? database.getUsageConversationLink(requestId) : null
+  const conversationAudit = !canAccessConversationAudit
+    ? { accessible: false, recordId: null, href: null, source: 'not_authorized' as const, notice: '当前角色没有对话审计权限。' }
+    : conversationLink
+      ? { accessible: true, recordId: conversationLink.recordId, href: `/conversation-audit?recordId=${encodeURIComponent(conversationLink.recordId)}`, source: conversationLink.linkSource, notice: '对话审计映射仍保存在 AI OPS 本地审计库。' }
+      : { accessible: false, recordId: null, href: null, source: 'unavailable' as const, notice: '当前 New API 日志没有关联的对话审计记录。' }
+  return usageDetailResponseSchema.parse({
+    meta: { source: 'new_api', simulated: false, generatedAt: now.toISOString(), notice: '当前读取 New API SQLite 中的真实网关日志；对话正文不保存。' },
+    item,
+    route: { alias: item.model.actualModel, retryCount: 0, requestIdPropagated: Boolean(record.upstreamRequestId) },
+    client: { name: 'WorkBuddy', mode: item.streamed ? 'stream' : 'non_stream' },
+    content: { stored: false, reason: 'New API 日志只提供脱敏用量字段，不返回请求 Header、完整 Key 或对话正文。' },
     conversationAudit,
   })
 }

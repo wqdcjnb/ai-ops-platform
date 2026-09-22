@@ -1,25 +1,23 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { RouterLink } from 'vue-router'
 import {
   IconAlertTriangle,
+  IconBan,
   IconBuilding,
   IconChevronLeft,
   IconChevronRight,
   IconDownload,
   IconFileText,
   IconFilter,
-  IconKey,
   IconRefresh,
   IconSearch,
-  IconShieldCheck,
   IconUpload,
   IconUserCheck,
-  IconUserOff,
   IconUserPlus,
   IconUsers,
+  IconTrash,
 } from '@tabler/icons-vue'
-import { createPeopleBatch, createPerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonBatchCreateResponse, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
+import { createPeopleBatch, createPerson, deletePerson, disablePerson, enablePerson, fetchPeople, PeopleApiError, type PeopleFilters, type PeopleResponse, type Person, type PersonBatchCreateResponse, type PersonCreateBody, type PersonCreateResponse } from '../people-api'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 import { preflightPeopleImport, type PeopleImportRow, PEOPLE_IMPORT_HEADERS_ZH } from '../people-import'
 import { surnameInitial } from '../modules/people/person-display'
@@ -46,8 +44,19 @@ const importInput = ref<HTMLInputElement | null>(null)
 const batchResult = ref<PersonBatchCreateResponse | null>(null)
 const isImporting = ref(false)
 let activeRequest: AbortController | null = null
+let deleteCountdownTimer: ReturnType<typeof setInterval> | null = null
 
-const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '待回收' }
+type PersonAction = 'enable' | 'disable' | 'delete'
+type PendingPersonAction = { person: Person; action: Exclude<PersonAction, 'enable'> }
+const personActionValues: PersonAction[] = ['enable', 'disable', 'delete']
+const personActionLabels: Record<PersonAction, string> = { enable: '启用', disable: '停用', delete: '删除' }
+const personActionSelections = ref<Record<string, PersonAction>>({})
+const pendingPersonAction = ref<PendingPersonAction | null>(null)
+const personActionError = ref('')
+const isPersonActionLoading = ref(false)
+const deleteCountdown = ref(0)
+
+const statusLabels: Record<Person['status'], string> = { active: '在职', disabled: '已停用', offboarding: '待回收', unknown: '未知', external_missing: '外部已找不到' }
 const goalLabels: Record<Person['goal']['state'], string> = { normal: '正常', near: '接近目标', reached: '已达目标' }
 const totalPages = computed(() => Math.max(1, Math.ceil((people.value?.total ?? 0) / pageSize)))
 const rangeText = computed(() => {
@@ -61,13 +70,19 @@ const updatedAt = computed(() => {
   return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(people.value.meta.generatedAt))
 })
 const canImport = computed(() => importRows.value.length > 0 && !importRows.value.some((row) => row.error) && !importError.value && !isImporting.value)
+const syncPending = computed(() => Boolean(people.value?.meta.notice.includes('尚未同步')))
+const sourceBadge = computed(() => {
+  if (!people.value) return { label: '等待', className: 'pending' }
+  if (syncPending.value) return { label: '待同步', className: 'pending' }
+  if (people.value.items.some((person) => person.source === 'new-api')) return { label: 'AUTO', className: 'live' }
+  return { label: people.value.meta.source === 'database' ? 'LOCAL' : 'DEMO', className: people.value.meta.source === 'database' ? 'local' : 'demo' }
+})
 
 const summaryCards = computed(() => {
   const value = people.value?.summary
   return [
     { label: '全部人员', value: value?.total ?? '—', hint: `${value?.departments ?? '—'} 个部门`, icon: IconUsers, tone: 'teal' },
-    { label: '在职人员', value: value?.active ?? '—', hint: '可正常使用授权 Key', icon: IconUserCheck, tone: 'green' },
-    { label: '已停用', value: value?.disabled ?? '—', hint: '当前不可继续调用', icon: IconUserOff, tone: 'violet' },
+    { label: '在职人员', value: value?.active ?? '—', hint: '来自 New API 的启用状态', icon: IconUserCheck, tone: 'green' },
   ]
 })
 
@@ -78,6 +93,13 @@ function relativeTime(value: string | null) {
   if (minutes < 60) return `${minutes} 分钟前`
   if (minutes < 1440) return `${Math.round(minutes / 60)} 小时前`
   return `${Math.round(minutes / 1440)} 天前`
+}
+
+function formatDate(value: string | null | undefined) {
+  if (!value) return '未知'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '未知'
+  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
 }
 
 function currentFilters(): PeopleFilters {
@@ -113,6 +135,109 @@ function clearFilters() {
   status.value = 'all'
   goal.value = 'all'
   applyFilters()
+}
+
+function operationKey(prefix: string) {
+  return `${prefix}-${globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`
+}
+
+function actionSelection(person: Person): PersonAction {
+  const selected = personActionSelections.value[person.id]
+  return selected ?? (person.status === 'disabled' ? 'disable' : 'enable')
+}
+
+function actionValuesFor(_person: Person) {
+  return personActionValues
+}
+
+function resetPersonAction(person: Person) {
+  const next = { ...personActionSelections.value }
+  delete next[person.id]
+  personActionSelections.value = next
+}
+
+function clearDeleteCountdown() {
+  if (deleteCountdownTimer) {
+    clearInterval(deleteCountdownTimer)
+    deleteCountdownTimer = null
+  }
+  deleteCountdown.value = 0
+}
+
+function closePersonAction() {
+  if (isPersonActionLoading.value || !pendingPersonAction.value) return
+  resetPersonAction(pendingPersonAction.value.person)
+  pendingPersonAction.value = null
+  personActionError.value = ''
+  clearDeleteCountdown()
+}
+
+function openPersonAction(person: Person, action: Exclude<PersonAction, 'enable'>) {
+  pendingPersonAction.value = { person, action }
+  personActionError.value = ''
+  clearDeleteCountdown()
+  if (action === 'delete') {
+    deleteCountdown.value = 5
+    deleteCountdownTimer = setInterval(() => {
+      deleteCountdown.value = Math.max(0, deleteCountdown.value - 1)
+      if (deleteCountdown.value === 0) clearDeleteCountdown()
+    }, 1000)
+  }
+}
+
+async function enablePersonFromSlider(person: Person) {
+  if (isPersonActionLoading.value) return
+  if (person.status === 'active') {
+    resetPersonAction(person)
+    return
+  }
+  isPersonActionLoading.value = true
+  personActionError.value = ''
+  try {
+    await enablePerson(person.id, { idempotencyKey: operationKey('person-enable'), acknowledgeImpact: true })
+    resetPersonAction(person)
+    await loadPeople()
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    personActionError.value = `${error instanceof Error ? error.message : '启用人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+    resetPersonAction(person)
+  } finally {
+    isPersonActionLoading.value = false
+  }
+}
+
+function handlePersonActionInput(person: Person, index: number) {
+  const values = actionValuesFor(person)
+  const action = values[Math.max(0, Math.min(values.length - 1, index))] ?? 'enable'
+  personActionSelections.value = { ...personActionSelections.value, [person.id]: action }
+  if (action === 'enable') {
+    void enablePersonFromSlider(person)
+  } else {
+    openPersonAction(person, action)
+  }
+}
+
+async function confirmPersonAction() {
+  const pending = pendingPersonAction.value
+  if (!pending || isPersonActionLoading.value || (pending.action === 'delete' && deleteCountdown.value > 0)) return
+  isPersonActionLoading.value = true
+  personActionError.value = ''
+  try {
+    if (pending.action === 'disable') {
+      await disablePerson(pending.person.id, { idempotencyKey: operationKey('person-disable'), acknowledgeImpact: true })
+    } else {
+      await deletePerson(pending.person.id, { idempotencyKey: operationKey('person-delete'), reason: '', acknowledgeImpact: true })
+    }
+    resetPersonAction(pending.person)
+    pendingPersonAction.value = null
+    clearDeleteCountdown()
+    await loadPeople()
+  } catch (error) {
+    const requestId = error instanceof PeopleApiError ? error.requestId : undefined
+    personActionError.value = `${error instanceof Error ? error.message : pending.action === 'disable' ? '停用人员失败' : '删除人员失败'}${requestId ? ` · 请求 ID ${requestId}` : ''}`
+  } finally {
+    isPersonActionLoading.value = false
+  }
 }
 
 function goToPage(nextPage: number) {
@@ -223,7 +348,10 @@ const { cancel: cancelSearch } = useDebouncedSearch(search, () => {
 })
 
 onMounted(() => void loadPeople())
-onBeforeUnmount(() => activeRequest?.abort())
+onBeforeUnmount(() => {
+  activeRequest?.abort()
+  clearDeleteCountdown()
+})
 </script>
 
 <template>
@@ -243,7 +371,7 @@ onBeforeUnmount(() => activeRequest?.abort())
       </div>
     </section>
 
-    <div v-if="people" class="source-banner"><span>DEMO</span>{{ people.meta.notice }}</div>
+    <div v-if="people" class="source-banner"><span :class="sourceBadge.className">{{ sourceBadge.label }}</span>{{ people.meta.notice }}</div>
 
     <section class="people-summary-grid" aria-label="人员状态摘要">
       <article v-for="card in summaryCards" :key="card.label" class="metric-card people-summary-card">
@@ -255,9 +383,9 @@ onBeforeUnmount(() => activeRequest?.abort())
 
     <section class="panel people-panel-main">
       <form class="people-filters" @submit.prevent="applyFilters">
-        <label class="people-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索人员" type="search" maxlength="60" placeholder="搜索姓名、岗位或负责人" /></label>
+        <label class="people-search"><IconSearch :size="17" /><input v-model="search" aria-label="搜索姓名或岗位" type="search" maxlength="60" placeholder="搜索姓名或岗位" /></label>
         <label><IconBuilding :size="16" /><select v-model="department" @change="applyFilters"><option value="all">全部部门</option><option v-for="item in people?.departments ?? []" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <label><IconUsers :size="16" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">在职</option><option value="disabled">已停用</option></select></label>
+        <label><IconUsers :size="16" /><select v-model="status" @change="applyFilters"><option value="all">全部状态</option><option value="active">启用</option><option value="disabled">停用</option></select></label>
         <span class="realtime-search-hint" aria-live="polite">输入即搜索</span>
         <button class="text-button clear-filter" type="button" @click="clearFilters">清除</button>
       </form>
@@ -265,45 +393,72 @@ onBeforeUnmount(() => activeRequest?.abort())
       <div v-if="!people && !errorMessage" class="data-state"><div class="state-icon"><IconRefresh :size="22" class="spinning" /></div><div><strong>正在读取人员数据</strong><p>正在从 BFF 获取经过校验的人员列表…</p></div></div>
       <div v-else-if="errorMessage" class="data-state failed"><div class="state-icon"><IconAlertTriangle :size="22" /></div><div><strong>人员数据加载失败</strong><p>{{ errorMessage }}</p></div><button class="btn btn-white" @click="loadPeople">重试</button></div>
       <template v-else-if="people">
+        <div v-if="personActionError && !pendingPersonAction" class="person-action-inline-error"><IconAlertTriangle :size="15" />{{ personActionError }}<button type="button" aria-label="关闭操作错误" @click="personActionError = ''">×</button></div>
         <div v-if="people.items.length" class="table-responsive">
           <table class="data-table people-table">
-            <thead><tr><th>人员</th><th>部门</th><th>访问 Key</th><th>状态</th><th>最近调用</th><th /></tr></thead>
+            <thead><tr><th>人员</th><th>部门</th><th>Key 数量</th><th>状态</th><th>创建时间</th><th>最后使用</th><th>操作</th></tr></thead>
             <tbody>
               <tr v-for="person in people.items" :key="person.id">
-                <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ surnameInitial(person.name) }}</span><span><strong>{{ person.name }}</strong></span></div></td>
+                <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ surnameInitial(person.username || person.name) }}</span><span><strong>{{ person.username || person.name }}</strong></span></div></td>
                 <td>{{ person.department.name }}</td>
-                <td><span class="key-count"><IconKey :size="13" />{{ person.keyCount }}</span></td>
+                <td><span class="key-count">{{ person.keyCount }}</span></td>
                 <td><span class="person-status" :class="`status-${person.status}`"><i />{{ statusLabels[person.status] }}</span></td>
-                <td class="last-active">{{ relativeTime(person.lastActiveAt) }}</td>
-                <td><RouterLink class="row-action enabled" :to="`/people/${person.id}`" :aria-label="`查看${person.name}详情`"><IconChevronRight :size="17" /></RouterLink></td>
+                <td class="last-active">{{ formatDate(person.createdAt) }}</td>
+                <td class="last-active">{{ formatDate(person.lastUsedAt || person.lastActiveAt) }}</td>
+                <td class="person-action-cell">
+                  <div class="person-action-control" :class="`action-${actionSelection(person)}`">
+                    <div class="person-action-track" aria-hidden="true"><span class="action-enable">启用</span><span class="action-disable">停用</span><span class="action-delete">删除</span></div>
+                    <input class="person-action-range" type="range" min="0" :max="actionValuesFor(person).length - 1" step="1" :value="actionValuesFor(person).indexOf(actionSelection(person))" :aria-label="`${person.name}操作`" :aria-valuetext="personActionLabels[actionSelection(person)]" @input="handlePersonActionInput(person, Number(($event.target as HTMLInputElement).value))" />
+                  </div>
+                </td>
               </tr>
             </tbody>
           </table>
         </div>
-        <div v-else class="people-empty"><IconUsers :size="24" /><strong>没有符合条件的人员</strong><span>调整搜索词或筛选条件后重试。</span><button class="text-button" @click="clearFilters">清除筛选</button></div>
+        <div v-else class="people-empty"><IconUsers :size="24" /><strong>{{ syncPending ? '尚未同步 New API 用户' : '没有符合条件的人员' }}</strong><span>{{ syncPending ? '页面会自动读取普通用户目录，请稍后刷新查看。' : '调整搜索词或筛选条件后重试。' }}</span><button v-if="!syncPending" class="text-button" type="button" @click="clearFilters">清除筛选</button></div>
         <footer class="table-footer"><span>{{ rangeText }}</span><div><button :disabled="page <= 1 || isLoading" aria-label="上一页" @click="goToPage(page - 1)"><IconChevronLeft :size="16" /></button><strong>第 {{ page }} / {{ totalPages }} 页</strong><button :disabled="page >= totalPages || isLoading" aria-label="下一页" @click="goToPage(page + 1)"><IconChevronRight :size="16" /></button></div></footer>
       </template>
     </section>
 
-    <footer class="page-footer">数据来源：{{ people?.meta.source.toUpperCase() ?? '等待数据' }} · 添加人员已开放（本地 SQLite），Key 用途在 Key 管理中维护</footer>
+    <footer class="page-footer">数据来源：{{ syncPending ? '等待 New API 自动同步' : people?.items.some((person) => person.source === 'new-api') ? 'New API 自动同步快照' : '本地兼容数据' }} · 本页只管理人员身份和状态，不创建 Key 或额度</footer>
+
+    <div v-if="pendingPersonAction" class="drawer-backdrop" @click.self="closePersonAction">
+      <aside class="person-action-dialog" role="dialog" aria-modal="true" :aria-label="pendingPersonAction.action === 'disable' ? '确认停用人员' : '确认删除人员'">
+        <header>
+          <div><span class="person-action-dialog-icon" :class="`dialog-${pendingPersonAction.action}`"><IconBan v-if="pendingPersonAction.action === 'disable'" :size="17" /><IconTrash v-else :size="17" /></span><div><span class="source-tag demo">人员状态</span><h2>{{ pendingPersonAction.action === 'disable' ? '确认停用人员' : '确认删除人员' }}</h2></div></div>
+          <button class="icon-button" aria-label="关闭确认窗口" :disabled="isPersonActionLoading" @click="closePersonAction">×</button>
+        </header>
+        <section class="person-action-dialog-body">
+          <strong>{{ pendingPersonAction.person.name }}</strong>
+          <p v-if="pendingPersonAction.action === 'disable'">停用后，该人员将不能继续使用关联 Key；人员记录和历史用量仍会保留。</p>
+          <p v-else>删除后，该人员将从人员目录移除；历史用量、审计记录和已回收 Key 会保留，且不能恢复。</p>
+          <div v-if="personActionError" class="create-person-error"><IconAlertTriangle :size="16" />{{ personActionError }}</div>
+        </section>
+        <footer class="person-action-dialog-footer">
+          <button class="btn btn-white" type="button" :disabled="isPersonActionLoading" @click="closePersonAction">取消</button>
+          <button class="btn" :class="pendingPersonAction.action === 'disable' ? 'person-action-confirm-disable' : 'danger-outline'" type="button" :disabled="isPersonActionLoading || (pendingPersonAction.action === 'delete' && deleteCountdown > 0)" @click="confirmPersonAction">
+            {{ isPersonActionLoading ? (pendingPersonAction.action === 'disable' ? '停用中…' : '删除中…') : pendingPersonAction.action === 'delete' && deleteCountdown > 0 ? `确认删除（${deleteCountdown}s）` : pendingPersonAction.action === 'disable' ? '确认停用' : '确认删除' }}
+          </button>
+        </footer>
+      </aside>
+    </div>
 
     <div v-if="showCreate" class="drawer-backdrop" @click.self="closeCreate">
       <aside class="create-person-dialog" role="dialog" aria-modal="true" aria-label="添加人员">
-        <header><div><span class="source-tag demo">SQLITE</span><h2>添加人员</h2></div><button class="icon-button" aria-label="关闭添加人员" :disabled="isCreating" @click="closeCreate">×</button></header>
+        <header><div><span class="source-tag live">NEW API</span><h2>添加人员</h2></div><button class="icon-button" aria-label="关闭添加人员" :disabled="isCreating" @click="closeCreate">×</button></header>
         <template v-if="createdPerson">
           <section class="created-key-success">
             <IconUserCheck :size="22" />
             <strong>{{ createdPerson.person.displayName }} 已添加</strong>
             <p>{{ createdPerson.meta.notice }}</p>
-            <small>{{ createdPerson.person.department.name }} · 登录名和初始密码由系统自动生成</small>
+            <small>{{ createdPerson.person.department.name }} · 已写入 New API，AI OPS 自动保存对应镜像</small>
           </section>
           <footer class="create-key-dialog-footer">
-            <a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(createdPerson.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${createdPerson.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a>
             <button class="btn create-key" type="button" @click="closeCreate">完成</button>
           </footer>
         </template>
         <form v-else class="create-person-form" @submit.prevent="submitCreate">
-          <p class="create-person-note">创建本地演示账号并绑定部门。登录名和初始密码由系统自动生成，仅保存安全摘要。</p>
+          <p class="create-person-note">姓名会写入 New API 用户名，部门会写入 New API 显示名称；状态默认在职，员工密码只在服务端处理，不会返回页面。</p>
           <label><span>姓名</span><input v-model="createForm.displayName" required minlength="2" maxlength="40" placeholder="例如：王庆典" /></label>
           <label><span>所属部门</span><input v-model="createForm.departmentId" required minlength="1" maxlength="40" placeholder="例如：技术部" /><small class="create-person-field-hint">直接填写部门名称即可，不需要选择部门编号。</small></label>
           <div v-if="createError" class="create-person-error"><IconAlertTriangle :size="16" />{{ createError }}</div>
@@ -314,14 +469,14 @@ onBeforeUnmount(() => activeRequest?.abort())
 
     <div v-if="showImport" class="drawer-backdrop" @click.self="closeImport">
       <aside class="create-person-dialog people-import-dialog" role="dialog" aria-modal="true" aria-label="批量导入人员">
-        <header><div><span class="source-tag demo">CSV</span><h2>批量导入人员</h2></div><button class="icon-button" aria-label="关闭批量导入" @click="closeImport">×</button></header>
+        <header><div><span class="source-tag live">NEW API</span><h2>批量导入人员</h2></div><button class="icon-button" aria-label="关闭批量导入" @click="closeImport">×</button></header>
         <template v-if="batchResult">
-          <section class="created-key-success"><IconUserCheck :size="22" /><strong>已导入 {{ batchResult.meta.createdCount }} 名人员</strong><p>{{ batchResult.meta.notice }}</p><small>批次幂等号：{{ batchResult.operation.idempotencyKey }} · 系统凭据已生成，仅保存哈希</small></section>
-          <footer class="create-key-dialog-footer"><a class="btn btn-white" :href="`/audit?eventId=${encodeURIComponent(batchResult.operation.auditEventId)}&origin=mutation`" :aria-label="`查看 ${batchResult.operation.auditEventId} 操作审计`"><IconShieldCheck :size="16" />查看操作审计</a><button class="btn create-key" type="button" @click="closeImport">完成</button></footer>
+          <section class="created-key-success"><IconUserCheck :size="22" /><strong>已导入 {{ batchResult.meta.createdCount }} 名人员</strong><p>{{ batchResult.meta.notice }}</p><small>批次幂等号：{{ batchResult.operation.idempotencyKey }} · New API 与 AI OPS 镜像已对齐</small></section>
+          <footer class="create-key-dialog-footer"><button class="btn create-key" type="button" @click="closeImport">完成</button></footer>
         </template>
         <template v-else>
         <section class="people-import-content">
-          <p class="create-person-note">下载模板后填写人员信息。部门直接填写名称即可，已有部门会自动匹配，新部门会写入本地目录；登录名及初始密码由系统自动生成，预检通过后会一次性写入本地 SQLite，不会调用 New API。</p>
+          <p class="create-person-note">下载模板后填写人员信息。姓名写入 New API 用户名，部门写入 New API 显示名称；已有部门会自动匹配，新部门会同步建立 AI OPS 部门镜像。预检通过后逐条写入 New API，再自动同步到 AI OPS。</p>
           <div class="people-import-actions"><button class="btn btn-white" type="button" @click="downloadImportTemplate"><IconDownload :size="15" />下载 CSV 模板</button><label class="btn btn-white" for="people-import-file"><IconUpload :size="15" />选择 CSV 文件</label><input id="people-import-file" ref="importInput" class="visually-hidden" type="file" accept=".csv,text/csv" @change="handleImportFile" /></div>
           <div v-if="importFileName" class="people-import-file"><IconFileText :size="16" /><span>{{ importFileName }}</span><strong>{{ importRows.length }} 行已预检</strong></div>
           <div v-if="importError" class="create-person-error"><IconAlertTriangle :size="16" />{{ importError }}</div>

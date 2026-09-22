@@ -1,0 +1,20 @@
+# Safe template for the project-managed CPA container.
+# Replace both placeholder credentials in the ignored config.yaml before using
+# this template for a fresh deployment. Existing installations should keep
+# their real config.yaml and auths/ directory so OAuth does not need to run again.
+host: ""
+port: 8317
+remote-management:
+  # AI OPS reaches CPA over the private Docker network. The host ports remain
+  # bound to loopback, so the management API is not published to the LAN.
+  allow-remote: true
+  secret-key: "replace-with-a-long-cpa-management-key"
+  disable-control-panel: false
+auth-dir: "/root/.cli-proxy-api"
+api-keys:
+  - "replace-with-a-cpa-client-key"
+debug: false
+logging-to-file: true
+logs-max-total-size-mb: 100
+usage-statistics-enabled: true
+request-retry: 3

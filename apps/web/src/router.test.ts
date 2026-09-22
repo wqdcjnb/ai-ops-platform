@@ -44,11 +44,12 @@ describe('application routing', () => {
     expect(financeRouter.currentRoute.value.name).toBe('home')
   })
 
-  it('applies the people role boundary to person details', async () => {
+  it('redirects the removed person detail route to the unified entry page', async () => {
     const adminRouter = createAppRouter({ history: createMemoryHistory(), role: 'admin' })
     await adminRouter.push('/people/person-lin')
     await adminRouter.isReady()
-    expect(adminRouter.currentRoute.value.name).toBe('person-detail')
+    expect(adminRouter.currentRoute.value.name).toBe('home')
+    expect(adminRouter.currentRoute.value.path).toBe('/')
 
     const employeeRouter = createAppRouter({ history: createMemoryHistory(), role: 'employee' })
     await employeeRouter.push('/people/person-lin')
@@ -128,18 +129,6 @@ describe('application routing', () => {
     expect(leadRouter.currentRoute.value.name).toBe('usage')
   })
 
-  it('allows operations roles to inspect alerts but keeps employees out', async () => {
-    const financeRouter = createAppRouter({ history: createMemoryHistory(), role: 'finance' })
-    await financeRouter.push('/alerts')
-    await financeRouter.isReady()
-    expect(financeRouter.currentRoute.value.name).toBe('alerts')
-
-    const employeeRouter = createAppRouter({ history: createMemoryHistory(), role: 'employee' })
-    await employeeRouter.push('/alerts')
-    await employeeRouter.isReady()
-    expect(employeeRouter.currentRoute.value.name).toBe('home')
-  })
-
   it('limits audit logs to super administrators and administrators', async () => {
     const adminRouter = createAppRouter({ history: createMemoryHistory(), role: 'admin' })
     await adminRouter.push('/audit')
@@ -164,11 +153,12 @@ describe('application routing', () => {
     expect(adminRouter.currentRoute.value.name).toBe('home')
   })
 
-  it('allows administrators to inspect settings but keeps finance out', async () => {
+  it('redirects the removed settings page to the unified entry', async () => {
     const adminRouter = createAppRouter({ history: createMemoryHistory(), role: 'admin' })
     await adminRouter.push('/settings')
     await adminRouter.isReady()
-    expect(adminRouter.currentRoute.value.name).toBe('settings')
+    expect(adminRouter.currentRoute.value.name).toBe('home')
+    expect(adminRouter.currentRoute.value.path).toBe('/')
 
     const financeRouter = createAppRouter({ history: createMemoryHistory(), role: 'finance' })
     await financeRouter.push('/settings')

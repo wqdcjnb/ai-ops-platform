@@ -23,13 +23,18 @@ export interface OpenAiResponsesEvent {
   data: Record<string, unknown>
 }
 
+/** Per-request credential forwarding context. Kept in memory only. */
+export interface GatewayRequestContext {
+  authorization?: string
+}
+
 export interface GatewayUpstream {
-  listModels(signal?: AbortSignal): Promise<OpenAiModel[]>
-  chatCompletion(request: OpenAiChatRequest, signal?: AbortSignal): Promise<Record<string, unknown>>
-  chatCompletionStream(request: OpenAiChatRequest, onChunk: (chunk: Record<string, unknown>) => void, signal?: AbortSignal, requestId?: string): Promise<void>
+  listModels(signal?: AbortSignal, context?: GatewayRequestContext): Promise<OpenAiModel[]>
+  chatCompletion(request: OpenAiChatRequest, signal?: AbortSignal, context?: GatewayRequestContext): Promise<Record<string, unknown>>
+  chatCompletionStream(request: OpenAiChatRequest, onChunk: (chunk: Record<string, unknown>) => void, signal?: AbortSignal, requestId?: string, context?: GatewayRequestContext): Promise<void>
   /** Native Responses support is optional so test and legacy adapters can stay chat-only. */
-  responses?(request: OpenAiResponsesRequest, signal?: AbortSignal): Promise<Record<string, unknown>>
-  responsesStream?(request: OpenAiResponsesRequest, onEvent: (event: OpenAiResponsesEvent) => void, signal?: AbortSignal, requestId?: string): Promise<void>
+  responses?(request: OpenAiResponsesRequest, signal?: AbortSignal, context?: GatewayRequestContext): Promise<Record<string, unknown>>
+  responsesStream?(request: OpenAiResponsesRequest, onEvent: (event: OpenAiResponsesEvent) => void, signal?: AbortSignal, requestId?: string, context?: GatewayRequestContext): Promise<void>
   cancel(requestId: string, signal?: AbortSignal): Promise<void>
 }
 
@@ -64,36 +69,36 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
   private readonly activeRequests = new Map<string, { controller: AbortController; cancelled: boolean }>()
 
   constructor(private readonly config: GatewayConfig, options: OpenAiCompatibleOptions = {}) {
-    this.timeoutMs = options.timeoutMs ?? 30_000
+    this.timeoutMs = options.timeoutMs ?? config.timeoutMs
   }
 
-  async listModels(signal?: AbortSignal) {
-    const payload = await this.requestJson('/models', { method: 'GET' }, signal)
+  async listModels(signal?: AbortSignal, context?: GatewayRequestContext) {
+    const payload = await this.requestJson('/models', { method: 'GET' }, signal, context)
     if (!isRecord(payload) || !Array.isArray(payload.data)) throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游模型列表格式无效')
     return payload.data.flatMap((item) => parseModel(item))
   }
 
-  async chatCompletion(request: OpenAiChatRequest, signal?: AbortSignal) {
+  async chatCompletion(request: OpenAiChatRequest, signal?: AbortSignal, context?: GatewayRequestContext) {
     const payload = await this.requestJson('/chat/completions', {
       method: 'POST',
       body: JSON.stringify({ ...request, stream: false }),
-    }, signal)
+    }, signal, context)
     if (!isRecord(payload) || !Array.isArray(payload.choices) || typeof payload.id !== 'string' || typeof payload.model !== 'string') {
       throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游聊天响应格式无效')
     }
     return payload
   }
 
-  async responses(request: OpenAiResponsesRequest, signal?: AbortSignal) {
+  async responses(request: OpenAiResponsesRequest, signal?: AbortSignal, context?: GatewayRequestContext) {
     const payload = await this.requestJson('/responses', {
       method: 'POST',
       body: JSON.stringify({ ...request, stream: false }),
-    }, signal)
+    }, signal, context)
     if (!isRecord(payload)) throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游 Responses 响应格式无效')
     return payload
   }
 
-  async chatCompletionStream(request: OpenAiChatRequest, onChunk: (chunk: Record<string, unknown>) => void, signal?: AbortSignal, requestId?: string) {
+  async chatCompletionStream(request: OpenAiChatRequest, onChunk: (chunk: Record<string, unknown>) => void, signal?: AbortSignal, requestId?: string, context?: GatewayRequestContext) {
     if (!this.config.baseUrl || !this.config.upstreamConfigured) {
       throw new GatewayUpstreamError('GATEWAY_UPSTREAM_NOT_CONFIGURED', 503, '尚未配置可用的网关上游')
     }
@@ -105,7 +110,7 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
 
     try {
       const headers = new Headers({ accept: 'text/event-stream', 'content-type': 'application/json' })
-      if (this.config.upstreamApiKey) headers.set('authorization', `Bearer ${this.config.upstreamApiKey}`)
+      setAuthorizationHeader(headers, this.config.upstreamApiKey, context)
       const response = await fetch(resolveEndpoint(this.config.baseUrl, '/chat/completions'), {
         method: 'POST',
         headers,
@@ -127,7 +132,7 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
     }
   }
 
-  async responsesStream(request: OpenAiResponsesRequest, onEvent: (event: OpenAiResponsesEvent) => void, signal?: AbortSignal, requestId?: string) {
+  async responsesStream(request: OpenAiResponsesRequest, onEvent: (event: OpenAiResponsesEvent) => void, signal?: AbortSignal, requestId?: string, context?: GatewayRequestContext) {
     if (!this.config.baseUrl || !this.config.upstreamConfigured) {
       throw new GatewayUpstreamError('GATEWAY_UPSTREAM_NOT_CONFIGURED', 503, '尚未配置可用的网关上游')
     }
@@ -139,7 +144,7 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
 
     try {
       const headers = new Headers({ accept: 'text/event-stream', 'content-type': 'application/json' })
-      if (this.config.upstreamApiKey) headers.set('authorization', `Bearer ${this.config.upstreamApiKey}`)
+      setAuthorizationHeader(headers, this.config.upstreamApiKey, context)
       const response = await fetch(resolveEndpoint(this.config.baseUrl, '/responses'), {
         method: 'POST',
         headers,
@@ -169,7 +174,7 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
     }
   }
 
-  private async requestJson(path: string, init: { method: 'GET' | 'POST'; body?: string }, signal?: AbortSignal): Promise<unknown> {
+  private async requestJson(path: string, init: { method: 'GET' | 'POST'; body?: string }, signal?: AbortSignal, context?: GatewayRequestContext): Promise<unknown> {
     if (!this.config.baseUrl || !this.config.upstreamConfigured) {
       throw new GatewayUpstreamError('GATEWAY_UPSTREAM_NOT_CONFIGURED', 503, '尚未配置可用的网关上游')
     }
@@ -181,7 +186,7 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
 
     try {
       const headers = new Headers({ accept: 'application/json', 'content-type': 'application/json' })
-      if (this.config.upstreamApiKey) headers.set('authorization', `Bearer ${this.config.upstreamApiKey}`)
+      setAuthorizationHeader(headers, this.config.upstreamApiKey, context)
       const response = await fetch(resolveEndpoint(this.config.baseUrl, path), {
         method: init.method,
         headers,
@@ -201,6 +206,11 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
       signal?.removeEventListener('abort', abort)
     }
   }
+}
+
+function setAuthorizationHeader(headers: Headers, fallbackApiKey: string | undefined, context?: GatewayRequestContext) {
+  if (context?.authorization?.trim()) headers.set('authorization', context.authorization.trim())
+  else if (fallbackApiKey) headers.set('authorization', `Bearer ${fallbackApiKey}`)
 }
 
 async function readSse(body: ReadableStream<Uint8Array>, onChunk: (chunk: Record<string, unknown>) => void) {

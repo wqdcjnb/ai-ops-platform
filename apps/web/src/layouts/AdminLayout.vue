@@ -2,11 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import {
-  IconBell,
   IconCommand,
   IconMenu2,
   IconSearch,
-  IconSettings,
   IconX,
 } from '@tabler/icons-vue'
 import { fetchPlatformStatus, type PlatformService, type PlatformStatus } from '../home-api'
@@ -41,7 +39,20 @@ const stateLabel = (value: PlatformService | undefined, name: string) => {
 }
 const newApiLabel = computed(() => stateLabel(newApi.value, 'New API'))
 const cpaLabel = computed(() => stateLabel(cpa.value, 'CPA'))
-const degraded = computed(() => bffState.value !== 'online' || newApi.value?.state !== 'healthy' || cpa.value?.state === 'offline')
+const dockerMatrix = computed(() => platform.value?.dockerServices ?? [])
+const dockerHealthyCount = computed(() => dockerMatrix.value.filter((service) => service.state === 'healthy').length)
+const dockerStatusLabel = computed(() => {
+  if (bffState.value === 'checking') return '检查服务'
+  if (bffState.value === 'offline') return 'BFF 离线'
+  if (dockerMatrix.value.length) return `${dockerHealthyCount.value}/${dockerMatrix.value.length} 服务正常`
+  return 'BFF 在线'
+})
+const dockerStatusTitle = computed(() => dockerMatrix.value.length
+  ? `Docker 编排：${dockerHealthyCount.value}/${dockerMatrix.value.length} 服务正常`
+  : `BFF ${bffState.value === 'checking' ? '检查中' : bffState.value === 'online' ? '在线' : '离线'}；${newApiLabel.value}；${cpaLabel.value}`)
+const degraded = computed(() => dockerMatrix.value.length
+  ? dockerHealthyCount.value !== dockerMatrix.value.length
+  : bffState.value !== 'online' || newApi.value?.state !== 'healthy' || cpa.value?.state === 'offline')
 
 async function loadServiceStatus() {
   try {
@@ -156,7 +167,6 @@ function handleGlobalSearchFocus() {
       </nav>
 
       <div class="sidebar-footer">
-        <RouterLink to="/settings" class="nav-item" active-class="" :class="{ active: route.path === '/settings' }" @click="mobileNavOpen = false"><IconSettings :size="18" /> <span>系统设置</span></RouterLink>
         <div class="operator-card">
           <div class="avatar avatar-sm">{{ currentUser?.displayName.slice(0, 1) ?? '—' }}</div>
           <div><strong>{{ currentUser?.displayName ?? '当前身份' }}</strong><small>{{ currentUser?.roleLabel ?? '会话加载中' }} · 本机单管理员</small></div>
@@ -199,11 +209,10 @@ function handleGlobalSearchFocus() {
           </div>
         </div>
         <div class="topbar-actions">
-          <div class="service-status" :class="{ degraded }" :title="`BFF ${bffState}；${newApiLabel}；${cpaLabel}`">
-            <span /> {{ bffState === 'online' ? 'BFF 在线' : bffState === 'offline' ? 'BFF 离线' : '检查服务' }}
-            <small>· {{ newApiLabel }} · {{ cpaLabel }}</small>
+          <div class="service-status" :class="{ degraded }" :title="dockerStatusTitle">
+            <span /> {{ dockerStatusLabel }}
+            <small v-if="dockerMatrix.length">· 容器引擎</small><small v-else>· {{ newApiLabel }} · {{ cpaLabel }}</small>
           </div>
-          <RouterLink class="icon-button notification-button" to="/alerts" aria-label="打开告警中心"><IconBell :size="20" /></RouterLink>
           <div class="avatar-button" role="status" aria-label="当前管理员">{{ currentUser?.displayName.slice(0, 1) ?? '—' }}</div>
         </div>
       </header>

@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { buildApp } from './app.js'
+import type { CpaLogReader } from './cpa-logs.js'
+import { createNewApiManagementClient } from './new-api-management.js'
+import type { NewApiDatabaseReader } from './new-api-database.js'
 import { createPlatformDatabase } from './platform-db.js'
 
 const apps: ReturnType<typeof buildApp>[] = []
@@ -37,7 +40,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.state).toBe('ready')
-    expect(body.migrationVersion).toBe(24)
+    expect(body.migrationVersion).toBe(31)
     expect(body.tables).toEqual(expect.arrayContaining(['schema_migrations', 'users', 'api_keys', 'quota_policies', 'temporary_quota_requests', 'quota_reservations', 'route_policy_overrides', 'channel_health_snapshots', 'person_model_policies', 'audit_events', 'audit_chain_checkpoints', 'usage_requests', 'conversation_access_events', 'conversation_audit_records', 'conversation_audit_cleanup_runs', 'conversation_audit_expiry_proofs', 'conversation_usage_links', 'system_business_rules', 'business_rule_versions', 'system_feature_flags', 'system_role_definitions', 'system_retention_policies', 'system_backup_status', 'user_sessions', 'session_cleanup_runs']))
     expect(body.sessionCleanup).toMatchObject({ revokedRetentionHours: 24, lastRun: { triggeredBy: 'startup' } })
     expect(body.auditChain).toMatchObject({ algorithm: 'sha256', verified: true, hashChainVerified: true, checkpointVerified: true, firstInvalidEventId: null })
@@ -122,18 +125,6 @@ describe('BFF', () => {
     expect(limits.statusCode).toBe(200)
     expect(limits.json().items[0]).toMatchObject({ id: 'department-content', parentId: null, depth: 0 })
     expect(limits.json().items.every((item: { id: string }) => !item.id.includes('zhou') && !item.id.includes('ads'))).toBe(true)
-
-    const alerts = await app.inject({ method: 'GET', url: '/api/alerts?pageSize=50', headers: { cookie } })
-    expect(alerts.statusCode).toBe(200)
-    expect(alerts.json().items.every((item: { subject: { type: string } }) => ['department', 'person', 'key'].includes(item.subject.type))).toBe(true)
-    const globalAlert = await app.inject({ method: 'GET', url: '/api/alerts/alert-error-global', headers: { cookie } })
-    expect(globalAlert.statusCode).toBe(404)
-    const hiddenExactAlert = await app.inject({ method: 'GET', url: '/api/alerts?alertId=alert-error-global', headers: { cookie } })
-    expect(hiddenExactAlert.statusCode).toBe(200)
-    expect(hiddenExactAlert.json().items).toEqual([])
-    const rules = await app.inject({ method: 'GET', url: '/api/alert-rules', headers: { cookie } })
-    expect(rules.statusCode).toBe(200)
-    expect(rules.json().items).toEqual([])
 
     const overview = await app.inject({ method: 'GET', url: '/api/overview?period=30d', headers: { cookie } })
     expect(overview.statusCode).toBe(200)
@@ -251,8 +242,9 @@ describe('BFF', () => {
     expect(body.meta.period).toBe('7d')
     expect(body.service).toEqual({ bff: 'healthy', newApi: await reachableNewApi() })
     expect(body.trend).toHaveLength(7)
-    expect(body.metrics).toMatchObject({ todayRequests: expect.any(Number), monthPoints: expect.any(Number) })
-    expect(body.people.every((person: { targetConfigured: boolean }) => typeof person.targetConfigured === 'boolean')).toBe(true)
+    expect(body.metrics).toMatchObject({ todayRequests: expect.any(Number), successRate: expect.any(Number), p95LatencyMs: expect.any(Number) })
+    expect(body.trend.every((point: { points?: unknown }) => !('points' in point))).toBe(true)
+    expect(body.people.every((person: { tokens: number }) => typeof person.tokens === 'number')).toBe(true)
     expect(body.limits).toEqual({ mode: 'soft', blocking: false })
     expect(JSON.stringify(body)).not.toMatch(/actualModel|accessToken|managementKey|apiKey|password/i)
   })
@@ -288,8 +280,8 @@ describe('BFF', () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/tasks/summary' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body).toMatchObject({ source: 'database', simulated: true, summary: { openAlerts: 4, criticalAlerts: 1 } })
-    expect(body.items.map((item: { target: string }) => item.target)).toEqual(expect.arrayContaining(['alerts', 'keys']))
+    expect(body).toMatchObject({ source: 'database', simulated: true, summary: { activeKeys: expect.any(Number), expiringKeys: expect.any(Number) } })
+    expect(body.items.map((item: { target: string }) => item.target)).toEqual(expect.arrayContaining(['keys']))
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|sk-[A-Za-z0-9_-]{8,}/i)
   })
 
@@ -302,6 +294,40 @@ describe('BFF', () => {
     expect(body.items).toHaveLength(2)
     expect(body.items.every((person: { department: { id: string }; status: string }) => person.department.id === 'content' && person.status === 'active')).toBe(true)
     expect(JSON.stringify(body)).not.toMatch(/accessToken|Bearer|managementKey/i)
+  })
+
+  it('mirrors New API Tokens before rendering the people Key count', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    database.seedDepartment({ id: 'department-remote-test', name: '远程测试部门' })
+    database.createPerson({ id: 'person-123', username: 'remote-person', displayName: '远程测试人员', departmentId: 'department-remote-test', password: 'not-used', externalUserId: '123' })
+    const ready = <T>(data: T) => ({ state: 'ready' as const, statusCode: 200, data, message: null })
+    const token = {
+      id: 456, user_id: 123, name: 'AIOPS-remote-test-copy', key: 'sk-remote-test-secret-1234567890', status: 1,
+      unlimited_quota: true, expired_time: -1, model_limits_enabled: true, model_limits: ['ecommerce-copy'], group: '', created_time: Math.floor(Date.now() / 1000), accessed_time: 0,
+    }
+    const newApiTokenClient = {
+      authConfigured: true,
+      listTokens: async () => ready({ items: [token], total: 1 }),
+      getToken: async () => ready(token),
+      createToken: async () => ready(token),
+      updateTokenStatus: async () => ready({ id: 456, status: 0 }),
+    }
+    const app = buildApp({
+      authMode: 'disabled',
+      database,
+      peopleManagementClient: createNewApiManagementClient({ baseUrl: 'http://new-api.test' }),
+      newApiTokenClient,
+      probeNewApi: reachableNewApi,
+      probeCpa: reachableService,
+      probeDocs: reachableService,
+    })
+    apps.push(app)
+
+    const response = await app.inject({ method: 'GET', url: '/api/people?search=远程测试人员&status=all' })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().items[0]).toMatchObject({ name: '远程测试人员', keyCount: 1 })
+    expect(database.listApiKeysForOwner('person-123')).toHaveLength(1)
+    expect(database.findApiKeyByExternalTokenId('456')).toMatchObject({ externalTokenId: '456', ownerUserId: 'person-123', status: 'active' })
   })
 
   it('rejects invalid people pagination with the shared error envelope', async () => {
@@ -367,6 +393,12 @@ describe('BFF', () => {
     const usage = await createApp().inject({ method: 'GET', url: '/api/people/person-lin/usage?period=30d' })
     expect(usage.statusCode).toBe(200)
     expect(usage.json().items).toHaveLength(30)
+    expect(usage.json().summary).toMatchObject({ requests: 3, inputTokens: 7510, outputTokens: 3136, totalTokens: 10646 })
+    expect(usage.json().items.reduce((total: number, item: { tokens: number }) => total + item.tokens, 0)).toBe(10646)
+    expect(usage.json().breakdown).toEqual(expect.arrayContaining([
+      expect.objectContaining({ keyId: 'key-lin-1', alias: 'ecommerce-copy', requests: 2, inputTokens: 4250, outputTokens: 1716, totalTokens: 5966 }),
+      expect.objectContaining({ keyId: 'key-lin-2', alias: 'ecommerce-translate', requests: 1, inputTokens: 3260, outputTokens: 1420, totalTokens: 4680 }),
+    ]))
 
     const missing = await createApp().inject({ method: 'GET', url: '/api/people/person-missing' })
     expect(missing.statusCode).toBe(404)
@@ -409,16 +441,110 @@ describe('BFF', () => {
     expect(rolledBack.json().items).toHaveLength(0)
   })
 
-  it('disables a local person and atomically revokes their active Keys without retaining the reason', async () => {
+  it('synchronizes enable, disable, and delete actions with New API before updating the local mirror', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    const departmentId = database.ensureDepartment('远程状态部门')
+    for (const externalUserId of ['42', '43']) {
+      database.upsertSyncedPerson({
+        externalUserId,
+        username: `remote-${externalUserId}`,
+        displayName: `远程人员 ${externalUserId}`,
+        departmentId,
+        departmentName: '远程状态部门',
+        status: 'active',
+        createdAt: null,
+        lastUsedAt: null,
+      })
+    }
+    const calls: Array<{ url: string; method: string; body?: unknown }> = []
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      return new Response(JSON.stringify({ success: true, data: {} }), { status: 200 })
+    }) as unknown as typeof fetch
+    const app = buildApp({
+      authMode: 'disabled',
+      database,
+      peopleManagementClient: createNewApiManagementClient({ baseUrl: 'http://new-api.test', accessToken: 'management-secret', fetchImpl }),
+      probeNewApi: reachableNewApi,
+      probeCpa: reachableService,
+      probeDocs: reachableService,
+    })
+    apps.push(app)
+
+    const personIdFor = (externalUserId: string) => database.listPeople().find((person) => person.externalUserId === externalUserId)?.id ?? ''
+    const firstPersonId = personIdFor('42')
+    const secondPersonId = personIdFor('43')
+    expect(firstPersonId).not.toBe('')
+    expect(secondPersonId).not.toBe('')
+
+    const disabled = await app.inject({ method: 'POST', url: `/api/people/${firstPersonId}/disable`, payload: { idempotencyKey: 'person-disable-remote-42', acknowledgeImpact: true } })
+    expect(disabled.statusCode).toBe(200)
+    expect(disabled.json().person.status).toBe('disabled')
+
+    const enabled = await app.inject({ method: 'POST', url: `/api/people/${firstPersonId}/enable`, payload: { idempotencyKey: 'person-enable-remote-42', acknowledgeImpact: true } })
+    expect(enabled.statusCode).toBe(200)
+    expect(enabled.json().person.status).toBe('active')
+
+    const disabledForDelete = await app.inject({ method: 'POST', url: `/api/people/${secondPersonId}/disable`, payload: { idempotencyKey: 'person-disable-remote-43', acknowledgeImpact: true } })
+    expect(disabledForDelete.statusCode).toBe(200)
+    const deleted = await app.inject({ method: 'POST', url: `/api/people/${secondPersonId}/delete`, payload: { idempotencyKey: 'person-delete-remote-43', acknowledgeImpact: true } })
+    expect(deleted.statusCode).toBe(200)
+    expect(deleted.json().person.status).toBe('deleted')
+
+    expect(calls).toEqual([
+      { url: 'http://new-api.test/api/user/manage', method: 'POST', body: { id: 42, action: 'disable' } },
+      { url: 'http://new-api.test/api/user/manage', method: 'POST', body: { id: 42, action: 'enable' } },
+      { url: 'http://new-api.test/api/user/manage', method: 'POST', body: { id: 43, action: 'disable' } },
+      { url: 'http://new-api.test/api/user/manage', method: 'POST', body: { id: 43, action: 'delete' } },
+    ])
+    expect(database.listSyncedPeople()).not.toEqual(expect.arrayContaining([expect.objectContaining({ externalUserId: '43' })]))
+  })
+
+  it('keeps the local person enabled when New API rejects a status mutation', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    const departmentId = database.ensureDepartment('远程失败部门')
+    database.upsertSyncedPerson({
+      externalUserId: '44',
+      username: 'remote-44',
+      displayName: '远程人员 44',
+      departmentId,
+      departmentName: '远程失败部门',
+      status: 'active',
+      createdAt: null,
+      lastUsedAt: null,
+    })
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ success: false, message: '管理接口拒绝操作' }), { status: 503 })) as unknown as typeof fetch
+    const app = buildApp({
+      authMode: 'disabled',
+      database,
+      peopleManagementClient: createNewApiManagementClient({ baseUrl: 'http://new-api.test', accessToken: 'management-secret', fetchImpl }),
+      probeNewApi: reachableNewApi,
+      probeCpa: reachableService,
+      probeDocs: reachableService,
+    })
+    apps.push(app)
+
+    const personId = database.listPeople().find((person) => person.externalUserId === '44')?.id ?? ''
+    const response = await app.inject({ method: 'POST', url: `/api/people/${personId}/disable`, payload: { idempotencyKey: 'person-disable-remote-44', acknowledgeImpact: true } })
+    expect(response.statusCode).toBe(502)
+    expect(response.json().error.code).toBe('NEW_API_UNAVAILABLE')
+    expect(database.listPeople().find((person) => person.id === personId)?.status).toBe('active')
+  })
+
+  it('disables a local person and atomically revokes their active Keys without requiring a reason', async () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
     const cookie = cookieHeader(login.headers['set-cookie'])
     const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
-    const body = { idempotencyKey: 'person-disable-1a2b3c4d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true }
+    const body = { idempotencyKey: 'person-disable-1a2b3c4d', acknowledgeImpact: true }
     const disabled = await app.inject({ method: 'POST', url: '/api/people/person-lin/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
     expect(disabled.statusCode).toBe(200)
     expect(disabled.json()).toMatchObject({ meta: { source: 'database' }, person: { id: 'person-lin', name: '林筱雨', status: 'disabled' }, keysDisabled: 2, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-person-disable-1a2b3c4d' } })
+
+    const people = await app.inject({ method: 'GET', url: '/api/people', headers: { cookie } })
+    expect(people.statusCode).toBe(200)
+    expect(people.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'person-lin', status: 'disabled' })]))
 
     const person = await app.inject({ method: 'GET', url: '/api/people/person-lin', headers: { cookie } })
     const keys = await app.inject({ method: 'GET', url: '/api/keys?owner=person-lin&status=disabled', headers: { cookie } })
@@ -439,10 +565,57 @@ describe('BFF', () => {
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=disable&resource=person', headers: { cookie } })
     expect(audit.statusCode).toBe(200)
     expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'disable', resource: expect.objectContaining({ id: 'person-lin', name: '林筱雨' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'status', before: '在职', after: '停用' }), expect.objectContaining({ field: 'keys' })]) })]))
-    expect(JSON.stringify({ disabled: disabled.json(), audit: audit.json() })).not.toContain(body.reason)
 
     const withoutCsrf = await app.inject({ method: 'POST', url: '/api/people/person-zhou/disable', headers: { cookie }, payload: { ...body, idempotencyKey: 'person-disable-5e6f7g8h' } })
     expect(withoutCsrf.statusCode).toBe(403)
+  })
+
+  it('enables a disabled person and restores only the Keys reclaimed by that disable operation', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+
+    const disabled = await app.inject({
+      method: 'POST',
+      url: '/api/people/person-lin/disable',
+      headers: { cookie, 'x-csrf-token': csrfToken },
+      payload: { idempotencyKey: 'person-disable-enable-1a2b3c4d', acknowledgeImpact: true },
+    })
+    expect(disabled.statusCode).toBe(200)
+
+    const body = { idempotencyKey: 'person-enable-1a2b3c4d', acknowledgeImpact: true }
+    const enabled = await app.inject({ method: 'POST', url: '/api/people/person-lin/enable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(enabled.statusCode).toBe(200)
+    expect(enabled.json()).toMatchObject({ meta: { source: 'database' }, person: { id: 'person-lin', name: '林筱雨', status: 'active' }, keysEnabled: 2, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-person-enable-1a2b3c4d' } })
+
+    const person = await app.inject({ method: 'GET', url: '/api/people/person-lin', headers: { cookie } })
+    expect(person.statusCode).toBe(200)
+    expect(person.json().profile.status).toBe('active')
+    expect(person.json().keys.every((key: { status: string }) => key.status === 'active')).toBe(true)
+    const expiringKeys = await app.inject({ method: 'GET', url: '/api/keys?owner=person-lin&status=expiring', headers: { cookie } })
+    expect(expiringKeys.statusCode).toBe(200)
+    expect(expiringKeys.json().items).toHaveLength(1)
+
+    const replay = await app.inject({ method: 'POST', url: '/api/people/person-lin/enable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({ keysEnabled: 2, operation: { idempotent: true } })
+    const alreadyEnabled = await app.inject({ method: 'POST', url: '/api/people/person-lin/enable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, idempotencyKey: 'person-enable-5e6f7g8h' } })
+    expect(alreadyEnabled.statusCode).toBe(409)
+    expect(alreadyEnabled.json().error.code).toBe('PERSON_ALREADY_ENABLED')
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=enable&resource=person', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'enable', resource: expect.objectContaining({ id: 'person-lin', name: '林筱雨' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'status', before: '停用', after: '在职' }), expect.objectContaining({ field: 'keys' })]) })]))
+
+    const disabledBefore = await app.inject({ method: 'POST', url: '/api/people/person-xu/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { idempotencyKey: 'person-disable-pre-revoked-1a2b3c4d', acknowledgeImpact: true } })
+    expect(disabledBefore.json()).toMatchObject({ keysDisabled: 0 })
+    const enabledAfter = await app.inject({ method: 'POST', url: '/api/people/person-xu/enable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { idempotencyKey: 'person-enable-pre-revoked-1a2b3c4d', acknowledgeImpact: true } })
+    expect(enabledAfter.json()).toMatchObject({ keysEnabled: 0 })
+    const revokedKey = await app.inject({ method: 'GET', url: '/api/keys/key-xu-1', headers: { cookie } })
+    expect(revokedKey.statusCode).toBe(200)
+    expect(revokedKey.json().key.status).toBe('disabled')
   })
 
   it('deletes only a disabled person, hides the directory records, and replays idempotently', async () => {
@@ -456,11 +629,11 @@ describe('BFF', () => {
       method: 'POST',
       url: '/api/people/person-lin/disable',
       headers: { cookie, 'x-csrf-token': csrfToken },
-      payload: { idempotencyKey: 'person-disable-7a8b9c0d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true },
+      payload: { idempotencyKey: 'person-disable-7a8b9c0d', acknowledgeImpact: true },
     })
     expect(disabled.statusCode).toBe(200)
 
-    const body = { idempotencyKey: 'person-delete-1a2b3c4d', reason: '本地演示人员已完成测试，需要从目录移除', acknowledgeImpact: true }
+    const body = { idempotencyKey: 'person-delete-1a2b3c4d', acknowledgeImpact: true }
     const deleted = await app.inject({ method: 'POST', url: '/api/people/person-lin/delete', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
     expect(deleted.statusCode).toBe(200)
     expect(deleted.json()).toMatchObject({ meta: { source: 'database' }, person: { id: 'person-lin', name: '林筱雨', status: 'deleted' }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-person-delete-1a2b3c4d' } })
@@ -486,7 +659,6 @@ describe('BFF', () => {
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=delete&resource=person', headers: { cookie } })
     expect(audit.statusCode).toBe(200)
     expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'delete', resource: expect.objectContaining({ id: 'person-lin', name: '林筱雨' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'directory', before: '已停用', after: '已删除' })]) })]))
-    expect(JSON.stringify({ deleted: deleted.json(), audit: audit.json() })).not.toContain(body.reason)
   })
 
   it('returns a filterable masked Key list without secret material', async () => {
@@ -499,7 +671,7 @@ describe('BFF', () => {
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey/i)
   })
 
-  it('allows administrators to create a masked Key and shows the secret only once', async () => {
+  it('allows administrators to create, view, and audit a locally encrypted Key', async () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
@@ -515,7 +687,15 @@ describe('BFF', () => {
     const listed = await app.inject({ method: 'GET', url: `/api/keys?search=${encodeURIComponent('大促文案')}`, headers: { cookie } })
     expect(listed.statusCode).toBe(200)
     expect(listed.json().items[0]).toMatchObject({ purpose: '大促文案', model: 'ecommerce-copy', models: ['ecommerce-copy'] })
+    expect(listed.json().items[0].secretAvailable).toBe(true)
     expect(JSON.stringify(listed.json())).not.toContain(created.json().secret)
+
+    const detail = await app.inject({ method: 'GET', url: `/api/keys/${created.json().key.id}`, headers: { cookie } })
+    expect(detail.statusCode).toBe(200)
+    expect(detail.json().key.secretAvailable).toBe(true)
+    const viewed = await app.inject({ method: 'GET', url: `/api/keys/${created.json().key.id}/secret`, headers: { cookie } })
+    expect(viewed.statusCode).toBe(200)
+    expect(viewed.json().secret).toBe(created.json().secret)
 
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=create&resource=key', headers: { cookie } })
     expect(audit.statusCode).toBe(200)
@@ -531,9 +711,77 @@ describe('BFF', () => {
     ]))
     expect(JSON.stringify(audit.json())).not.toContain(created.json().secret)
 
+    const viewAudit = await app.inject({ method: 'GET', url: `/api/audit-events/${viewed.json().operation.auditEventId}`, headers: { cookie } })
+    expect(viewAudit.statusCode).toBe(200)
+    expect(viewAudit.json().event).toMatchObject({ action: 'view', resource: { type: 'key', id: created.json().key.id }, credentialValueAvailable: false })
+    expect(JSON.stringify(viewAudit.json())).not.toContain(created.json().secret)
+
     const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
     const employeeCreate = await app.inject({ method: 'POST', url: '/api/keys', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) }, payload: { ownerId: 'person-lin', purpose: '越权 Key', model: 'ecommerce-general', expiresInDays: 30, deviceNote: '测试' } })
     expect(employeeCreate.statusCode).toBe(403)
+    const employeeView = await app.inject({ method: 'GET', url: `/api/keys/${created.json().key.id}/secret`, headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']) } })
+    expect(employeeView.statusCode).toBe(403)
+  })
+
+  it('creates an admin-owned New API Key while keeping the selected person as its AI OPS display owner', async () => {
+    const database = createPlatformDatabase({ filename: ':memory:' })
+    database.seedDepartment({ id: 'department-remote-test', name: '远程测试部门' })
+    database.createPerson({ id: 'person-123', username: 'remote-person', displayName: '远程测试人员', departmentId: 'department-remote-test', password: 'not-used', externalUserId: '123' })
+    const createCalls: unknown[] = []
+    const statusCalls: Array<{ id: string; status: 0 | 1 }> = []
+    const fullSecret = 'remote-test-secret-1234567890'
+    let tokenName = ''
+    const token = {
+      id: '123', user_id: '1', name: 'AIOPS-remote-test-abc12345', key: 'sk-**********7890', status: 1,
+      unlimited_quota: true, expired_time: -1, model_limits_enabled: true, model_limits: ['ecommerce-copy'], group: '', created_time: Math.floor(Date.now() / 1000), accessed_time: 0,
+    }
+    const ready = <T>(data: T) => ({ state: 'ready' as const, statusCode: 200, data, message: null })
+    const newApiTokenClient = {
+      authConfigured: true,
+      listTokens: async (_page?: number, _pageSize?: number, userId?: string) => { expect(userId).toBe('1'); return ready({ items: [{ ...token, name: tokenName }], total: 1 }) },
+      getToken: async (_id?: string, userId?: string) => { expect(userId).toBe('1'); return ready(token) },
+      getTokenKey: async (_id?: string, userId?: string) => { expect(userId).toBe('1'); return ready({ key: fullSecret }) },
+      createToken: async (input: unknown) => { createCalls.push(input); tokenName = (input as { name: string }).name; return ready({ success: true, message: '' }) },
+      updateTokenStatus: async (id: string, status: 0 | 1, _userId?: string) => { statusCalls.push({ id, status }); return ready({ id, status }) },
+    }
+    const app = buildApp({ authMode: 'disabled', database, newApiTokenClient, cpaModelReader: async () => ['ecommerce-copy'], probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+
+    const idempotencyKey = 'key-create-remote-123456'
+    const created = await app.inject({ method: 'POST', url: '/api/keys', headers: { 'idempotency-key': idempotencyKey }, payload: { personId: '123', purpose: 'Codex 开发', model: 'ecommerce-copy' } })
+    expect(created.statusCode).toBe(201)
+    expect(created.json()).toMatchObject({ meta: { source: 'new_api' }, key: { owner: { id: 'person-123', department: '远程测试部门' }, purpose: 'Codex 开发', model: 'ecommerce-copy', expiresAt: null } })
+    expect(created.json().secret).toBe(`sk-${fullSecret}`)
+    expect(createCalls).toHaveLength(1)
+    expect(createCalls[0]).toMatchObject({ user_id: '1', name: 'Codex 开发', model_limits: 'ecommerce-copy' })
+    expect(database.listApiKeys()).toEqual(expect.arrayContaining([expect.objectContaining({ externalTokenId: '123', quotaMode: 'unlimited', expiresAt: null, secretAvailable: false })]))
+    expect(database.readApiKeySecret(created.json().key.id)).toBeNull()
+    expect(JSON.stringify(database.listAuditEvents())).not.toContain(fullSecret)
+
+    const listed = await app.inject({ method: 'GET', url: '/api/keys?pageSize=50' })
+    expect(listed.statusCode).toBe(200)
+    expect(listed.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ id: created.json().key.id, owner: expect.objectContaining({ id: 'person-123', name: '远程测试人员' }) })]))
+
+    const replay = await app.inject({ method: 'POST', url: '/api/keys', headers: { 'idempotency-key': idempotencyKey }, payload: { personId: '123', purpose: 'Codex 开发', model: 'ecommerce-copy' } })
+    expect(replay.statusCode).toBe(409)
+    expect(replay.json().error.code).toBe('TOKEN_ALREADY_CREATED')
+    expect(createCalls).toHaveLength(1)
+
+    const secret = await app.inject({ method: 'GET', url: `/api/keys/${created.json().key.id}/secret` })
+    expect(secret.statusCode).toBe(200)
+    expect(secret.json().meta.source).toBe('new_api')
+    expect(secret.json().secret).toBe(`sk-${fullSecret}`)
+    expect(JSON.stringify(secret.json())).toContain(`sk-${fullSecret}`)
+    const secretAudit = await app.inject({ method: 'GET', url: `/api/audit-events/${secret.json().operation.auditEventId}` })
+    expect(secretAudit.statusCode).toBe(200)
+    expect(secretAudit.json().event).toMatchObject({ action: 'view', resource: { type: 'key', id: created.json().key.id }, credentialValueAvailable: false })
+    expect(JSON.stringify(secretAudit.json())).not.toContain(fullSecret)
+
+    const disabled = await app.inject({ method: 'POST', url: `/api/keys/${created.json().key.id}/disable`, payload: { idempotencyKey: 'key-disable-remote-123456', acknowledgeImpact: true } })
+    expect(disabled.statusCode).toBe(200)
+    expect(disabled.json()).toMatchObject({ meta: { source: 'new_api' }, key: { status: 'disabled' } })
+    expect(statusCalls).toEqual([{ id: '123', status: 0 }])
+    database.close()
   })
 
   it('disables only a local demo Key with CSRF, idempotency, and a safe audit summary', async () => {
@@ -542,7 +790,7 @@ describe('BFF', () => {
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
     const cookie = cookieHeader(login.headers['set-cookie'])
     const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
-    const body = { idempotencyKey: 'key-disable-1a2b3c4d', reason: '复核疑似泄露的本地演示设备', acknowledgeImpact: true }
+    const body = { idempotencyKey: 'key-disable-1a2b3c4d', acknowledgeImpact: true }
     const disabled = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/disable', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
     expect(disabled.statusCode).toBe(200)
     expect(disabled.json()).toMatchObject({ meta: { source: 'database' }, key: { id: 'key-lin-1', masked: 'sk-ops••••••7F2A', status: 'disabled' }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-key-disable-1a2b3c4d' } })
@@ -560,9 +808,41 @@ describe('BFF', () => {
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=disable&resource=key', headers: { cookie } })
     expect(audit.statusCode).toBe(200)
     expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'disable', resource: expect.objectContaining({ id: 'key-lin-1', name: 'sk-ops••••••7F2A' }), changes: [expect.objectContaining({ field: 'status', before: '启用', after: '停用' })] })]))
-    expect(JSON.stringify({ disabled: disabled.json(), audit: audit.json() })).not.toContain(body.reason)
 
     const withoutCsrf = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/disable', headers: { cookie }, payload: { ...body, idempotencyKey: 'key-disable-5e6f7g8h' } })
+    expect(withoutCsrf.statusCode).toBe(403)
+  })
+
+  it('resets a Key in place without a reason and keeps the new value viewable', async () => {
+    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
+    apps.push(app)
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
+    const cookie = cookieHeader(login.headers['set-cookie'])
+    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
+    const body = { idempotencyKey: 'key-reset-1a2b3c4d', acknowledgeImpact: true }
+    const reset = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/reset', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reset.statusCode).toBe(200)
+    expect(reset.json()).toMatchObject({ key: { id: 'key-lin-1' }, operation: { idempotent: false, idempotencyKey: body.idempotencyKey } })
+    expect(reset.json().secret).toMatch(/^sk-ops-/)
+
+    const detail = await app.inject({ method: 'GET', url: '/api/keys/key-lin-1', headers: { cookie } })
+    expect(detail.json().key).toMatchObject({ id: 'key-lin-1', secretAvailable: true, model: 'ecommerce-copy' })
+    expect(detail.json().key.masked).toBe(reset.json().key.masked)
+    const viewed = await app.inject({ method: 'GET', url: '/api/keys/key-lin-1/secret', headers: { cookie } })
+    expect(viewed.json().secret).toBe(reset.json().secret)
+
+    const replay = await app.inject({ method: 'POST', url: '/api/keys/key-lin-1/reset', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(replay.statusCode).toBe(200)
+    expect(replay.json()).toMatchObject({ key: { id: 'key-lin-1', masked: reset.json().key.masked }, secret: reset.json().secret, operation: { idempotent: true } })
+    const reused = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/reset', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
+    expect(reused.statusCode).toBe(409)
+    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
+
+    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=reset&resource=key', headers: { cookie } })
+    expect(audit.statusCode).toBe(200)
+    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ action: 'reset', resource: expect.objectContaining({ id: 'key-lin-1' }), changes: expect.arrayContaining([expect.objectContaining({ field: 'secret', sensitive: true })]) })]))
+    expect(JSON.stringify(audit.json())).not.toContain(reset.json().secret)
+    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/keys/key-zhou-1/reset', headers: { cookie }, payload: { ...body, idempotencyKey: 'key-reset-5e6f7g8h' } })
     expect(withoutCsrf.statusCode).toBe(403)
   })
 
@@ -611,7 +891,7 @@ describe('BFF', () => {
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.key.masked).toBe('sk-ops••••••7F2A')
-    expect(body.connection.baseUrl).toBe('http://127.0.0.1:3000/v1')
+    expect(body.connection.baseUrl).toBe('http://127.0.0.1:4175/v1')
     expect(JSON.stringify(body)).not.toMatch(/sk-[A-Za-z0-9_-]{20,}/)
 
     const missing = await createApp().inject({ method: 'GET', url: '/api/keys/key-missing-1' })
@@ -799,66 +1079,61 @@ describe('BFF', () => {
     expect(employeeWrite.statusCode).toBe(403)
   })
 
-  it('returns upstream accounts with live probes and no credential material', async () => {
+  it('does not return removed simulated upstream accounts', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/upstreams' })
     const body = response.json()
     expect(response.statusCode).toBe(200)
-    expect(body.meta).toMatchObject({ source: 'demo', live: { newApi: 'reachable', cpa: 'reachable' } })
-    expect(body.summary).toMatchObject({ total: 5, official: 3, experiment: 2, configured: 4 })
+    expect(body.meta).toMatchObject({ source: 'live', live: { cpa: 'reachable' } })
+    expect(body.summary).toMatchObject({ total: 0, available: 0, needsAttention: 0, official: 0, experiment: 0, configured: 0 })
+    expect(body.items).toEqual([])
     expect(body.isolation).toMatchObject({ enforced: true, productionToExperimentFallback: false })
-    expect(body.items.every((item: { credentialConfigured: boolean }) => typeof item.credentialConfigured === 'boolean')).toBe(true)
+    expect(body.meta.notice).toContain('本地模拟账号已移除')
+    expect(JSON.stringify(body)).not.toContain('New API')
     expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|sk-[A-Za-z0-9_-]{8,}/i)
+  })
+
+  it('exposes the configured CPA gateway as a production upstream snapshot', async () => {
+    const app = buildApp({
+      authMode: 'disabled',
+      databasePath: ':memory:',
+      probeNewApi: reachableNewApi,
+      probeCpa: async () => ({ state: 'reachable' as const, configured: true, models: ['gpt-5-codex'], latencyMs: 42, checkedAt: '2026-09-15T10:00:00.000Z' }),
+      probeDocs: reachableService,
+    })
+    apps.push(app)
+    const response = await app.inject({ method: 'GET', url: '/api/upstreams?type=cpa_oauth' })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().meta.source).toBe('live')
+    expect(response.json().items).toEqual([expect.objectContaining({
+      id: 'upstream-cpa-gateway', name: 'CPA Codex OAuth', environment: 'production', status: 'healthy', models: ['gpt-5-codex'],
+      health: expect.objectContaining({ latencyMs: 42 }), credentialConfigured: true,
+    })])
+    expect(response.json().summary).toMatchObject({ experiment: 0 })
   })
 
   it('filters upstream accounts and rejects unsupported account states', async () => {
     const filtered = await createApp().inject({ method: 'GET', url: '/api/upstreams?type=cpa_oauth&status=auth_required' })
     expect(filtered.statusCode).toBe(200)
-    expect(filtered.json().items).toHaveLength(1)
-    expect(filtered.json().items[0]).toMatchObject({ id: 'upstream-cpa-lab-2', environment: 'experiment', credentialValidation: 'failed' })
+    expect(filtered.json().items).toHaveLength(0)
 
     const invalid = await createApp().inject({ method: 'GET', url: '/api/upstreams?status=expired' })
     expect(invalid.statusCode).toBe(400)
     expect(invalid.json().error.code).toBe('INVALID_REQUEST')
   })
 
-  it('records only a local synthetic upstream check with CSRF, idempotency, and a safe audit summary', async () => {
+  it('does not expose operations for removed simulated upstream accounts', async () => {
     const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
     apps.push(app)
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
     const cookie = cookieHeader(login.headers['set-cookie'])
     const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
-    const body = { idempotencyKey: 'upstream-check-1a2b3c4d', reason: '确认本地演示上游账号状态与最近检查时间', acknowledgeSynthetic: true }
+    const body = { idempotencyKey: 'upstream-check-1a2b3c4d', reason: '确认真实上游账号状态与最近检查时间', acknowledgeSynthetic: true }
     const checked = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-cn-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
-    expect(checked.statusCode).toBe(200)
-    expect(checked.json()).toMatchObject({ meta: { source: 'database' }, upstream: { id: 'upstream-official-cn-1', credentialConfigured: true }, operation: { idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-upstream-check-1a2b3c4d' } })
-    const checkedAt = checked.json().upstream.health.checkedAt
-
-    const listed = await app.inject({ method: 'GET', url: '/api/upstreams', headers: { cookie } })
-    expect(listed.json().items.find((item: { id: string }) => item.id === 'upstream-official-cn-1')).toMatchObject({ health: { checkedAt } })
+    expect(checked.statusCode).toBe(404)
+    expect(checked.json().error.code).toBe('UPSTREAM_NOT_FOUND')
     const history = await app.inject({ method: 'GET', url: '/api/upstreams/upstream-official-cn-1/history', headers: { cookie } })
-    expect(history.statusCode).toBe(200)
-    expect(history.json()).toMatchObject({ upstream: { id: 'upstream-official-cn-1' }, total: 1, items: [expect.objectContaining({ actorName: '超级管理员', result: 'success', code: 'SYNTHETIC_UPSTREAM_CHECK_COMPLETED', checkedAt })] })
-    expect(JSON.stringify(history.json())).not.toContain(body.reason)
-    const replay = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-cn-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
-    expect(replay.statusCode).toBe(200)
-    expect(replay.json().operation.idempotent).toBe(true)
-    const reused = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-cpa-lab-1/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
-    expect(reused.statusCode).toBe(409)
-    expect(reused.json().error.code).toBe('IDEMPOTENCY_KEY_REUSED')
-
-    const unconfigured = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-official-standby/check', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, idempotencyKey: 'upstream-check-5e6f7g8h' } })
-    expect(unconfigured.statusCode).toBe(400)
-    expect(unconfigured.json().error.code).toBe('UPSTREAM_CHECK_UNAVAILABLE')
-    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=verify&resource=upstream', headers: { cookie } })
-    expect(audit.statusCode).toBe(200)
-    expect(audit.json().items).toEqual(expect.arrayContaining([expect.objectContaining({ resource: expect.objectContaining({ id: 'upstream-official-cn-1', name: 'Official CN · 主账号' }), result: { status: 'success', code: 'SYNTHETIC_UPSTREAM_CHECK_COMPLETED' } })]))
-    expect(JSON.stringify({ checked: checked.json(), audit: audit.json() })).not.toContain(body.reason)
-
-    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-cpa-lab-1/check', headers: { cookie }, payload: { ...body, idempotencyKey: 'upstream-check-9i0j1k2l' } })
-    expect(withoutCsrf.statusCode).toBe(403)
-    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeWrite = await app.inject({ method: 'POST', url: '/api/upstreams/upstream-cpa-lab-1/check', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...body, idempotencyKey: 'upstream-check-2l3m4n5o' } })
-    expect(employeeWrite.statusCode).toBe(403)
+    expect(history.statusCode).toBe(404)
+    expect(history.json().error.code).toBe('UPSTREAM_NOT_FOUND')
   })
 
   it('returns filterable usage metadata with separate cost bases', async () => {
@@ -905,134 +1180,6 @@ describe('BFF', () => {
     })
   })
 
-  it('returns filterable alert events and explicit notification configuration state', async () => {
-    const summary = await createApp().inject({ method: 'GET', url: '/api/alerts/summary' })
-    expect(summary.statusCode).toBe(200)
-    expect(summary.json().meta).toMatchObject({ source: 'database', simulated: true })
-    expect(summary.json().summary).toMatchObject({ open: 4, critical: 1, warning: 3, experiment: 2 })
-    expect(summary.json().notificationConfig).toMatchObject({ configured: false })
-
-    const response = await createApp().inject({ method: 'GET', url: '/api/alerts?severity=warning&status=open&environment=experiment&pageSize=10' })
-    const body = response.json()
-    expect(response.statusCode).toBe(200)
-    expect(body.items).toHaveLength(1)
-    expect(body.meta).toMatchObject({ source: 'database', simulated: true })
-    expect(body.items[0]).toMatchObject({ id: 'alert-cpa-upstream', severity: 'warning', status: 'open', environment: 'experiment' })
-    expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|rawUpstreamBody/i)
-
-    const related = await createApp().inject({ method: 'GET', url: '/api/alerts?subjectId=upstream-cpa-lab-2' })
-    expect(related.statusCode).toBe(200)
-    expect(related.json().items).toHaveLength(1)
-    expect(related.json().items[0]).toMatchObject({ id: 'alert-cpa-credential', subject: { id: 'upstream-cpa-lab-2' } })
-
-    const exactAlert = await createApp().inject({ method: 'GET', url: '/api/alerts?alertId=alert-error-global' })
-    expect(exactAlert.statusCode).toBe(200)
-    expect(exactAlert.json().items).toEqual([expect.objectContaining({ id: 'alert-error-global' })])
-
-    const invalid = await createApp().inject({ method: 'GET', url: '/api/alerts?severity=fatal' })
-    expect(invalid.statusCode).toBe(400)
-    expect(invalid.json().error.code).toBe('INVALID_REQUEST')
-
-    const invalidSubject = await createApp().inject({ method: 'GET', url: '/api/alerts?subjectId=upstream_cpa_lab_2' })
-    expect(invalidSubject.statusCode).toBe(400)
-    expect(invalidSubject.json().error.code).toBe('INVALID_REQUEST')
-
-    const invalidAlert = await createApp().inject({ method: 'GET', url: '/api/alerts?alertId=not-an-alert-event' })
-    expect(invalidAlert.statusCode).toBe(400)
-    expect(invalidAlert.json().error.code).toBe('INVALID_REQUEST')
-  })
-
-  it('returns read-only alert rules and safe event details with stable missing errors', async () => {
-    const rules = await createApp().inject({ method: 'GET', url: '/api/alert-rules' })
-    expect(rules.statusCode).toBe(200)
-    expect(rules.json().meta).toMatchObject({ source: 'database', simulated: true })
-    expect(rules.json().items).toHaveLength(8)
-    expect(rules.json().items.every((item: { notification: { configured: boolean } }) => item.notification.configured === false)).toBe(true)
-
-    const response = await createApp().inject({ method: 'GET', url: '/api/alerts/alert-error-global' })
-    const body = response.json()
-    expect(response.statusCode).toBe(200)
-    expect(body.item).toMatchObject({ id: 'alert-error-global', severity: 'critical' })
-    expect(body.analysis.rawUpstreamBodyAvailable).toBe(false)
-    expect(body.timeline.some((item: { type: string }) => item.type === 'notification')).toBe(true)
-    expect(JSON.stringify(body)).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken/i)
-
-    const missing = await createApp().inject({ method: 'GET', url: '/api/alerts/alert-missing' })
-    expect(missing.statusCode).toBe(404)
-    expect(missing.json().error.code).toBe('ALERT_NOT_FOUND')
-    expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
-  })
-
-  it('edits only local alert-rule policy with CSRF, idempotency, and safe audit summaries', async () => {
-    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
-    apps.push(app)
-    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
-    const cookie = cookieHeader(login.headers['set-cookie'])
-    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
-    const body = { severity: 'warning', enabled: false, condition: '5xx 错误率 ≥ 8%', window: '10 分钟', cooldownMinutes: 45, reason: '本地演示规则复核后暂时放宽阈值', acknowledgeSimulation: true, idempotencyKey: 'alert-rule-1a2b3c4d' }
-    const missingCsrf = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie }, payload: body })
-    expect(missingCsrf.statusCode).toBe(403)
-    expect(missingCsrf.json().error.code).toBe('CSRF_INVALID')
-
-    const updated = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
-    expect(updated.statusCode).toBe(200)
-    expect(updated.json()).toMatchObject({ rule: { id: 'rule-error-critical', severity: 'warning', enabled: false, condition: '5xx 错误率 ≥ 8%', window: '10 分钟', cooldownMinutes: 45 }, operation: { action: 'update', idempotencyKey: body.idempotencyKey, idempotent: false, auditEventId: 'audit-alert-rule-1a2b3c4d' } })
-    const replay = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie, 'x-csrf-token': csrfToken }, payload: body })
-    expect(replay.statusCode).toBe(200)
-    expect(replay.json().operation.idempotent).toBe(true)
-
-    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&eventId=audit-alert-rule-1a2b3c4d', headers: { cookie } })
-    expect(audit.statusCode).toBe(200)
-    expect(audit.json().items).toEqual([expect.objectContaining({ action: 'update', resource: expect.objectContaining({ type: 'alert', id: 'rule-error-critical', name: '错误率严重告警' }), result: { status: 'success', code: 'ALERT_RULE_UPDATED' } })])
-    expect(JSON.stringify({ updated: updated.json(), audit: audit.json() })).not.toContain(body.reason)
-
-    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeWrite = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...body, idempotencyKey: 'alert-rule-5e6f7g8h' } })
-    expect(employeeWrite.statusCode).toBe(403)
-    const invalid = await app.inject({ method: 'PATCH', url: '/api/alert-rules/rule-error-critical', headers: { cookie, 'x-csrf-token': csrfToken }, payload: { ...body, cooldownMinutes: 1441, idempotencyKey: 'alert-rule-9i0j1k2l' } })
-    expect(invalid.statusCode).toBe(400)
-  })
-
-  it('acknowledges and closes only local simulated alerts with CSRF, idempotency, and safe audit summaries', async () => {
-    const app = buildApp({ databasePath: ':memory:', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService })
-    apps.push(app)
-    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'admin', password: 'admin-demo' } })
-    const cookie = cookieHeader(login.headers['set-cookie'])
-    const csrfToken = cookieValue(login.headers['set-cookie'], 'ai_ops_csrf')
-    const acknowledgeBody = { idempotencyKey: 'alert-ack-1a2b3c4d', reason: '已完成本地模拟事件复核并由管理员接手处理', acknowledgeSimulation: true }
-    const acknowledged = await app.inject({ method: 'POST', url: '/api/alerts/alert-error-global/acknowledge', headers: { cookie, 'x-csrf-token': csrfToken }, payload: acknowledgeBody })
-    expect(acknowledged.statusCode).toBe(200)
-    expect(acknowledged.json()).toMatchObject({ meta: { source: 'database' }, item: { id: 'alert-error-global', status: 'acknowledged', assignee: { name: '超级管理员' } }, operation: { action: 'acknowledge', idempotencyKey: acknowledgeBody.idempotencyKey, idempotent: false, auditEventId: 'audit-alert-ack-1a2b3c4d' } })
-    const exactAcknowledgementAudit = await app.inject({ method: 'GET', url: `/api/audit-events?eventId=${encodeURIComponent(acknowledged.json().operation.auditEventId)}`, headers: { cookie } })
-    expect(exactAcknowledgementAudit.statusCode).toBe(200)
-    expect(exactAcknowledgementAudit.json().items).toEqual([
-      expect.objectContaining({ id: 'audit-alert-ack-1a2b3c4d', action: 'acknowledge', resource: expect.objectContaining({ id: 'alert-error-global' }) }),
-    ])
-    const replay = await app.inject({ method: 'POST', url: '/api/alerts/alert-error-global/acknowledge', headers: { cookie, 'x-csrf-token': csrfToken }, payload: acknowledgeBody })
-    expect(replay.statusCode).toBe(200)
-    expect(replay.json().operation.idempotent).toBe(true)
-
-    const closeBody = { idempotencyKey: 'alert-close-1a2b3c4d', reason: '本地演示复核已经完成，模拟事件可安全关闭', acknowledgeSimulation: true }
-    const closed = await app.inject({ method: 'POST', url: '/api/alerts/alert-error-global/close', headers: { cookie, 'x-csrf-token': csrfToken }, payload: closeBody })
-    expect(closed.statusCode).toBe(200)
-    expect(closed.json()).toMatchObject({ item: { id: 'alert-error-global', status: 'closed', assignee: { name: '超级管理员' } }, operation: { action: 'close', idempotencyKey: closeBody.idempotencyKey, idempotent: false, auditEventId: 'audit-alert-close-1a2b3c4d' } })
-    const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&resource=alert&pageSize=20', headers: { cookie } })
-    expect(audit.statusCode).toBe(200)
-    expect(audit.json().items).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: 'acknowledge', resource: expect.objectContaining({ id: 'alert-error-global', name: '官方全球组错误率持续升高' }), result: { status: 'success', code: 'ALERT_ACKNOWLEDGED' } }),
-      expect.objectContaining({ action: 'update', resource: expect.objectContaining({ id: 'alert-error-global', name: '官方全球组错误率持续升高' }), result: { status: 'success', code: 'ALERT_CLOSED' } }),
-    ]))
-    expect(JSON.stringify({ acknowledged: acknowledged.json(), closed: closed.json(), audit: audit.json() })).not.toContain(acknowledgeBody.reason)
-    expect(JSON.stringify({ acknowledged: acknowledged.json(), closed: closed.json(), audit: audit.json() })).not.toContain(closeBody.reason)
-    expect(JSON.stringify(exactAcknowledgementAudit.json())).not.toContain(acknowledgeBody.reason)
-
-    const withoutCsrf = await app.inject({ method: 'POST', url: '/api/alerts/alert-balance-low/acknowledge', headers: { cookie }, payload: { ...acknowledgeBody, idempotencyKey: 'alert-ack-5e6f7g8h' } })
-    expect(withoutCsrf.statusCode).toBe(403)
-    const employeeLogin = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'employee', password: 'employee-demo' } })
-    const employeeWrite = await app.inject({ method: 'POST', url: '/api/alerts/alert-balance-low/acknowledge', headers: { cookie: cookieHeader(employeeLogin.headers['set-cookie']), 'x-csrf-token': cookieValue(employeeLogin.headers['set-cookie'], 'ai_ops_csrf') }, payload: { ...acknowledgeBody, idempotencyKey: 'alert-ack-9i0j1k2l' } })
-    expect(employeeWrite.statusCode).toBe(403)
-  })
-
   it('returns filterable audit events with safe sensitive-field summaries', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/audit-events?period=7d&action=rotate&resource=key&result=success&pageSize=10' })
     const body = response.json()
@@ -1068,6 +1215,15 @@ describe('BFF', () => {
     expect(response.body).toContain('changed_fields')
     expect(response.body).not.toMatch(/Bearer|accessToken|managementKey|apiKey|oauthToken|密码|原因原文/i)
 
+    const singleEvent = await app.inject({
+      method: 'POST',
+      url: '/api/audit-events/export',
+      payload: { period: '7d', search: '', eventId: 'audit-key-rotate', actor: 'all', action: 'all', resource: 'all', result: 'all', source: 'all', page: 1, pageSize: 10 },
+    })
+    expect(singleEvent.statusCode).toBe(200)
+    expect(singleEvent.headers['content-disposition']).toMatch(/audit-event-key-rotate-\d{8}\.csv/)
+    expect(singleEvent.body).toContain('audit-key-rotate')
+
     const audit = await app.inject({ method: 'GET', url: '/api/audit-events?period=7d&action=export&resource=export&pageSize=50' })
     expect(audit.statusCode).toBe(200)
     expect(audit.json().items).toEqual(expect.arrayContaining([
@@ -1102,6 +1258,55 @@ describe('BFF', () => {
     expect(missing.json().error.requestId).toBe(missing.headers['x-request-id'])
   })
 
+  it('opens metadata-only details for CPA and New API events', async () => {
+    const occurredAt = new Date().toISOString()
+    const cpaLogReader: CpaLogReader = {
+      path: 'fixture', configured: true,
+      listLogs: () => [{ id: 'cpa-fixture-1', occurredAt, traceId: 'trace-cpa-fixture', statusCode: 200, durationMs: 18, clientIp: '10.20.30.*', method: 'GET', path: '/v1/models', fileName: 'main.log' }],
+    }
+    const newApiDatabase = {
+      available: true as const, filename: 'fixture',
+      listLogs: () => [{ id: 'new-api-fixture-1', userId: null, occurredAt, type: 2, username: 'fixture-user', tokenName: null, modelName: 'fixture-model', quota: 0, promptTokens: 3, completionTokens: 4, useTime: 21, streamed: false, channelId: '1', channelName: 'fixture-channel', tokenId: null, group: null, requestId: 'fixture-request', upstreamRequestId: 'trace-new-api-fixture' }],
+    } as unknown as NewApiDatabaseReader
+    const app = buildApp({ authMode: 'disabled', probeNewApi: reachableNewApi, probeCpa: reachableService, probeDocs: reachableService, cpaLogReader, newApiDatabase })
+    apps.push(app)
+
+    const listing = await app.inject({ method: 'GET', url: '/api/audit-events?period=today&sourceSystem=cpa&pageSize=10' })
+    expect(listing.statusCode).toBe(200)
+    const cpaEvent = listing.json().items[0]
+    expect(cpaEvent).toMatchObject({ sourceSystem: 'cpa', contentAvailable: false, credentialValueAvailable: false })
+    const cpaDetail = await app.inject({ method: 'GET', url: `/api/audit-events/${encodeURIComponent(cpaEvent.id)}` })
+    expect(cpaDetail.statusCode).toBe(200)
+    expect(cpaDetail.json()).toMatchObject({ event: { id: cpaEvent.id, sourceSystem: 'cpa', contentAvailable: false, credentialValueAvailable: false, transport: { traceId: 'trace-cpa-fixture' } }, integrity: { verified: false, algorithm: 'not_configured' }, relatedAuditIds: [] })
+    expect(JSON.stringify(cpaDetail.json())).not.toMatch(/request body|response body|fixture-secret|Bearer/i)
+
+    const cpaExport = await app.inject({
+      method: 'POST', url: '/api/audit-events/export',
+      payload: { period: 'today', search: '', eventId: cpaEvent.id, actor: 'all', action: 'all', resource: 'all', result: 'all', source: 'all', sourceSystem: 'cpa', page: 1, pageSize: 10 },
+    })
+    expect(cpaExport.statusCode).toBe(200)
+    expect(cpaExport.headers['content-disposition']).toMatch(/audit-event-cpa-cpa-fixture-1-\d{8}\.csv/)
+    expect(cpaExport.body).toContain(cpaEvent.id)
+    expect(cpaExport.body).not.toMatch(/request body|response body|fixture-secret|Bearer/i)
+
+    const newApiListing = await app.inject({ method: 'GET', url: '/api/audit-events?period=today&sourceSystem=new_api&pageSize=10' })
+    expect(newApiListing.statusCode).toBe(200)
+    const newApiEvent = newApiListing.json().items[0]
+    expect(newApiEvent).toMatchObject({ sourceSystem: 'new_api', contentAvailable: false, credentialValueAvailable: false })
+    const newApiDetail = await app.inject({ method: 'GET', url: `/api/audit-events/${encodeURIComponent(newApiEvent.id)}` })
+    expect(newApiDetail.statusCode).toBe(200)
+    expect(newApiDetail.json()).toMatchObject({ event: { id: newApiEvent.id, sourceSystem: 'new_api', contentAvailable: false, credentialValueAvailable: false, transport: { traceId: 'trace-new-api-fixture' } }, integrity: { verified: false, algorithm: 'not_configured' }, relatedAuditIds: [] })
+
+    const newApiExport = await app.inject({
+      method: 'POST', url: '/api/audit-events/export',
+      payload: { period: 'today', search: '', eventId: newApiEvent.id, actor: 'all', action: 'all', resource: 'all', result: 'all', source: 'all', sourceSystem: 'new_api', page: 1, pageSize: 10 },
+    })
+    expect(newApiExport.statusCode).toBe(200)
+    expect(newApiExport.headers['content-disposition']).toMatch(/audit-event-new-api-new-api-fixture-1-\d{8}\.csv/)
+    expect(newApiExport.body).toContain(newApiEvent.id)
+    expect(newApiExport.body).not.toMatch(/request body|response body|fixture-secret|Bearer/i)
+  })
+
   it('returns filterable conversation-audit metadata without raw content', async () => {
     const response = await createApp().inject({ method: 'GET', url: '/api/conversation-audits?period=7d&state=captured&grouping=independent_call&pageSize=10' })
     const body = response.json()
@@ -1118,13 +1323,9 @@ describe('BFF', () => {
     expect(invalid.json().error.code).toBe('INVALID_REQUEST')
   })
 
-  it('requires a reason before returning synthetic redacted demo turns', async () => {
+  it('opens synthetic redacted turns directly and records the access', async () => {
     const app = createApp()
-    const denied = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: { reason: '太短', acknowledgeSensitiveScope: true } })
-    expect(denied.statusCode).toBe(400)
-    expect(denied.json().error.code).toBe('INVALID_REQUEST')
-
-    const response = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: { reason: '复核客户投诉关联请求与脱敏结果', acknowledgeSensitiveScope: true } })
+    const response = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-copy-01/access', payload: {} })
     const body = response.json()
     expect(response.statusCode).toBe(200)
     expect(body.content).toMatchObject({ synthetic: true, decrypted: false })
@@ -1139,7 +1340,7 @@ describe('BFF', () => {
     expect(accessHistory.json()).toMatchObject({
       meta: { source: 'database' },
       record: { id: 'conv-audit-copy-01', requestId: 'req-260915-8f31' },
-      items: [expect.objectContaining({ action: 'view_synthetic', reasonProvided: true, reasonLength: 15, acknowledgedSensitiveScope: true })],
+      items: [expect.objectContaining({ action: 'view_synthetic', reasonProvided: false, reasonLength: 0, acknowledgedSensitiveScope: false })],
     })
     expect(JSON.stringify(accessHistory.json())).not.toMatch(/actorUserId|reasonText|复核客户投诉关联请求与脱敏结果/i)
 
@@ -1161,10 +1362,9 @@ describe('BFF', () => {
     const accessAudit = audit.json().items.find((item: { resource: { type: string } }) => item.resource.type === 'conversation')
     expect(accessAudit.id).toBe(body.access.auditEventId)
     expect(accessAudit.changes).toEqual(expect.arrayContaining([
-      expect.objectContaining({ field: 'reason', after: '已变化', sensitive: true }),
+      expect.objectContaining({ field: 'accessMode', after: '直接查看（超级管理员）', sensitive: false }),
       expect.objectContaining({ field: 'contentMode', after: '合成且预先脱敏', sensitive: false }),
     ]))
-    expect(JSON.stringify(audit.json())).not.toContain('复核客户投诉关联请求与脱敏结果')
 
     const unavailable = await app.inject({ method: 'POST', url: '/api/conversation-audits/conv-audit-expired-05/access', payload: { reason: '复核历史记录的到期清理状态', acknowledgeSensitiveScope: true } })
     expect(unavailable.statusCode).toBe(404)

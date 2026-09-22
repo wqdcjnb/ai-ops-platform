@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { peopleFilterSchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema } from './people-api'
+import { peopleFilterSchema, peopleResponseSchema, personBatchCreateBodySchema, personBatchCreateResponseSchema, personDeleteBodySchema, personDetailResponseSchema, personDisableBodySchema, personDisableResponseSchema, personEnableBodySchema, personEnableResponseSchema } from './people-api'
 
 describe('people API contracts', () => {
   it('rejects unsafe pagination values', () => {
@@ -32,9 +32,20 @@ describe('people API contracts', () => {
   })
 
   it('requires acknowledgement and an operation number to disable a local person', () => {
-    expect(personDisableBodySchema.safeParse({ idempotencyKey: 'person-disable-1a2b3c4d', reason: '本地演示账号已完成测试，需要停用', acknowledgeImpact: true }).success).toBe(true)
-    expect(personDisableBodySchema.safeParse({ idempotencyKey: 'short', reason: '太短', acknowledgeImpact: false }).success).toBe(false)
+    expect(personDisableBodySchema.safeParse({ idempotencyKey: 'person-disable-1a2b3c4d', acknowledgeImpact: true }).success).toBe(true)
+    expect(personDisableBodySchema.safeParse({ idempotencyKey: 'short', acknowledgeImpact: false }).success).toBe(false)
     expect(personDisableResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-17T10:00:00.000Z', notice: '本地演示' }, person: { id: 'person-lin', name: '林筱雨', status: 'disabled' }, keysDisabled: 2, operation: { idempotencyKey: 'person-disable-1a2b3c4d', idempotent: false, auditEventId: 'audit-person-disable-1a2b3c4d' } }).success).toBe(true)
+  })
+
+  it('requires acknowledgement and an operation number to enable a disabled person', () => {
+    expect(personEnableBodySchema.safeParse({ idempotencyKey: 'person-enable-1a2b3c4d', acknowledgeImpact: true }).success).toBe(true)
+    expect(personEnableBodySchema.safeParse({ idempotencyKey: 'short', acknowledgeImpact: false }).success).toBe(false)
+    expect(personEnableResponseSchema.safeParse({ meta: { source: 'database', completedAt: '2026-09-19T10:00:00.000Z', notice: '本地演示' }, person: { id: 'person-lin', name: '林筱雨', status: 'active' }, keysEnabled: 2, operation: { idempotencyKey: 'person-enable-1a2b3c4d', idempotent: false, auditEventId: 'audit-person-enable-1a2b3c4d' } }).success).toBe(true)
+  })
+
+  it('allows a disabled person to be deleted without typing a reason', () => {
+    expect(personDeleteBodySchema.safeParse({ idempotencyKey: 'person-delete-1a2b3c4d', acknowledgeImpact: true }).success).toBe(true)
+    expect(personDeleteBodySchema.safeParse({ idempotencyKey: 'person-delete-1a2b3c4d', reason: '太短', acknowledgeImpact: true }).success).toBe(false)
   })
 
   it('requires a bounded idempotency key for batch person creation', () => {

@@ -1,19 +1,15 @@
 import { createRouter, createWebHistory, type RouterHistory } from 'vue-router'
 import AdminLayout from './layouts/AdminLayout.vue'
 import HomeView from './views/HomeView.vue'
-import OverviewView from './views/OverviewView.vue'
 import PeopleView from './views/PeopleView.vue'
-import PeopleDetailView from './views/PeopleDetailView.vue'
 import KeysView from './views/KeysView.vue'
 import LimitsView from './views/LimitsView.vue'
 import RoutesView from './views/RoutesView.vue'
 import ModelsView from './views/ModelsView.vue'
 import UpstreamsView from './views/UpstreamsView.vue'
 import UsageView from './views/UsageView.vue'
-import AlertsView from './views/AlertsView.vue'
 import AuditView from './views/AuditView.vue'
 import ConversationAuditView from './views/ConversationAuditView.vue'
-import SettingsView from './views/SettingsView.vue'
 import type { AppRole } from './auth-api'
 
 declare module 'vue-router' {
@@ -48,23 +44,15 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
             component: HomeView,
             meta: { title: '统一入口', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P0' },
           },
-          {
-            path: 'overview',
-            name: 'overview',
-            component: OverviewView,
-            meta: { title: '运营总览', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P0' },
-          },
+          // Keep old bookmarks working while removing the obsolete page.
+          { path: 'overview', redirect: '/', meta: { title: '统一入口', roles: ['super_admin', 'admin', 'department_lead', 'finance'] } },
+          // Keep old bookmarks working while removing the obsolete settings page.
+          { path: 'settings', redirect: '/', meta: { title: '统一入口', roles: ['super_admin', 'admin', 'department_lead', 'finance'] } },
           {
             path: 'people',
             name: 'people',
             component: PeopleView,
             meta: { title: '人员与部门', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P1' },
-          },
-          {
-            path: 'people/:id',
-            name: 'person-detail',
-            component: PeopleDetailView,
-            meta: { title: '人员详情', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P1' },
           },
           {
             path: 'keys',
@@ -88,7 +76,7 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
             path: 'models',
             name: 'models',
             component: ModelsView,
-            meta: { title: '模型与渠道', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P2' },
+            meta: { title: '模型目录', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P2' },
           },
           {
             path: 'upstreams',
@@ -100,13 +88,7 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
             path: 'usage',
             name: 'usage',
             component: UsageView,
-            meta: { title: '用量与日志', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P1' },
-          },
-          {
-            path: 'alerts',
-            name: 'alerts',
-            component: AlertsView,
-            meta: { title: '告警中心', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P2' },
+            meta: { title: '模型调用分析', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P1' },
           },
           {
             path: 'audit',
@@ -119,12 +101,6 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
             name: 'conversation-audit',
             component: ConversationAuditView,
             meta: { title: '对话审计', roles: ['super_admin'], stage: 'P3' },
-          },
-          {
-            path: 'settings',
-            name: 'settings',
-            component: SettingsView,
-            meta: { title: '系统设置', roles: ['super_admin', 'admin'], stage: 'P3' },
           },
         ],
       },

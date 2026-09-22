@@ -1,5 +1,5 @@
 import type { GatewayConfig, GatewayMode } from '../gateway-config.js'
-import { OpenAiCompatibleAdapter, type GatewayUpstream } from './openai-compatible.js'
+import { OpenAiCompatibleAdapter, type GatewayRequestContext, type GatewayUpstream } from './openai-compatible.js'
 
 export interface GatewayConnectorDescriptor {
   id: GatewayMode
@@ -11,7 +11,7 @@ export interface GatewayConnectorDescriptor {
 const connectorMetadata: Record<GatewayMode, Omit<GatewayConnectorDescriptor, 'configured'>> = {
   standalone: { id: 'standalone', label: '独立网关', environment: 'production' },
   new_api: { id: 'new_api', label: 'New API 连接器', environment: 'production' },
-  cpa: { id: 'cpa', label: 'CPA 连接器', environment: 'experiment' },
+  cpa: { id: 'cpa', label: 'CPA Codex OAuth', environment: 'production' },
 }
 
 export function describeGatewayConnector(config: GatewayConfig): GatewayConnectorDescriptor {
@@ -34,12 +34,12 @@ class ModeBoundOpenAiAdapter implements GatewayUpstream {
     this.adapter = new OpenAiCompatibleAdapter(config)
   }
 
-  listModels(signal?: AbortSignal) {
-    return this.adapter.listModels(signal)
+  listModels(signal?: AbortSignal, context?: GatewayRequestContext) {
+    return this.adapter.listModels(signal, context)
   }
 
-  chatCompletion(request: Parameters<GatewayUpstream['chatCompletion']>[0], signal?: AbortSignal) {
-    return this.adapter.chatCompletion(request, signal)
+  chatCompletion(request: Parameters<GatewayUpstream['chatCompletion']>[0], signal?: AbortSignal, context?: GatewayRequestContext) {
+    return this.adapter.chatCompletion(request, signal, context)
   }
 
   chatCompletionStream(
@@ -47,12 +47,13 @@ class ModeBoundOpenAiAdapter implements GatewayUpstream {
     onChunk: Parameters<GatewayUpstream['chatCompletionStream']>[1],
     signal?: AbortSignal,
     requestId?: string,
+    context?: GatewayRequestContext,
   ) {
-    return this.adapter.chatCompletionStream(request, onChunk, signal, requestId)
+    return this.adapter.chatCompletionStream(request, onChunk, signal, requestId, context)
   }
 
-  responses(request: Parameters<NonNullable<GatewayUpstream['responses']>>[0], signal?: AbortSignal) {
-    return this.adapter.responses!(request, signal)
+  responses(request: Parameters<NonNullable<GatewayUpstream['responses']>>[0], signal?: AbortSignal, context?: GatewayRequestContext) {
+    return this.adapter.responses!(request, signal, context)
   }
 
   responsesStream(
@@ -60,8 +61,9 @@ class ModeBoundOpenAiAdapter implements GatewayUpstream {
     onEvent: Parameters<NonNullable<GatewayUpstream['responsesStream']>>[1],
     signal?: AbortSignal,
     requestId?: string,
+    context?: GatewayRequestContext,
   ) {
-    return this.adapter.responsesStream!(request, onEvent, signal, requestId)
+    return this.adapter.responsesStream!(request, onEvent, signal, requestId, context)
   }
 
   cancel(requestId: string, signal?: AbortSignal) {

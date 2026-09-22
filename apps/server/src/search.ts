@@ -63,7 +63,7 @@ export function createDatabaseSearch(database: PlatformDatabase, query: z.infer<
       id: person.id,
       title: person.displayName,
       detail: [person.departmentName ?? '未分配部门', person.username].join(' · '),
-      href: `/people/${encodeURIComponent(person.id)}`,
+      href: `/usage?person=${encodeURIComponent(person.id)}`,
     }))
 
   const keys = database.listApiKeys()

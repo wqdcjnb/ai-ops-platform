@@ -1,11 +1,10 @@
 import { z } from 'zod'
-import type { NewApiStatus } from './new-api-status.js'
 import type { PlatformProbeResult } from './platform.js'
 import type { PlatformDatabase } from './platform-db.js'
 
 export const upstreamsQuerySchema = z.object({
   search: z.string().trim().max(60).default(''),
-  type: z.enum(['all', 'official_api', 'cpa_oauth']).default('all'),
+  type: z.enum(['all', 'cpa_oauth']).default('all'),
   status: z.enum(['all', 'healthy', 'degraded', 'auth_required', 'offline', 'unconfigured']).default('all'),
 })
 
@@ -20,7 +19,7 @@ export const upstreamItemSchema = z.object({
   id: z.string(),
   name: z.string(),
   provider: z.string(),
-  type: z.enum(['official_api', 'cpa_oauth']),
+  type: z.literal('cpa_oauth'),
   environment: z.enum(['production', 'experiment']),
   status: z.enum(['healthy', 'degraded', 'auth_required', 'offline', 'unconfigured']),
   credentialConfigured: z.boolean(),
@@ -45,13 +44,13 @@ export const upstreamItemSchema = z.object({
 
 export const upstreamsResponseSchema = z.object({
   meta: z.object({
-    source: z.literal('demo'),
+    source: z.literal('live'),
     generatedAt: z.string().datetime(),
     notice: z.string(),
     live: z.object({
-      newApi: z.enum(['healthy', 'reachable', 'auth_required', 'offline']),
       cpa: z.enum(['reachable', 'offline']),
       checkedAt: z.string().datetime(),
+      managementConfigured: z.boolean(),
     }),
   }),
   summary: z.object({
@@ -104,40 +103,46 @@ export type UpstreamCheckBody = z.infer<typeof upstreamCheckBodySchema>
 export type UpstreamCheckResponse = z.infer<typeof upstreamCheckResponseSchema>
 export type UpstreamHistoryResponse = z.infer<typeof upstreamHistoryResponseSchema>
 
-function offset(now: Date, minutes: number) { return new Date(now.getTime() + minutes * 60_000).toISOString() }
-
-function createUpstreamItems(now: Date): UpstreamItem[] {
-  return [
-    {
-      id: 'upstream-official-cn-1', name: 'Official CN · 主账号', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'healthy', credentialConfigured: true, credentialValidation: 'verified', models: ['gpt-5.1-mini', 'gpt-5.1'],
-      health: { successRate: 99.6, latencyMs: 1_420, checkedAt: offset(now, -1) }, balance: { state: 'sufficient', label: '余额充足', updatedAt: offset(now, -12) }, capacity: { rpm: 500, tpm: 1_000_000 }, auth: null, windows: [], cooldown: null, recentError: null,
-    },
-    {
-      id: 'upstream-official-global-1', name: 'Official Global · 分析账号', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'degraded', credentialConfigured: true, credentialValidation: 'verified', models: ['gpt-5.1'],
-      health: { successRate: 96.8, latencyMs: 3_960, checkedAt: offset(now, -1) }, balance: { state: 'low', label: '余额偏低', updatedAt: offset(now, -18) }, capacity: { rpm: 180, tpm: 360_000 }, auth: null, windows: [], cooldown: null,
-      recentError: { category: 'balance', summary: '余额已进入预警区间，策略分析可在官方组内降级', firstSeenAt: offset(now, -420), lastSeenAt: offset(now, -18) },
-    },
-    {
-      id: 'upstream-official-standby', name: 'Official CN · 备用账号', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'unconfigured', credentialConfigured: false, credentialValidation: 'not_checked', models: ['gpt-5.1-mini'],
-      health: { successRate: null, latencyMs: null, checkedAt: offset(now, -1_440) }, balance: { state: 'unavailable', label: '等待配置', updatedAt: null }, capacity: null, auth: null, windows: [], cooldown: null,
-      recentError: { category: 'authentication', summary: '服务端尚未配置此备用账号凭据', firstSeenAt: offset(now, -1_440), lastSeenAt: offset(now, -1_440) },
-    },
-    {
-      id: 'upstream-cpa-lab-1', name: 'CPA Pro · 实验账号 01', provider: 'CLIProxyAPI', type: 'cpa_oauth', environment: 'experiment', status: 'healthy', credentialConfigured: true, credentialValidation: 'verified', models: ['pro-oauth-lab'],
-      health: { successRate: 94.5, latencyMs: 5_820, checkedAt: offset(now, -3) }, balance: { state: 'unknown', label: '按窗口管理', updatedAt: null }, capacity: null,
-      auth: { expiresAt: offset(now, 15 * 24 * 60), lastRefreshedAt: offset(now, -210) }, windows: [{ id: 'five_hour', label: '5 小时窗口', usedPercent: 36, resetsAt: offset(now, 124) }, { id: 'weekly', label: '周窗口', usedPercent: 58, resetsAt: offset(now, 3 * 24 * 60) }], cooldown: { active: false, until: null, reason: null }, recentError: null,
-    },
-    {
-      id: 'upstream-cpa-lab-2', name: 'CPA Pro · 实验账号 02', provider: 'CLIProxyAPI', type: 'cpa_oauth', environment: 'experiment', status: 'auth_required', credentialConfigured: true, credentialValidation: 'failed', models: ['pro-oauth-lab'],
-      health: { successRate: 81.2, latencyMs: 7_340, checkedAt: offset(now, -6) }, balance: { state: 'unknown', label: '认证后更新', updatedAt: null }, capacity: null,
-      auth: { expiresAt: offset(now, 52), lastRefreshedAt: offset(now, -1_180) }, windows: [{ id: 'five_hour', label: '5 小时窗口', usedPercent: 92, resetsAt: offset(now, 52) }, { id: 'weekly', label: '周窗口', usedPercent: 77, resetsAt: offset(now, 3 * 24 * 60) }], cooldown: { active: true, until: offset(now, 28), reason: '刷新失败后进入短时冷却' },
-      recentError: { category: 'authentication', summary: 'OAuth 刷新未完成，需要通过受保护部署流程重新授权', firstSeenAt: offset(now, -41), lastSeenAt: offset(now, -6) },
-    },
-  ]
+function createLiveCpaItem(cpa: PlatformProbeResult): UpstreamItem {
+  const models = [...new Set(cpa.models ?? [])]
+  const status: UpstreamItem['status'] = cpa.authRequired
+    ? 'auth_required'
+    : cpa.state === 'offline'
+      ? 'offline'
+      : models.length > 0 ? 'healthy' : 'unconfigured'
+  const credentialConfigured = cpa.credentialConfigured ?? Boolean(cpa.configured)
+  const credentialValidation: UpstreamItem['credentialValidation'] = cpa.authRequired ? 'failed' : credentialConfigured ? 'verified' : 'not_checked'
+  const summary = cpa.authRequired
+    ? 'CPA 客户端 Key 未通过认证，请在 CPA 侧完成 Codex OAuth 登录并检查客户端 Key。'
+    : cpa.state === 'offline'
+      ? 'CPA 网关当前不可达，请确认服务已启动。'
+      : models.length > 0 ? null : 'CPA 已连接，但 /v1/models 尚未返回可用模型。'
+  return {
+    id: 'upstream-cpa-gateway',
+    name: 'CPA Codex OAuth',
+    provider: 'CLIProxyAPI',
+    type: 'cpa_oauth',
+    environment: 'production',
+    status,
+    credentialConfigured,
+    credentialValidation,
+    models,
+    health: { successRate: null, latencyMs: cpa.latencyMs ?? null, checkedAt: cpa.checkedAt },
+    balance: { state: 'unknown', label: '由 CPA 管理', updatedAt: null },
+    capacity: null,
+    auth: null,
+    windows: [],
+    cooldown: null,
+    recentError: summary ? { category: cpa.authRequired ? 'authentication' : 'connection', summary, firstSeenAt: cpa.checkedAt, lastSeenAt: cpa.checkedAt } : null,
+  }
 }
 
-export function createDemoUpstreams(query: UpstreamsQuery, newApi: NewApiStatus, cpa: PlatformProbeResult, now = new Date(), lastChecks?: ReadonlyMap<string, string>): UpstreamsResponse {
-  const all = createUpstreamItems(now).map((item) => {
+export function createUpstreamSnapshot(query: UpstreamsQuery, cpa: PlatformProbeResult, now = new Date(), lastChecks?: ReadonlyMap<string, string>): UpstreamsResponse {
+  // This endpoint is deliberately CPA-only. New API owns model/channel
+  // configuration and must not be rendered as an upstream account here.
+  const cpaConfigured = Boolean(cpa.configured || cpa.credentialConfigured || process.env.AI_OPS_GATEWAY_CPA_API_KEY?.trim())
+  const baseItems = cpaConfigured ? [createLiveCpaItem(cpa)] : []
+  const all = baseItems.map((item) => {
     const checkedAt = lastChecks?.get(item.id)
     return checkedAt ? { ...item, health: { ...item.health, checkedAt } } : item
   })
@@ -146,12 +151,15 @@ export function createDemoUpstreams(query: UpstreamsQuery, newApi: NewApiStatus,
     const matchesSearch = !search || [item.name, item.provider, ...item.models].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
     return matchesSearch && (query.type === 'all' || item.type === query.type) && (query.status === 'all' || item.status === query.status)
   })
-  const newApiState = newApi.state === 'ready' ? 'healthy' : newApi.state
-  const liveText = newApiState === 'healthy' ? 'New API 管理连接已验证' : newApiState === 'reachable' ? 'New API 可达但等待管理认证' : newApiState === 'auth_required' ? 'New API 管理认证未通过' : 'New API 当前离线'
+  const cpaText = cpa.authRequired
+    ? 'CPA 客户端认证未通过，请检查 CPA 客户端 Key 或账号授权'
+    : cpa.state === 'reachable'
+      ? cpaConfigured ? 'CPA OAuth 账号池已接入' : 'CPA 服务可达，等待配置账号池'
+      : 'CPA 服务当前离线'
   return {
-    meta: { source: 'demo', generatedAt: now.toISOString(), notice: `${liveText}；账号明细在管理适配器完成前使用演示数据`, live: { newApi: newApiState, cpa: cpa.state, checkedAt: now.toISOString() } },
-    summary: { total: all.length, available: all.filter((item) => item.status === 'healthy').length, needsAttention: all.filter((item) => item.status !== 'healthy').length, official: all.filter((item) => item.type === 'official_api').length, experiment: all.filter((item) => item.type === 'cpa_oauth').length, configured: all.filter((item) => item.credentialConfigured).length },
-    isolation: { enforced: true, productionToExperimentFallback: false, statement: '正式业务仅使用官方账号组；CPA Pro OAuth 仅用于隔离实验，不能成为正式路由的隐式回退。' },
+    meta: { source: 'live' as const, generatedAt: now.toISOString(), notice: cpaConfigured ? `${cpaText}；模型目录请前往模型目录页面查看` : `${cpaText}；当前未配置真实 CPA 账号池，本地模拟账号已移除`, live: { cpa: cpa.state, checkedAt: now.toISOString(), managementConfigured: Boolean(process.env.CPA_MANAGEMENT_KEY?.trim()) } },
+    summary: { total: all.length, available: all.filter((item) => item.status === 'healthy').length, needsAttention: all.filter((item) => item.status !== 'healthy').length, official: 0, experiment: 0, configured: all.filter((item) => item.credentialConfigured).length },
+    isolation: { enforced: true, productionToExperimentFallback: false, statement: 'CPA OAuth 账号只在 CPA 账号池中管理；AI OPS 只保存连接状态并分发自己的员工 Key，不展示认证文件或上游凭据。' },
     items,
     total: items.length,
   }

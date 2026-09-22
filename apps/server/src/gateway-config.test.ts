@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { loadGatewayConfig } from './gateway-config.js'
 
 describe('gateway configuration', () => {
-  it('defaults to an unconfigured standalone OpenAI-compatible mode', () => {
+  it('defaults to an unconfigured CPA OpenAI-compatible mode', () => {
     expect(loadGatewayConfig({})).toMatchObject({
-      mode: 'standalone',
+      mode: 'cpa',
       provider: 'openai_compatible',
       upstreamConfigured: false,
     })
@@ -56,6 +56,18 @@ describe('gateway configuration', () => {
       AI_OPS_GATEWAY_NEW_API_BASE_URL: 'http://127.0.0.1:3000/v1',
       AI_OPS_GATEWAY_NEW_API_API_KEY: 'new-api-key',
     })).toMatchObject({ baseUrl: 'http://127.0.0.1:9000/v1', upstreamApiKey: 'generic-key' })
+  })
+
+  it('uses a longer default timeout for CPA and accepts an explicit override', () => {
+    expect(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'cpa' }).timeoutMs).toBe(180_000)
+    expect(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'cpa', AI_OPS_GATEWAY_TIMEOUT_MS: '240000' }).timeoutMs).toBe(240_000)
+    expect(() => loadGatewayConfig({ AI_OPS_GATEWAY_TIMEOUT_MS: '999' })).toThrow('AI_OPS_GATEWAY configuration is invalid')
+  })
+
+  it('defaults the explicit New API connector to the local OpenAI-compatible endpoint', () => {
+    expect(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'new_api', AI_OPS_GATEWAY_NEW_API_API_KEY: 'new-api-key' })).toMatchObject({
+      mode: 'new_api', baseUrl: 'http://127.0.0.1:3000/v1', upstreamApiKey: 'new-api-key', upstreamConfigured: true,
+    })
   })
 
   it('parses an opt-in fallback routing policy', () => {

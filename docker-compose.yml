@@ -1,4 +1,55 @@
 services:
+  cpa:
+    image: ${CPA_IMAGE:-eceasy/cli-proxy-api:latest}
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:8317:8317"
+      - "127.0.0.1:8085:8085"
+      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:54545:54545"
+      - "127.0.0.1:51121:51121"
+      - "127.0.0.1:11451:11451"
+    volumes:
+      - ./deploy/cpa/config.yaml:/CLIProxyAPI/config.yaml
+      - ./deploy/cpa/auths:/root/.cli-proxy-api
+      - ./deploy/cpa/logs:/CLIProxyAPI/logs
+      - ./deploy/cpa/plugins:/CLIProxyAPI/plugins
+      - ./deploy/cpa/static:/CLIProxyAPI/static
+    healthcheck:
+      # The CPA image intentionally contains no curl/wget. A live PID 1 is
+      # the image-supported readiness signal; AI OPS still probes the API.
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  new-api:
+    image: ${NEW_API_IMAGE:-calciumion/new-api:latest}
+    restart: unless-stopped
+    command: --log-dir /app/logs
+    env_file:
+      - ./deploy/new-api/.env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SQLITE_PATH: /data/new-api.db
+      ERROR_LOG_ENABLED: ${NEW_API_ERROR_LOG_ENABLED:-true}
+      NODE_NAME: ${NEW_API_NODE_NAME:-ai-ops-new-api}
+      TRUSTED_PROXIES: ${NEW_API_TRUSTED_PROXIES:-none}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deploy/new-api/data:/data
+      - ./deploy/new-api/logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
   server:
     restart: unless-stopped
     build:
@@ -10,32 +61,71 @@ services:
       HOST: 0.0.0.0
       PORT: 4175
       PLATFORM_DB_PATH: /app/data/platform.sqlite
+      # New API SQLite is the authoritative read source for users, Tokens,
+      # models and channels. The server opens this file read-only.
+      NEW_API_DB_PATH: /app/runtime/new-api/data/new-api.db
+      AI_OPS_UPSTREAM_PRIMARY: ${AI_OPS_UPSTREAM_PRIMARY:-true}
+      AI_OPS_KEY_ENCRYPTION_SECRET: ${AI_OPS_KEY_ENCRYPTION_SECRET:-change-this-local-encryption-secret}
+      AI_OPS_AUDIT_ENCRYPTION_SECRET: ${AI_OPS_AUDIT_ENCRYPTION_SECRET:-change-this-local-audit-encryption-secret}
       AUTH_MODE: ${AUTH_MODE:-required}
       AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:-admin}
       AUTH_ADMIN_DISPLAY_NAME: ${AUTH_ADMIN_DISPLAY_NAME:-超级管理员}
       AI_OPS_ADMIN_ONLY: ${AI_OPS_ADMIN_ONLY:-true}
       AI_OPS_SEED_DEMO_DATA: ${AI_OPS_SEED_DEMO_DATA:-false}
       AI_OPS_SOFT_QUOTA_ENABLED: ${AI_OPS_SOFT_QUOTA_ENABLED:-false}
-      NEW_API_BASE_URL: ${NEW_API_BASE_URL:-}
+      # The unified entry can inspect and restart only this Compose project's
+      # four allow-listed services through the Docker Engine socket.
+      AI_OPS_DOCKER_CONTROL: ${AI_OPS_DOCKER_CONTROL:-true}
+      DOCKER_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:-ai-ops-platform}
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      # The request data plane is New API. Its request/management token stays
+      # optional here and can be supplied through the ignored project .env.
+      NEW_API_BASE_URL: http://new-api:3000
+      # WorkBuddy/Codex run on the host, so exported configs must use the
+      # host-visible AI OPS gateway endpoint rather than the internal Compose
+      # hostname or the direct New API port. This keeps body capture on path.
+      AI_OPS_PUBLIC_NEW_API_BASE_URL: ${AI_OPS_PUBLIC_NEW_API_BASE_URL:-http://127.0.0.1:3000/v1}
+      AI_OPS_PUBLIC_GATEWAY_BASE_URL: ${AI_OPS_PUBLIC_GATEWAY_BASE_URL:-http://127.0.0.1:4175/v1}
       NEW_API_ACCESS_TOKEN: ${NEW_API_ACCESS_TOKEN:-}
       NEW_API_USER_ID: ${NEW_API_USER_ID:-}
-      AI_OPS_GATEWAY_MODE: ${AI_OPS_GATEWAY_MODE:-standalone}
+      AI_OPS_GATEWAY_MODE: new_api
       AI_OPS_GATEWAY_PROVIDER: ${AI_OPS_GATEWAY_PROVIDER:-openai_compatible}
       AI_OPS_GATEWAY_UPSTREAM_BASE_URL: ${AI_OPS_GATEWAY_UPSTREAM_BASE_URL:-}
       AI_OPS_GATEWAY_UPSTREAM_API_KEY: ${AI_OPS_GATEWAY_UPSTREAM_API_KEY:-}
-      AI_OPS_GATEWAY_NEW_API_BASE_URL: ${AI_OPS_GATEWAY_NEW_API_BASE_URL:-}
+      AI_OPS_GATEWAY_NEW_API_BASE_URL: http://new-api:3000/v1
       AI_OPS_GATEWAY_NEW_API_API_KEY: ${AI_OPS_GATEWAY_NEW_API_API_KEY:-}
-      AI_OPS_GATEWAY_CPA_BASE_URL: ${AI_OPS_GATEWAY_CPA_BASE_URL:-}
+      AI_OPS_GATEWAY_CPA_BASE_URL: http://cpa:8317/v1
       AI_OPS_GATEWAY_CPA_API_KEY: ${AI_OPS_GATEWAY_CPA_API_KEY:-}
       AI_OPS_GATEWAY_DEFAULT_MODEL: ${AI_OPS_GATEWAY_DEFAULT_MODEL:-}
       AI_OPS_GATEWAY_FALLBACK_MODEL: ${AI_OPS_GATEWAY_FALLBACK_MODEL:-}
+      AI_OPS_GATEWAY_TIMEOUT_MS: ${AI_OPS_GATEWAY_TIMEOUT_MS:-180000}
       AI_OPS_GATEWAY_ALLOW_FALLBACK: ${AI_OPS_GATEWAY_ALLOW_FALLBACK:-false}
       AI_OPS_GATEWAY_CLIENT_API_KEY: ${AI_OPS_GATEWAY_CLIENT_API_KEY:-}
       AI_OPS_GATEWAY_MODEL_ALIASES: ${AI_OPS_GATEWAY_MODEL_ALIASES:-}
+      # The server reads the CPA client and management credentials from this
+      # project-owned file when the corresponding environment values are empty.
+      CPA_CONFIG_PATH: /app/runtime/cpa/config.yaml
+      CPA_ENV_PATH: /app/runtime/cpa/.env
+      CPA_LOG_PATH: /app/runtime/cpa/logs
+      CPA_MANAGEMENT_URL: http://cpa:8317/management.html
+      CPA_MANAGEMENT_KEY: ${CPA_MANAGEMENT_KEY:-}
+    depends_on:
+      cpa:
+        condition: service_healthy
+      new-api:
+        condition: service_healthy
     ports:
       - "127.0.0.1:4175:4175"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - platform-data:/app/data
+      - ./deploy/new-api/data:/app/runtime/new-api/data:ro
+      - ./deploy/cpa/config.yaml:/app/runtime/cpa/config.yaml:ro
+      - ./deploy/cpa/.env:/app/runtime/cpa/.env:ro
+      - ./deploy/cpa/logs:/app/runtime/cpa/logs:ro
+      # The BFF uses the Engine API for status and allow-listed restarts only.
+      - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4175/gateway/health').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s

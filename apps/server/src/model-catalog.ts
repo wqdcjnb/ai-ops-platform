@@ -17,7 +17,7 @@ export class CatalogError extends Error {
   constructor(readonly code: 'NEW_API_AUTH_REQUIRED' | 'NEW_API_UNAVAILABLE' | 'NEW_API_INVALID_DATA' | 'NEW_API_CATALOG_LIMIT') {
     super({
       NEW_API_AUTH_REQUIRED: 'New API 管理认证未配置或未通过，请检查服务端连接配置。',
-      NEW_API_UNAVAILABLE: 'New API 暂时不可用，请稍后重试；也可以切换到模拟数据继续查看。',
+      NEW_API_UNAVAILABLE: 'New API 暂时不可用，请确认服务已启动、管理令牌有效后重试。',
       NEW_API_INVALID_DATA: 'New API 返回的数据格式不受支持，未展示不完整列表，请联系管理员检查版本兼容性。',
       NEW_API_CATALOG_LIMIT: 'New API 目录超过当前读取上限，请联系管理员调整分页接入。',
     }[code])
