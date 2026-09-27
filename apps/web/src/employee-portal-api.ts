@@ -2,6 +2,15 @@ import { z } from 'zod'
 import { withCsrfHeader } from './csrf'
 
 const keySchema = z.object({ id: z.string(), masked: z.string(), status: z.enum(['active', 'expiring']), createdAt: z.string(), lastUsedAt: z.string().nullable() })
+const deviceSetupTargetSchema = z.enum(['codex', 'workbuddy'])
+const deviceSetupTicketSchema = z.object({
+  id: z.string(),
+  target: deviceSetupTargetSchema,
+  state: z.enum(['pending', 'claimed', 'succeeded', 'failed', 'expired']),
+  expiresAt: z.string(),
+  completedAt: z.string().nullable().optional(),
+  failureMessage: z.string().nullable().optional(),
+})
 export const employeePortalKeyResponseSchema = z.object({
   key: keySchema.nullable(),
   /** Present only for the signed-in employee who owns this Key. */
@@ -13,6 +22,15 @@ export const employeePortalKeyResponseSchema = z.object({
 export const employeePortalKeyIssueResponseSchema = employeePortalKeyResponseSchema.extend({ secret: z.string().min(24) })
 export type EmployeePortalKeyResponse = z.infer<typeof employeePortalKeyResponseSchema>
 export type EmployeePortalKeyIssueResponse = z.infer<typeof employeePortalKeyIssueResponseSchema>
+export type DeviceSetupTarget = z.infer<typeof deviceSetupTargetSchema>
+export type DeviceSetupTicket = z.infer<typeof deviceSetupTicketSchema>
+
+const deviceSetupTicketCreateResponseSchema = z.object({
+  ticket: deviceSetupTicketSchema,
+  launchUrl: z.string().startsWith('aiops://'),
+  requestId: z.string(),
+})
+const deviceSetupTicketStatusResponseSchema = z.object({ ticket: deviceSetupTicketSchema, requestId: z.string() })
 
 export class EmployeePortalApiError extends Error {
   constructor(message: string, readonly requestId?: string) { super(message); this.name = 'EmployeePortalApiError' }
@@ -41,4 +59,16 @@ export async function createEmployeePortalKey() {
 
 export async function resetEmployeePortalKey() {
   return parse(await fetch('/api/me/key/reset', { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify({ idempotencyKey: idempotencyKey('reset') }) }), employeePortalKeyIssueResponseSchema, '无法重置平台 Key')
+}
+
+export async function createDeviceSetupTicket(target: DeviceSetupTarget) {
+  return parse(await fetch('/api/me/device-setup-tickets', {
+    method: 'POST',
+    headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }),
+    body: JSON.stringify({ target }),
+  }), deviceSetupTicketCreateResponseSchema, '无法创建本机配置请求')
+}
+
+export async function fetchDeviceSetupTicket(id: string) {
+  return parse(await fetch(`/api/me/device-setup-tickets/${encodeURIComponent(id)}`, { headers: { accept: 'application/json' } }), deviceSetupTicketStatusResponseSchema, '无法读取本机配置状态')
 }

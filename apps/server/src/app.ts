@@ -71,6 +71,12 @@ const externalProviderEnabledInputSchema = z.object({ enabled: z.boolean() })
 const employeePortalKeyOperationSchema = z.object({
   idempotencyKey: z.string().trim().regex(/^employee-key-(?:create|reset)-[A-Za-z0-9._:-]{8,96}$/),
 })
+const deviceSetupTargetSchema = z.enum(['codex', 'workbuddy'])
+const deviceSetupTicketCreateSchema = z.object({ target: deviceSetupTargetSchema })
+const deviceSetupTicketIdSchema = z.object({ id: z.string().trim().regex(/^setup-[a-z0-9]{16,64}$/) })
+const deviceSetupTicketTokenSchema = z.object({ ticket: z.string().trim().regex(/^[A-Za-z0-9_-]{40,128}$/) })
+const deviceSetupFailureCodeSchema = z.enum(['WORKBUDDY_INVALID_JSON', 'WORKBUDDY_UNSUPPORTED_ROOT', 'WORKBUDDY_MODEL_ID_CONFLICT', 'LOCAL_CONFIG_WRITE_FAILED'])
+const deviceSetupTicketCompletionSchema = z.object({ succeeded: z.boolean(), failureCode: deviceSetupFailureCodeSchema.optional() })
 const personKeyResetBodySchema = z.object({
   idempotencyKey: z.string().trim().regex(/^person-key-reset-[A-Za-z0-9._:-]{8,96}$/),
   acknowledgeImpact: z.literal(true),
@@ -111,6 +117,12 @@ function publicGatewayBaseUrlForCodex() {
   }
 }
 
+function publicAssistantServerUrl() {
+  const url = new URL(publicGatewayBaseUrlForCodex())
+  url.pathname = url.pathname.replace(/\/v1\/?$/u, '') || '/'
+  return url.toString().replace(/\/$/u, '')
+}
+
 function createPlatformApiKeySecret() {
   return 'sk-aiops-' + randomBytes(32).toString('base64url')
 }
@@ -121,6 +133,14 @@ function maskPlatformApiKey(secret: string) {
 
 function errorPayload(code: string, message: string, requestId: string) {
   return { error: { code, message, requestId } }
+}
+
+function deviceSetupFailureMessage(failureCode: string | null) {
+  if (failureCode === 'WORKBUDDY_INVALID_JSON') return 'WorkBuddy 的 models.json 不是有效 JSON，未修改原文件。请修复该文件后重新导入。'
+  if (failureCode === 'WORKBUDDY_UNSUPPORTED_ROOT') return 'WorkBuddy 的 models.json 顶层不是模型数组，且无法安全迁移；原文件已保留。'
+  if (failureCode === 'WORKBUDDY_MODEL_ID_CONFLICT') return 'WorkBuddy 已有其他自定义模型使用了保留 ID “ai-ops”。为避免覆盖原模型，本次未作修改；请先修改该模型 ID 后重新导入。'
+  if (failureCode === 'KEY_UNAVAILABLE' || failureCode === 'SECRET_UNAVAILABLE') return '当前平台 Key 不可用，请刷新员工门户后重新申请或导入。'
+  return '本机助手未能写入客户端配置。请重新导入；如仍失败，请联系管理员。'
 }
 
 function parseInput(schema: z.ZodTypeAny, input: unknown, requestId: string, reply: any): any {
@@ -154,8 +174,9 @@ export function buildApp(options: BuildAppOptions = {}) {
   const auditCleanupTimer = setInterval(() => {
     try {
       database.cleanupAuditEvents('scheduled')
+      database.cleanupDeviceSetupTickets('scheduled')
     } catch (error) {
-      app.log.error({ err: error }, 'system audit retention cleanup failed')
+      app.log.error({ err: error }, 'system retention cleanup failed')
     }
   }, SYSTEM_AUDIT_CLEANUP_INTERVAL_MS)
   auditCleanupTimer.unref()
@@ -198,6 +219,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.addHook('preHandler', async (request, reply) => {
     const path = request.url.split('?')[0] ?? '/'
+    const isLocalAssistantCallback = /^\/api\/device-setup-tickets\/[A-Za-z0-9_-]{40,128}\/(?:claim|complete)$/u.test(path)
     if (
       path === '/health'
       || path.startsWith('/gateway/')
@@ -205,6 +227,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       || path === '/api/auth/login'
       || path === '/api/auth/register'
       || path === '/api/auth/bootstrap'
+      || isLocalAssistantCallback
     ) return
 
     if (authMode === 'disabled') return
@@ -1070,6 +1093,97 @@ export function buildApp(options: BuildAppOptions = {}) {
     } catch (error) {
       return personActionError(error, request.id, reply)
     }
+  })
+
+  app.post('/api/me/device-setup-tickets', async (request, reply) => {
+    const body = parseInput(deviceSetupTicketCreateSchema, request.body, request.id, reply)
+    if (!body) return
+    const key = currentPlatformKey(request.authUser!.id)
+    if (!key || key.status !== 'active' || !database.readApiKeySecret(key.id)) {
+      return reply.status(409).send(errorPayload('KEY_NOT_CREATED', '请先申请可用的平台 Key，再导入客户端。', request.id))
+    }
+
+    const ticket = randomBytes(32).toString('base64url')
+    const setup = database.createDeviceSetupTicket({
+      id: 'setup-' + randomUUID().replaceAll('-', '').slice(0, 24),
+      tokenHash: createHash('sha256').update('ai-ops-device-setup:' + ticket).digest('hex'),
+      ownerUserId: request.authUser!.id,
+      apiKeyId: key.id,
+      target: body.target,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    })
+    if (!setup) return reply.status(500).send(errorPayload('SETUP_TICKET_CREATE_FAILED', '无法创建本机配置请求，请稍后重试。', request.id))
+    const assistantServerUrl = publicAssistantServerUrl()
+    const launchUrl = `aiops://configure?ticket=${encodeURIComponent(ticket)}&server=${encodeURIComponent(assistantServerUrl)}`
+    return reply.status(201).send({
+      ticket: {
+        id: setup.id,
+        target: setup.target,
+        state: setup.state,
+        expiresAt: setup.expiresAt,
+      },
+      launchUrl,
+      requestId: request.id,
+    })
+  })
+
+  app.get('/api/me/device-setup-tickets/:id', async (request, reply) => {
+    const params = parseInput(deviceSetupTicketIdSchema, request.params, request.id, reply)
+    if (!params) return
+    const ticket = database.findDeviceSetupTicketForOwner(params.id, request.authUser!.id)
+    if (!ticket) return reply.status(404).send(errorPayload('SETUP_TICKET_NOT_FOUND', '未找到本机配置请求。', request.id))
+    return {
+      ticket: {
+        id: ticket.id,
+        target: ticket.target,
+        state: ticket.state,
+        expiresAt: ticket.expiresAt,
+        completedAt: ticket.completedAt,
+        failureMessage: ticket.state === 'failed' ? deviceSetupFailureMessage(ticket.failureCode) : null,
+      },
+      requestId: request.id,
+    }
+  })
+
+  // These two endpoints are intentionally unauthenticated: a browser cannot
+  // safely give a local desktop helper its HttpOnly session. The opaque,
+  // single-use, five-minute ticket is the only credential accepted here and
+  // its plaintext is never stored in SQLite or placed in an API Key field.
+  app.post('/api/device-setup-tickets/:ticket/claim', async (request, reply) => {
+    const params = parseInput(deviceSetupTicketTokenSchema, request.params, request.id, reply)
+    if (!params) return
+    const claimed = database.claimDeviceSetupTicket(createHash('sha256').update('ai-ops-device-setup:' + params.ticket).digest('hex'))
+    if (claimed.state === 'not_found' || claimed.state === 'expired') {
+      return reply.status(404).send(errorPayload('SETUP_TICKET_EXPIRED', '本机配置请求已过期，请回到员工门户重新点击导入。', request.id))
+    }
+    if (claimed.state === 'already_claimed') {
+      return reply.status(409).send(errorPayload('SETUP_TICKET_ALREADY_CLAIMED', '本机配置请求已在处理中，请稍候查看结果。', request.id))
+    }
+    if (claimed.state !== 'claimed' || !claimed.ticket || !claimed.secret) {
+      return reply.status(409).send(errorPayload('SETUP_KEY_UNAVAILABLE', '当前平台 Key 不可用，请回到员工门户刷新后重试。', request.id))
+    }
+    return {
+      target: claimed.ticket.target,
+      config: {
+        apiKey: claimed.secret,
+        gatewayBaseUrl: publicGatewayBaseUrlForCodex(),
+      },
+      requestId: request.id,
+    }
+  })
+
+  app.post('/api/device-setup-tickets/:ticket/complete', async (request, reply) => {
+    const params = parseInput(deviceSetupTicketTokenSchema, request.params, request.id, reply)
+    const body = parseInput(deviceSetupTicketCompletionSchema, request.body, request.id, reply)
+    if (!params || !body) return
+    const completed = database.completeDeviceSetupTicket(
+      createHash('sha256').update('ai-ops-device-setup:' + params.ticket).digest('hex'),
+      body.succeeded,
+      undefined,
+      body.succeeded ? undefined : (body.failureCode ?? 'LOCAL_CONFIG_WRITE_FAILED'),
+    )
+    if (!completed) return reply.status(404).send(errorPayload('SETUP_TICKET_EXPIRED', '本机配置请求已过期，请回到员工门户重新点击导入。', request.id))
+    return { ticket: { id: completed.id, target: completed.target, state: completed.state }, requestId: request.id }
   })
 
   app.setErrorHandler((error, request, reply) => {

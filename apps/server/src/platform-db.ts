@@ -64,6 +64,39 @@ export interface PlatformApiKeyReset {
   secretValue: string
 }
 
+/** A short-lived handoff from the signed-in employee portal to the local
+ * AI OPS desktop assistant. The raw ticket is never persisted. */
+export type PlatformDeviceSetupTarget = 'codex' | 'workbuddy'
+export type PlatformDeviceSetupState = 'pending' | 'claimed' | 'succeeded' | 'failed' | 'expired'
+
+export interface PlatformDeviceSetupTicketCreate {
+  id: string
+  tokenHash: string
+  ownerUserId: string
+  apiKeyId: string
+  target: PlatformDeviceSetupTarget
+  expiresAt: string
+}
+
+export interface PlatformDeviceSetupTicket {
+  id: string
+  ownerUserId: string
+  apiKeyId: string
+  target: PlatformDeviceSetupTarget
+  state: PlatformDeviceSetupState
+  expiresAt: string
+  claimedAt: string | null
+  completedAt: string | null
+  failureCode: string | null
+  createdAt: string
+}
+
+export interface PlatformDeviceSetupClaimResult {
+  state: 'claimed' | 'not_found' | 'expired' | 'already_claimed' | 'unavailable'
+  ticket: PlatformDeviceSetupTicket | null
+  secret: string | null
+}
+
 export interface PlatformAuditEventSeed {
   id: string
   actorUserId?: string | null
@@ -305,6 +338,15 @@ export interface SessionCleanupResult {
   revokedRetentionHours: typeof REVOKED_SESSION_RETENTION_HOURS
 }
 
+export const DEVICE_SETUP_TICKET_RETENTION_HOURS = 24
+export type DeviceSetupTicketCleanupTrigger = 'startup' | 'scheduled' | 'create'
+export interface DeviceSetupTicketCleanupResult {
+  triggeredBy: DeviceSetupTicketCleanupTrigger
+  completedAt: string
+  expiredTickets: number
+  deletedTickets: number
+}
+
 export const SYSTEM_AUDIT_RETENTION_DAYS = 30
 export type AuditCleanupTrigger = 'startup' | 'scheduled'
 export interface AuditCleanupResult {
@@ -413,6 +455,21 @@ CREATE TABLE IF NOT EXISTS api_key_operations (
   action TEXT NOT NULL CHECK (action IN ('create', 'reset')),
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS device_setup_tickets (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  api_key_id TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  target TEXT NOT NULL CHECK (target IN ('codex', 'workbuddy')),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'succeeded', 'failed', 'expired')),
+  expires_at TEXT NOT NULL,
+  claimed_at TEXT,
+  completed_at TEXT,
+  failure_code TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS device_setup_tickets_owner_idx ON device_setup_tickets(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS device_setup_tickets_expiry_idx ON device_setup_tickets(expires_at);
 CREATE TABLE IF NOT EXISTS entity_deletions (
   idempotency_key TEXT PRIMARY KEY,
   entity_type TEXT NOT NULL,
@@ -696,6 +753,7 @@ export class PlatformDatabase {
     this.now = options.now ?? (() => new Date())
     this.migrateToFinalSchema()
     this.cleanupAuthSessions('startup')
+    this.cleanupDeviceSetupTickets('startup')
     this.cleanupConversationAuditMetadata('startup')
   }
 
@@ -983,6 +1041,110 @@ export class PlatformDatabase {
       this.db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  private expireDeviceSetupTickets(now = this.now()) {
+    const timestamp = now.toISOString()
+    return Number(this.db.prepare("UPDATE device_setup_tickets SET state = 'expired', completed_at = COALESCE(completed_at, ?) WHERE state IN ('pending', 'claimed') AND expires_at <= ?").run(timestamp, timestamp).changes)
+  }
+
+  cleanupDeviceSetupTickets(triggeredBy: DeviceSetupTicketCleanupTrigger, now = this.now()): DeviceSetupTicketCleanupResult {
+    const completedAt = now.toISOString()
+    const expiredTickets = this.expireDeviceSetupTickets(now)
+    const deleteBefore = new Date(now.getTime() - DEVICE_SETUP_TICKET_RETENTION_HOURS * 3_600_000).toISOString()
+    const deletedTickets = Number(this.db.prepare('DELETE FROM device_setup_tickets WHERE expires_at <= ?').run(deleteBefore).changes)
+    return { triggeredBy, completedAt, expiredTickets, deletedTickets }
+  }
+
+  private readDeviceSetupTicket(id: string) {
+    return this.db.prepare('SELECT id, owner_user_id AS ownerUserId, api_key_id AS apiKeyId, target, state, expires_at AS expiresAt, claimed_at AS claimedAt, completed_at AS completedAt, failure_code AS failureCode, created_at AS createdAt FROM device_setup_tickets WHERE id = ? LIMIT 1').get(id) as PlatformDeviceSetupTicket | undefined ?? null
+  }
+
+  createDeviceSetupTicket(ticket: PlatformDeviceSetupTicketCreate, now = this.now()) {
+    this.cleanupDeviceSetupTickets('create', now)
+    const timestamp = now.toISOString()
+    this.db.prepare("INSERT INTO device_setup_tickets(id, token_hash, owner_user_id, api_key_id, target, state, expires_at, claimed_at, completed_at, failure_code, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, NULL, ?)").run(
+      ticket.id,
+      ticket.tokenHash,
+      ticket.ownerUserId,
+      ticket.apiKeyId,
+      ticket.target,
+      ticket.expiresAt,
+      timestamp,
+    )
+    return this.readDeviceSetupTicket(ticket.id)
+  }
+
+  findDeviceSetupTicketForOwner(id: string, ownerUserId: string, now = this.now()) {
+    this.expireDeviceSetupTickets(now)
+    return this.db.prepare('SELECT id, owner_user_id AS ownerUserId, api_key_id AS apiKeyId, target, state, expires_at AS expiresAt, claimed_at AS claimedAt, completed_at AS completedAt, failure_code AS failureCode, created_at AS createdAt FROM device_setup_tickets WHERE id = ? AND owner_user_id = ? LIMIT 1').get(id, ownerUserId) as PlatformDeviceSetupTicket | undefined ?? null
+  }
+
+  claimDeviceSetupTicket(tokenHash: string, now = this.now()): PlatformDeviceSetupClaimResult {
+    this.expireDeviceSetupTickets(now)
+    const timestamp = now.toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.db.prepare("SELECT t.id, t.owner_user_id AS ownerUserId, t.api_key_id AS apiKeyId, t.target, t.state, t.expires_at AS expiresAt, t.claimed_at AS claimedAt, t.completed_at AS completedAt, t.failure_code AS failureCode, t.created_at AS createdAt, k.status AS keyStatus, u.status AS userStatus FROM device_setup_tickets t JOIN api_keys k ON k.id = t.api_key_id JOIN users u ON u.id = t.owner_user_id WHERE t.token_hash = ? LIMIT 1").get(tokenHash) as (PlatformDeviceSetupTicket & { keyStatus: 'active' | 'disabled' | 'revoked'; userStatus: 'active' | 'disabled' }) | undefined
+      if (!row) {
+        this.db.exec('COMMIT')
+        return { state: 'not_found', ticket: null, secret: null }
+      }
+      const ticket: PlatformDeviceSetupTicket = {
+        id: row.id,
+        ownerUserId: row.ownerUserId,
+        apiKeyId: row.apiKeyId,
+        target: row.target,
+        state: row.state,
+        expiresAt: row.expiresAt,
+        claimedAt: row.claimedAt,
+        completedAt: row.completedAt,
+        failureCode: row.failureCode,
+        createdAt: row.createdAt,
+      }
+      if (ticket.state === 'expired' || ticket.expiresAt <= timestamp) {
+        if (ticket.state !== 'expired') this.db.prepare("UPDATE device_setup_tickets SET state = 'expired', completed_at = COALESCE(completed_at, ?) WHERE id = ?").run(timestamp, ticket.id)
+        this.db.exec('COMMIT')
+        return { state: 'expired', ticket: { ...ticket, state: 'expired', completedAt: ticket.completedAt ?? timestamp }, secret: null }
+      }
+      if (ticket.state !== 'pending') {
+        this.db.exec('COMMIT')
+        return { state: ticket.state === 'claimed' ? 'already_claimed' : 'expired', ticket, secret: null }
+      }
+      if (row.keyStatus !== 'active' || row.userStatus !== 'active') {
+        this.db.prepare("UPDATE device_setup_tickets SET state = 'failed', completed_at = ?, failure_code = 'KEY_UNAVAILABLE' WHERE id = ?").run(timestamp, ticket.id)
+        this.db.exec('COMMIT')
+        return { state: 'unavailable', ticket: { ...ticket, state: 'failed', completedAt: timestamp, failureCode: 'KEY_UNAVAILABLE' }, secret: null }
+      }
+      const secret = this.readApiKeySecret(ticket.apiKeyId)
+      if (!secret) {
+        this.db.prepare("UPDATE device_setup_tickets SET state = 'failed', completed_at = ?, failure_code = 'SECRET_UNAVAILABLE' WHERE id = ?").run(timestamp, ticket.id)
+        this.db.exec('COMMIT')
+        return { state: 'unavailable', ticket: { ...ticket, state: 'failed', completedAt: timestamp, failureCode: 'SECRET_UNAVAILABLE' }, secret: null }
+      }
+      this.db.prepare("UPDATE device_setup_tickets SET state = 'claimed', claimed_at = ? WHERE id = ? AND state = 'pending'").run(timestamp, ticket.id)
+      this.db.exec('COMMIT')
+      return { state: 'claimed', ticket: { ...ticket, state: 'claimed', claimedAt: timestamp }, secret }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  completeDeviceSetupTicket(tokenHash: string, succeeded: boolean, now = this.now(), failureCode = 'LOCAL_CONFIG_WRITE_FAILED') {
+    this.expireDeviceSetupTickets(now)
+    const row = this.db.prepare('SELECT id, state, expires_at AS expiresAt FROM device_setup_tickets WHERE token_hash = ? LIMIT 1').get(tokenHash) as { id: string; state: PlatformDeviceSetupState; expiresAt: string } | undefined
+    if (!row) return null
+    if (row.state === 'succeeded' || row.state === 'failed' || row.state === 'expired') return this.readDeviceSetupTicket(row.id)
+    if (row.state !== 'claimed' || row.expiresAt <= now.toISOString()) return null
+    const timestamp = now.toISOString()
+    this.db.prepare("UPDATE device_setup_tickets SET state = ?, completed_at = ?, failure_code = ? WHERE id = ? AND state = 'claimed'").run(
+      succeeded ? 'succeeded' : 'failed',
+      timestamp,
+      succeeded ? null : failureCode,
+      row.id,
+    )
+    return this.readDeviceSetupTicket(row.id)
   }
 
   findGatewayKey(secret: string, now = this.now()): PlatformGatewayKey | null {
@@ -1429,6 +1591,7 @@ export class PlatformDatabase {
     return {
       users: count('users'),
       apiKeys: count('api_keys'),
+      deviceSetupTickets: count('device_setup_tickets'),
       entityDeletions: count('entity_deletions'),
       auditEvents: count('audit_events'),
       usageRequests: count('usage_requests'),

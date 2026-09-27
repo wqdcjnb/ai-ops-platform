@@ -12,6 +12,8 @@ COPY apps/server/src apps/server/src
 RUN npm run build --workspace @ai-ops/server
 
 FROM deps AS web-build
+COPY scripts/build-client-assistant-installer.mjs scripts/build-client-assistant-installer.mjs
+COPY scripts/ai-ops-client-assistant.ps1 scripts/ai-ops-client-assistant.ps1
 COPY apps/web/tsconfig.json apps/web/tsconfig.json
 COPY apps/web/vite.config.ts apps/web/vite.config.ts
 COPY apps/web/index.html apps/web/index.html

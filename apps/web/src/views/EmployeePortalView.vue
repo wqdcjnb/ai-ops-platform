@@ -1,8 +1,18 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { IconAlertTriangle, IconBrandOpenai, IconCheck, IconCopy, IconEye, IconEyeOff, IconKey, IconLogout, IconRefresh, IconSparkles } from '@tabler/icons-vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { IconAlertTriangle, IconBrandOpenai, IconCheck, IconCopy, IconKey, IconLogout, IconRefresh, IconSparkles } from '@tabler/icons-vue'
 import { fetchCurrentUser, logout, type AuthUser } from '../auth-api'
-import { createEmployeePortalKey, EmployeePortalApiError, fetchEmployeePortalKey, resetEmployeePortalKey, type EmployeePortalKeyResponse } from '../employee-portal-api'
+import {
+  createDeviceSetupTicket,
+  createEmployeePortalKey,
+  EmployeePortalApiError,
+  fetchDeviceSetupTicket,
+  fetchEmployeePortalKey,
+  resetEmployeePortalKey,
+  type DeviceSetupTarget,
+  type DeviceSetupTicket,
+  type EmployeePortalKeyResponse,
+} from '../employee-portal-api'
 
 const profile = ref<AuthUser | null>(null)
 const keyState = ref<EmployeePortalKeyResponse | null>(null)
@@ -11,22 +21,31 @@ const errorMessage = ref('')
 const notice = ref('')
 const isLoading = ref(false)
 const isMutating = ref(false)
-const isImportingWorkBuddy = ref(false)
-const isImportingCodex = ref(false)
-const isCheckingCodex = ref(false)
-const showImport = ref(false)
-const isKeyVisible = ref(false)
-type CodexLocalStatus = {
-  installation: 'detected' | 'not_detected'
-  login: 'logged_in' | 'not_logged_in' | 'unknown'
-  customProviderAvailableWithoutLogin: boolean
-}
-const codexStatus = ref<CodexLocalStatus | null>(null)
-const codexStatusMessage = ref('打开后会检测本机 Codex 的安装与登录状态。')
-const workBuddyConnectorUrl = (import.meta.env.VITE_WORKBUDDY_CONNECTOR_URL ?? 'http://127.0.0.1:4176').replace(/\/$/u, '')
+const isStartingImport = ref(false)
+const activeSetup = ref<DeviceSetupTicket | null>(null)
+const showAssistantInstall = ref(false)
+let setupPollTimer: number | null = null
+let setupInstallHintTimer: number | null = null
+let isPollingSetup = false
 
 const hasKey = computed(() => Boolean(keyState.value?.key))
-const keyMask = computed(() => keyState.value?.key?.masked ?? '尚未创建')
+const keyMask = computed(() => keyState.value?.key?.masked ?? '尚未申请')
+const isSetupRunning = computed(() => activeSetup.value?.state === 'pending' || activeSetup.value?.state === 'claimed')
+const setupTargetLabel = computed(() => activeSetup.value?.target === 'codex' ? 'Codex' : 'WorkBuddy')
+const setupStatusText = computed(() => {
+  if (!activeSetup.value) return ''
+  if (activeSetup.value.state === 'pending') return `正在打开本机 AI OPS 助手，准备导入 ${setupTargetLabel.value}…`
+  if (activeSetup.value.state === 'claimed') return `正在将 AI OPS 写入 ${setupTargetLabel.value}…`
+  return ''
+})
+
+function stopSetupPolling() {
+  if (setupPollTimer !== null) window.clearInterval(setupPollTimer)
+  if (setupInstallHintTimer !== null) window.clearTimeout(setupInstallHintTimer)
+  setupPollTimer = null
+  setupInstallHintTimer = null
+  isPollingSetup = false
+}
 
 async function load() {
   isLoading.value = true
@@ -36,7 +55,6 @@ async function load() {
     profile.value = user?.user ?? null
     keyState.value = key
     revealedKey.value = key.secret ?? ''
-    isKeyVisible.value = false
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '无法加载员工账户。'
   } finally {
@@ -46,7 +64,7 @@ async function load() {
 
 async function issue(action: 'create' | 'reset') {
   if (isMutating.value) return
-  if (action === 'reset' && !window.confirm('重置后旧 Key 会立即失效，确定继续吗？')) return
+  if (action === 'reset' && !window.confirm('重置后旧 Key 会立即失效，已导入的客户端需要重新一键导入。确定继续吗？')) return
   isMutating.value = true
   errorMessage.value = ''
   notice.value = ''
@@ -54,8 +72,9 @@ async function issue(action: 'create' | 'reset') {
     const result = action === 'create' ? await createEmployeePortalKey() : await resetEmployeePortalKey()
     keyState.value = result
     revealedKey.value = result.secret
-    isKeyVisible.value = true
-    notice.value = 'Key 已更新。之后你仍可在本人登录状态下查看、复制或导入配置。'
+    notice.value = action === 'create'
+      ? 'Key 已申请。现在选择 Codex 或 WorkBuddy，一键完成导入。'
+      : 'Key 已重置。请对正在使用的客户端重新点击一次导入。'
   } catch (error) {
     errorMessage.value = error instanceof EmployeePortalApiError ? error.message : '操作未完成，请稍后重试。'
   } finally {
@@ -63,113 +82,74 @@ async function issue(action: 'create' | 'reset') {
   }
 }
 
-async function copy(value: string, label: string) {
+async function copyKey() {
+  if (!revealedKey.value) return
   try {
-    await navigator.clipboard.writeText(value)
-    notice.value = `${label}已复制。`
+    await navigator.clipboard.writeText(revealedKey.value)
+    notice.value = '平台 Key 已复制。'
   } catch {
-    errorMessage.value = '浏览器未允许复制，请手动选择复制。'
+    errorMessage.value = '浏览器未允许复制，请手动选择后复制。'
   }
 }
 
-function isCodexLocalStatus(value: unknown): value is CodexLocalStatus {
-  if (!value || typeof value !== 'object') return false
-  const status = value as Partial<CodexLocalStatus>
-  return (status.installation === 'detected' || status.installation === 'not_detected')
-    && (status.login === 'logged_in' || status.login === 'not_logged_in' || status.login === 'unknown')
-    && typeof status.customProviderAvailableWithoutLogin === 'boolean'
+function importSuccess(target: DeviceSetupTarget) {
+  notice.value = target === 'codex'
+    ? 'Codex 已加入 AI OPS。重新打开 Codex 后即可使用，已有对话不会丢失。'
+    : 'WorkBuddy 已加入 AI OPS。重新打开 WorkBuddy 后即可使用，已有对话不会丢失。'
+  errorMessage.value = ''
 }
 
-async function checkCodexStatus() {
-  if (isCheckingCodex.value) return
-  isCheckingCodex.value = true
-  codexStatusMessage.value = '正在检测本机 Codex 状态…'
+async function pollSetup() {
+  if (!activeSetup.value || isPollingSetup) return
+  isPollingSetup = true
   try {
-    const response = await fetch(`${workBuddyConnectorUrl}/v1/codex/status`)
-    const payload = await response.json().catch(() => null) as { ok?: boolean; codex?: unknown; error?: unknown } | null
-    if (!response.ok || !payload?.ok || !isCodexLocalStatus(payload.codex)) throw new Error(typeof payload?.error === 'string' ? payload.error : '未能取得 Codex 状态。')
-    codexStatus.value = payload.codex
-    if (payload.codex.login === 'logged_in') {
-      codexStatusMessage.value = '已检测到 Codex 登录：会直接加入 AI OPS，自定义模型不会影响已有对话。'
-    } else if (payload.codex.login === 'not_logged_in') {
-      codexStatusMessage.value = 'Codex 当前未登录：仍可直接配置 AI OPS 的独立平台 Key；不会创建虚拟身份。'
-    } else if (payload.codex.installation === 'not_detected') {
-      codexStatusMessage.value = '尚未检测到 Codex：仍可写入用户级配置，安装或打开 Codex 后即可生效。'
-    } else {
-      codexStatusMessage.value = '已检测到 Codex，但登录状态暂时无法确认；AI OPS 仍使用独立平台 Key。'
+    const result = await fetchDeviceSetupTicket(activeSetup.value.id)
+    activeSetup.value = result.ticket
+    if (result.ticket.state === 'succeeded') {
+      stopSetupPolling()
+      showAssistantInstall.value = false
+      importSuccess(result.ticket.target)
+    } else if (result.ticket.state === 'failed' || result.ticket.state === 'expired') {
+      stopSetupPolling()
+      showAssistantInstall.value = result.ticket.state === 'expired'
+      errorMessage.value = result.ticket.state === 'expired'
+        ? '本机配置请求已过期，请重新点击导入。'
+        : (result.ticket.failureMessage ?? '本机助手未能完成配置。请再试一次；如仍失败，请联系管理员。')
     }
-  } catch {
-    codexStatus.value = null
-    codexStatusMessage.value = '无法连接本机 AI OPS 配置服务。请通过 AI OPS 的 start-docker.cmd 启动平台后重试。'
+  } catch (error) {
+    stopSetupPolling()
+    errorMessage.value = error instanceof EmployeePortalApiError ? error.message : '无法确认本机配置状态，请刷新页面后重试。'
   } finally {
-    isCheckingCodex.value = false
+    isPollingSetup = false
   }
 }
 
-function openImport() {
-  errorMessage.value = ''
-  showImport.value = true
-  void checkCodexStatus()
+function beginSetupPolling(ticket: DeviceSetupTicket) {
+  stopSetupPolling()
+  activeSetup.value = ticket
+  showAssistantInstall.value = false
+  setupPollTimer = window.setInterval(() => void pollSetup(), 850)
+  setupInstallHintTimer = window.setTimeout(() => {
+    if (activeSetup.value?.id === ticket.id && activeSetup.value.state === 'pending') showAssistantInstall.value = true
+  }, 7_000)
+  void pollSetup()
 }
 
-async function importCodex() {
-  if (!revealedKey.value) { errorMessage.value = '当前没有可用 Key，请先创建 Key。'; return }
-  const gatewayBaseUrl = keyState.value?.gateway.baseUrl
-  if (!gatewayBaseUrl) { errorMessage.value = '未取得 AI OPS 网关地址，请刷新后重试。'; return }
-
-  isImportingCodex.value = true
+async function importClient(target: DeviceSetupTarget) {
+  if (!hasKey.value || isStartingImport.value || isSetupRunning.value) return
+  isStartingImport.value = true
   errorMessage.value = ''
+  notice.value = ''
   try {
-    const response = await fetch(`${workBuddyConnectorUrl}/v1/codex/configure`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ apiKey: revealedKey.value, gatewayBaseUrl }),
-    })
-    const payload = await response.json().catch(() => null) as { ok?: boolean; error?: unknown; login?: CodexLocalStatus['login']; backupCreated?: boolean } | null
-    if (!response.ok || !payload?.ok) throw new Error(typeof payload?.error === 'string' ? payload.error : '本机 Codex 配置服务未能写入配置。')
-    notice.value = `已直接写入 Codex 的 AI OPS 配置${payload.backupCreated ? '，并已备份原有配置' : ''}。请重新打开 Codex 后使用；已有对话不会丢失。`
-    if (codexStatus.value && payload.login) codexStatus.value = { ...codexStatus.value, login: payload.login }
-    showImport.value = false
+    const result = await createDeviceSetupTicket(target)
+    beginSetupPolling(result.ticket)
+    // The URL carries only a one-time, five-minute ticket. The Key stays out
+    // of browser history and is fetched by the registered local assistant.
+    window.location.assign(result.launchUrl)
   } catch (error) {
-    const connectionUnavailable = error instanceof TypeError
-    const message = connectionUnavailable
-      ? '无法连接本机 AI OPS 配置服务（127.0.0.1:4176）。'
-      : error instanceof Error ? error.message : '本机 Codex 配置服务未能完成写入。'
-    errorMessage.value = `${message} 请通过 AI OPS 的 start-docker.cmd 启动平台后重试。`
+    errorMessage.value = error instanceof EmployeePortalApiError ? error.message : '无法启动一键导入，请稍后重试。'
   } finally {
-    isImportingCodex.value = false
-  }
-}
-
-async function importWorkBuddy() {
-  if (!revealedKey.value) { errorMessage.value = '当前没有可用 Key，请先创建 Key。'; return }
-  const gatewayBaseUrl = keyState.value?.gateway.baseUrl
-  if (!gatewayBaseUrl) { errorMessage.value = '未取得 AI OPS 网关地址，请刷新后重试。'; return }
-
-  isImportingWorkBuddy.value = true
-  errorMessage.value = ''
-  try {
-    const response = await fetch(`${workBuddyConnectorUrl}/v1/workbuddy/configure`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ apiKey: revealedKey.value, gatewayBaseUrl }),
-    })
-    const payload = await response.json().catch(() => null) as { ok?: boolean; error?: unknown; preservedModels?: number } | null
-    if (!response.ok || !payload?.ok) {
-      const message = typeof payload?.error === 'string' ? payload.error : '本机 WorkBuddy 连接器未能写入配置。'
-      throw new Error(message)
-    }
-    const preserved = payload.preservedModels ?? 0
-    notice.value = `已直接写入 WorkBuddy 的 AI OPS 配置${preserved ? `，并保留 ${preserved} 个原有自定义模型` : ''}；不会删除任何对话。`
-    showImport.value = false
-  } catch (error) {
-    const connectionUnavailable = error instanceof TypeError
-    const message = connectionUnavailable
-      ? '无法连接本机 WorkBuddy 配置服务（127.0.0.1:4176）。'
-      : error instanceof Error ? error.message : '本机 WorkBuddy 配置服务未能完成写入。'
-    errorMessage.value = `${message} 请通过 AI OPS 的 start-docker.cmd 启动平台后重试。`
-  } finally {
-    isImportingWorkBuddy.value = false
+    isStartingImport.value = false
   }
 }
 
@@ -179,32 +159,44 @@ async function signOut() {
 }
 
 onMounted(() => void load())
+onBeforeUnmount(stopSetupPolling)
 </script>
 
 <template>
   <main class="employee-page">
-    <header class="employee-topbar"><div><strong>AI OPS</strong><span>统一模型工作台</span></div><button type="button" @click="signOut"><IconLogout :size="16" />退出登录</button></header>
+    <header class="employee-topbar"><div><strong>AI OPS</strong><span>我的 AI 工作台</span></div><button type="button" @click="signOut"><IconLogout :size="16" />退出登录</button></header>
     <section class="employee-shell">
-      <div class="employee-heading"><div><p class="eyebrow">MY AI ACCESS</p><h1>你好，{{ profile?.displayName ?? '员工' }}</h1><p>一个平台 Key，接入文本、图片、视频等 AI OPS 能力。中转站与实际模型路由由平台自动处理。</p></div><button class="btn btn-white" :disabled="isLoading" @click="load"><IconRefresh :size="16" :class="{ spinning: isLoading }" />刷新</button></div>
+      <div class="employee-heading"><div><p class="eyebrow">MY AI ACCESS</p><h1>你好，{{ profile?.displayName ?? '员工' }}</h1><p>申请一个平台 Key，再点一次即可把 AI OPS 导入 Codex 或 WorkBuddy。</p></div><button class="btn btn-white" :disabled="isLoading" @click="load"><IconRefresh :size="16" :class="{ spinning: isLoading }" />刷新</button></div>
 
       <p v-if="errorMessage" class="employee-message error" role="alert"><IconAlertTriangle :size="16" />{{ errorMessage }}</p>
       <p v-if="notice" class="employee-message success" role="status"><IconCheck :size="16" />{{ notice }}</p>
 
-      <section class="employee-grid">
-        <article class="employee-card model-card"><span class="card-icon"><IconSparkles :size="22" /></span><div><p>统一模型</p><h2>AI OPS</h2><code>ai-ops</code><small>在 Codex 与 WorkBuddy 中使用 AI OPS；无需选择或了解上游模型。</small></div></article>
-        <article class="employee-card key-card"><span class="card-icon"><IconKey :size="22" /></span><div><p>我的平台 Key</p><h2>{{ keyMask }}</h2><small v-if="keyState?.key">创建于 {{ new Date(keyState.key.createdAt).toLocaleString('zh-CN', { hour12: false }) }} · 最后使用 {{ keyState.key.lastUsedAt ? new Date(keyState.key.lastUsedAt).toLocaleString('zh-CN', { hour12: false }) : '尚未使用' }}</small><small v-else>首次创建后可调用 AI OPS。</small></div><div class="card-actions"><button v-if="!hasKey" class="btn create-key" :disabled="isMutating" @click="issue('create')">创建 Key</button><template v-else><button class="btn btn-white" type="button" :disabled="!revealedKey" @click="isKeyVisible = !isKeyVisible"><IconEyeOff v-if="isKeyVisible" :size="16" /><IconEye v-else :size="16" />{{ isKeyVisible ? '隐藏 Key' : '显示 Key' }}</button><button class="btn btn-white" type="button" :disabled="!revealedKey" @click="copy(revealedKey, '平台 Key')"><IconCopy :size="16" />复制 Key</button><button class="btn btn-white" :disabled="isMutating" @click="issue('reset')">重置 Key</button></template></div></article>
+      <section class="employee-card key-card">
+        <span class="card-icon"><IconKey :size="22" /></span>
+        <div><p>我的平台 Key</p><h2>{{ keyMask }}</h2><small v-if="hasKey">你的 Key 已准备好，可以直接一键导入客户端。</small><small v-else>申请后即可接入 AI OPS。</small></div>
+        <div class="card-actions"><button v-if="!hasKey" class="btn create-key" :disabled="isMutating" @click="issue('create')">{{ isMutating ? '正在申请…' : '申请 Key' }}</button></div>
       </section>
 
-      <section v-if="hasKey && isKeyVisible" class="revealed-key" aria-live="polite"><div><strong>当前平台 Key</strong><code>{{ revealedKey }}</code><small>仅本人登录后可查看；管理员不会看到完整 Key。</small></div><button class="btn btn-white" @click="copy(revealedKey, '平台 Key')"><IconCopy :size="16" />复制 Key</button></section>
+      <details v-if="hasKey" class="key-management">
+        <summary>管理 Key</summary>
+        <div><code>{{ revealedKey }}</code><span><button class="btn btn-white" type="button" :disabled="!revealedKey" @click="copyKey"><IconCopy :size="16" />复制 Key</button><button class="btn btn-white" :disabled="isMutating" @click="issue('reset')">重置 Key</button></span></div>
+      </details>
 
-      <section class="employee-card import-card"><div><span class="card-icon"><IconSparkles :size="22" /></span><div><p>客户端配置</p><h2>导入配置</h2><small>选择客户端后接入 AI OPS。配置只新增 AI OPS，不会删除或重置已有对话记录。</small></div></div><button class="btn create-key" :disabled="!hasKey || !revealedKey" @click="openImport">导入配置</button></section>
+      <section class="quick-import">
+        <header><div><p class="eyebrow">ONE-CLICK IMPORT</p><h2>一键接入</h2><small>只新增 AI OPS 配置，不会删除已有模型或对话记录。</small></div><span class="card-icon"><IconSparkles :size="22" /></span></header>
+        <div class="client-options">
+          <button type="button" :disabled="!hasKey || isStartingImport || isSetupRunning" @click="importClient('codex')"><IconBrandOpenai :size="21" /><span><strong>{{ activeSetup?.target === 'codex' && isSetupRunning ? '正在导入 Codex…' : '导入 Codex' }}</strong><small>点击一次，AI OPS 自动加入 Codex。</small></span></button>
+          <button type="button" :disabled="!hasKey || isStartingImport || isSetupRunning" @click="importClient('workbuddy')"><IconSparkles :size="21" /><span><strong>{{ activeSetup?.target === 'workbuddy' && isSetupRunning ? '正在导入 WorkBuddy…' : '导入 WorkBuddy' }}</strong><small>点击一次，AI OPS 自动加入 WorkBuddy。</small></span></button>
+        </div>
+        <p v-if="setupStatusText" class="setup-status" role="status">{{ setupStatusText }}</p>
+        <p v-if="showAssistantInstall" class="assistant-install">这台电脑尚未安装 AI OPS 助手？<a href="/AI-OPS-助手安装.cmd" download>下载并运行一次安装助手</a>，以后直接点击上面的导入按钮即可。</p>
+        <p v-if="!hasKey" class="setup-status">请先申请 Key，随后即可一键导入。</p>
+      </section>
     </section>
-
-    <div v-if="showImport" class="drawer-backdrop" @click.self="showImport = false"><aside class="import-dialog" role="dialog" aria-modal="true" aria-label="导入配置"><header><div><p class="eyebrow">ONE-CLICK CONFIG</p><h2>导入配置</h2></div><button class="icon-button" aria-label="关闭" @click="showImport = false">×</button></header><p>配置会使用你的当前平台 Key。它只添加 AI OPS，不会删除或重置已有对话记录。</p><p class="import-status" :class="{ loading: isCheckingCodex }">{{ codexStatusMessage }}</p><div class="import-options"><button type="button" :disabled="isImportingCodex" @click="importCodex"><IconBrandOpenai :size="20" /><span><strong>{{ isImportingCodex ? '正在配置 Codex…' : '直接接入 Codex' }}</strong><small>直接写入本机 Codex 配置与 AI OPS 平台 Key，不下载文件。</small></span></button><button type="button" :disabled="isImportingWorkBuddy" @click="importWorkBuddy"><IconSparkles :size="20" /><span><strong>{{ isImportingWorkBuddy ? '正在配置 WorkBuddy…' : '导入 WorkBuddy' }}</strong><small>直接写入本机 WorkBuddy 的 AI OPS 配置，不下载文件。</small></span></button></div></aside></div>
   </main>
 </template>
 
 <style scoped>
-.employee-page { min-height: 100vh; color: var(--navy); background: var(--canvas, #f6f8f8); }.employee-topbar { display: flex; align-items: center; justify-content: space-between; padding: 17px max(24px, calc((100vw - 1120px) / 2)); border-bottom: 1px solid var(--line); background: var(--surface); }.employee-topbar > div { display: grid; gap: 2px; }.employee-topbar strong { letter-spacing: .05em; }.employee-topbar span, .employee-topbar button { color: var(--muted); font-size: 11px; }.employee-topbar button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; cursor: pointer; }.employee-shell { width: min(100% - 36px, 1120px); margin: 0 auto; padding: 54px 0; }.employee-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 24px; }.employee-heading h1 { margin: 4px 0 8px; font-size: 32px; }.employee-heading p:not(.eyebrow) { max-width: 660px; margin: 0; color: var(--muted); line-height: 1.75; }.employee-grid { display: grid; grid-template-columns: .88fr 1.12fr; gap: 16px; }.employee-card { display: flex; gap: 15px; padding: 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 5px 18px rgba(25, 55, 59, .04); }.employee-card > div:nth-child(2) { min-width: 0; flex: 1; display: grid; align-content: start; gap: 5px; }.employee-card p { margin: 0; color: var(--muted); font-size: 12px; }.employee-card h2 { overflow: hidden; margin: 0; color: var(--navy); font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }.employee-card code { color: var(--brand); font-size: 12px; }.employee-card small { color: var(--muted); font-size: 11px; line-height: 1.65; }.card-icon { display: grid; flex: none; place-items: center; width: 42px; height: 42px; border-radius: 11px; color: var(--brand); background: #e7f2f2; }.card-actions { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 8px; align-self: center; }.import-card { align-items: center; justify-content: space-between; margin-top: 16px; }.import-card > div { display: flex; gap: 15px; }.revealed-key { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 16px; padding: 15px 17px; border: 1px solid #d6eade; border-radius: 11px; background: #f5fcf7; }.revealed-key > div { display: grid; gap: 5px; min-width: 0; }.revealed-key strong { font-size: 13px; }.revealed-key code { overflow: hidden; color: var(--navy); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.employee-message { display: flex; align-items: center; gap: 7px; margin: 0 0 16px; padding: 10px 12px; border-radius: 8px; font-size: 12px; }.employee-message.error { color: var(--danger); background: #fff4f4; }.employee-message.success { color: #26754e; background: #effaf2; }.import-dialog { width: min(100% - 28px, 570px); padding: 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 22px 60px rgba(0, 0, 0, .25); }.import-dialog header { display: flex; align-items: flex-start; justify-content: space-between; }.import-dialog h2 { margin: 3px 0 0; font-size: 20px; }.import-dialog > p { color: var(--muted); font-size: 12px; line-height: 1.7; }.import-status { margin: 12px 0 0; padding: 9px 10px; border-radius: 8px; color: #376272 !important; background: #f2f7f7; }.import-status.loading { color: var(--brand) !important; }.import-options { display: grid; gap: 10px; margin-top: 18px; }.import-options button { display: flex; align-items: center; gap: 12px; padding: 15px; border: 1px solid var(--line); border-radius: 9px; color: var(--brand); background: var(--surface); text-align: left; cursor: pointer; }.import-options span { display: grid; gap: 3px; color: var(--navy); }.import-options small { color: var(--muted); font-size: 11px; line-height: 1.5; }
-@media (max-width: 760px) { .employee-shell { padding-top: 34px; }.employee-heading { align-items: stretch; flex-direction: column; }.employee-grid { grid-template-columns: 1fr; }.import-card, .revealed-key { align-items: stretch; flex-direction: column; }.card-actions { align-self: stretch; }.card-actions button, .import-card > button { width: 100%; } }
+.employee-page { min-height: 100vh; color: var(--navy); background: var(--canvas, #f6f8f8); }.employee-topbar { display: flex; align-items: center; justify-content: space-between; padding: 17px max(24px, calc((100vw - 1000px) / 2)); border-bottom: 1px solid var(--line); background: var(--surface); }.employee-topbar > div { display: grid; gap: 2px; }.employee-topbar strong { letter-spacing: .05em; }.employee-topbar span, .employee-topbar button { color: var(--muted); font-size: 11px; }.employee-topbar button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; cursor: pointer; }.employee-shell { width: min(100% - 36px, 860px); margin: 0 auto; padding: 54px 0; }.employee-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 24px; }.employee-heading h1 { margin: 4px 0 8px; font-size: 32px; }.employee-heading p:not(.eyebrow) { max-width: 580px; margin: 0; color: var(--muted); line-height: 1.75; }.employee-card, .quick-import { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 5px 18px rgba(25, 55, 59, .04); }.employee-card { display: flex; gap: 15px; padding: 22px; }.employee-card > div:nth-child(2) { min-width: 0; flex: 1; display: grid; align-content: start; gap: 5px; }.employee-card p, .quick-import p { margin: 0; color: var(--muted); font-size: 12px; }.employee-card h2, .quick-import h2 { margin: 0; color: var(--navy); font-size: 18px; }.employee-card small, .quick-import small { color: var(--muted); font-size: 11px; line-height: 1.65; }.card-icon { display: grid; flex: none; place-items: center; width: 42px; height: 42px; border-radius: 11px; color: var(--brand); background: #e7f2f2; }.card-actions { display: flex; align-self: center; }.key-management { margin-top: 10px; padding: 0 4px; color: var(--muted); font-size: 12px; }.key-management summary { width: max-content; color: var(--brand); cursor: pointer; font-weight: 700; }.key-management > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; padding: 12px; border-radius: 9px; background: #f5f8f8; }.key-management code { overflow: hidden; min-width: 0; color: var(--navy); text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }.key-management span { display: flex; flex: none; gap: 8px; }.quick-import { margin-top: 18px; padding: 23px; }.quick-import header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }.quick-import header > div { display: grid; gap: 5px; }.client-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }.client-options button { display: flex; align-items: center; gap: 12px; min-height: 78px; padding: 14px; border: 1px solid #bfdadc; border-radius: 10px; color: var(--brand); background: #f8fcfc; text-align: left; transition: .18s ease; }.client-options button:hover:not(:disabled) { border-color: var(--brand); background: #eff9f9; transform: translateY(-1px); }.client-options button:disabled { cursor: not-allowed; opacity: .6; }.client-options span { display: grid; gap: 3px; }.client-options strong { color: var(--navy); font-size: 13px; }.setup-status, .assistant-install { margin-top: 14px !important; padding: 10px 11px; border-radius: 8px; background: #f1f7f7; line-height: 1.6; }.assistant-install { color: #516672 !important; background: #fff8e8; }.assistant-install a { color: var(--brand); font-weight: 700; }.employee-message { display: flex; align-items: center; gap: 7px; margin: 0 0 16px; padding: 10px 12px; border-radius: 8px; font-size: 12px; }.employee-message.error { color: var(--danger); background: #fff4f4; }.employee-message.success { color: #26754e; background: #effaf2; }
+@media (max-width: 640px) { .employee-shell { padding-top: 34px; }.employee-heading { align-items: stretch; flex-direction: column; }.key-management > div { align-items: stretch; flex-direction: column; }.key-management span, .key-management span button { width: 100%; }.client-options { grid-template-columns: 1fr; }.employee-topbar { padding-inline: 18px; } }
 </style>

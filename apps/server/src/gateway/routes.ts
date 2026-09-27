@@ -169,7 +169,70 @@ function isInternalTopicTitleRequest(body: unknown) {
     : null
   const isNewTopic = request.isNewTopic === true || metadata?.isNewTopic === true
   const hasTitle = typeof request.title === 'string' || typeof metadata?.title === 'string'
-  return isNewTopic && hasTitle
+  if (isNewTopic && hasTitle) return true
+  if (isCodexThreadTitleRequest(request.client_metadata)) return true
+
+  // Some desktop clients generate a local conversation title through an
+  // ordinary model call. They put the protocol in a system/developer prompt
+  // instead of top-level request metadata, then expect a JSON object with
+  // `isNewTopic` and `title`. That call must not become a second employee
+  // conversation in the audit list. Only inspect privileged instructions so a
+  // user discussing those field names in a normal chat remains auditable.
+  const instructions = [
+    request.instructions,
+    ...protocolMessages(request.messages),
+    ...protocolMessages(request.input),
+  ]
+  return instructions.some((value) => isTopicTitleProtocol(value))
+}
+
+function isCodexThreadTitleRequest(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const metadata = value as Record<string, unknown>
+  const turnMetadata = parseJsonRecord(metadata['x-codex-turn-metadata'])
+  return turnMetadata?.turn_trigger === 'thread_title' || turnMetadata?.thread_source === 'thread_title'
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if (typeof value !== 'string') return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
+  } catch {
+    return null
+  }
+}
+
+function protocolMessages(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const message = item as Record<string, unknown>
+    if (message.role !== 'system' && message.role !== 'developer') return []
+    return [messageText(message.content)]
+  })
+}
+
+function messageText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+  return value.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return ''
+    const part = item as Record<string, unknown>
+    return typeof part.text === 'string'
+      ? part.text
+      : typeof part.input_text === 'string'
+        ? part.input_text
+        : typeof part.content === 'string'
+          ? part.content
+          : ''
+  }).join('\n')
+}
+
+function isTopicTitleProtocol(value: unknown) {
+  if (typeof value !== 'string') return false
+  return /\bisNewTopic\b/u.test(value) && /\btitle\b/iu.test(value) && /\bjson\b/iu.test(value)
 }
 
 function beginGatewayAudit(database: PlatformDatabase | undefined, key: PlatformGatewayKey | null, input: {
@@ -430,7 +493,7 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
         request: { ...body, model }, startedAt, headers: request.headers, measurement: result.measurement,
         status: result.status, error: result.error,
       }, request.log)
-      completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'stop' : 'cancelled'), captureError: result.error?.message }, request.log)
+      completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, response: result.measurement.response, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'stop' : 'cancelled'), captureError: result.error?.message }, request.log)
     }, (chunk) => appendGatewayAuditChunk(audit, chunk, request.log))
     try {
       upstreamStartedAt = Date.now()
@@ -497,7 +560,7 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
             request: usageRequest, startedAt, headers: request.headers, measurement: result.measurement,
             status: result.status, error: result.error,
           }, request.log)
-          completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'completed' : 'cancelled'), captureError: result.error?.message }, request.log)
+          completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, response: result.measurement.response, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'completed' : 'cancelled'), captureError: result.error?.message }, request.log)
         }, (event) => appendGatewayAuditChunk(audit, event, request.log))
       }
       if (body.stream) {
@@ -661,10 +724,24 @@ function streamText(value: unknown): string {
 }
 
 function appendCapturedStreamText(current: string, value: unknown) {
+  return appendCapturedText(current, streamText(value))
+}
+
+function appendCapturedText(current: string, next: string) {
   if (current.length >= maximumCapturedStreamTextChars) return current
-  const next = streamText(value)
   if (!next) return current
   return `${current}${next.slice(0, maximumCapturedStreamTextChars - current.length)}`
+}
+
+function responseOutputText(event: OpenAiResponsesEvent, allowDoneFallback = false) {
+  const eventType = event.event ?? (typeof event.data.type === 'string' ? event.data.type : '')
+  if (eventType === 'response.output_text.delta') return typeof event.data.delta === 'string' ? event.data.delta : ''
+  if (allowDoneFallback && eventType === 'response.output_text.done') return typeof event.data.text === 'string' ? event.data.text : ''
+  // A few compatible upstreams omit the SSE `event:` line. Keep their plain
+  // delta payloads working, but never treat reasoning summaries or completed
+  // response snapshots as visible assistant output.
+  if (!eventType && typeof event.data.delta === 'string') return event.data.delta
+  return ''
 }
 
 async function streamChatCompletion(
@@ -761,6 +838,7 @@ async function streamResponses(
   let usage: { inputTokens?: number; outputTokens?: number } | undefined
   let outputLength = 0
   let capturedText = ''
+  let receivedOutputTextDelta = false
   let upstreamStartedAt = 0
   const onClose = () => {
     if (reply.raw.writableEnded) return
@@ -782,8 +860,11 @@ async function streamResponses(
     upstreamStartedAt = Date.now()
     await upstream.responsesStream!(body, (event: OpenAiResponsesEvent) => {
       onEvent?.(event)
-      capturedText = appendCapturedStreamText(capturedText, event.data)
-      const textLength = chunkTextLength(event.data)
+      const outputText = responseOutputText(event, !receivedOutputTextDelta)
+      const eventType = event.event ?? (typeof event.data.type === 'string' ? event.data.type : '')
+      if (eventType === 'response.output_text.delta') receivedOutputTextDelta = true
+      capturedText = appendCapturedText(capturedText, outputText)
+      const textLength = outputText.length
       if (firstTokenMs === null && textLength > 0) {
         firstTokenMs = Date.now() - timing.startedAt
         upstreamFirstTokenMs = Date.now() - upstreamStartedAt

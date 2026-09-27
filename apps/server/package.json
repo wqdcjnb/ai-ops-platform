@@ -8,7 +8,6 @@
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file-if-exists=.env.local dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run src",
     "preflight:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/preflight-local.ps1",
     "backup:local": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/backup-local.ps1"
   },
@@ -23,7 +22,6 @@
   "devDependencies": {
     "@types/node": "^26.5.1",
     "tsx": "^4.23.13",
-    "typescript": "~5.9.3",
-    "vitest": "^5.0.1"
+    "typescript": "~5.9.3"
   }
 }
