@@ -30,8 +30,8 @@ export const adminNavSections: AdminNavSection[] = [
   {
     label: '模型治理',
     items: [
-      { label: '模型目录', icon: IconBrain, to: '/models' },
       { label: '第三方账号', icon: IconServer2, to: '/external-providers' },
+      { label: '模型目录', icon: IconBrain, to: '/models' },
     ],
   },
   {
@@ -43,8 +43,8 @@ export const adminNavSections: AdminNavSection[] = [
   {
     label: '安全审计',
     items: [
-      { label: '审计日志', icon: IconShieldCheck, to: '/audit' },
       { label: '对话审计', icon: IconBuildingCommunity, to: '/conversation-audit' },
+      { label: '审计日志', icon: IconShieldCheck, to: '/audit' },
     ],
   },
 ]

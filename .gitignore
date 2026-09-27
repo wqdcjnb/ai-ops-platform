@@ -24,8 +24,6 @@ logs/
 # Dependencies and build output
 node_modules/
 dist/
-.vitepress/cache/
-.vitepress/dist/
 coverage/
 /apps/web/playwright-report/
 /apps/web/test-results/

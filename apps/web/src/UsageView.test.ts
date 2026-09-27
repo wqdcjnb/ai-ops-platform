@@ -45,7 +45,7 @@ describe('local model analytics view', () => {
     await vi.waitFor(() => expect(host.textContent).toContain('Token 分布'))
     expect(fetchModelAnalytics).toHaveBeenCalledWith({ days: 1, timeGranularity: 'hour', person: 'all' }, expect.any(AbortSignal))
     expect(host.textContent).toContain('AI OPS 本地网关')
-    expect(host.textContent).toContain('真实调用元数据')
+    expect(host.textContent).not.toContain('数据源：AI OPS 统一模型网关')
     expect(host.textContent).toContain('deepseek-chat')
     expect(host.textContent).not.toContain('演示数据')
     expect(host.textContent).toContain('Token 分布')

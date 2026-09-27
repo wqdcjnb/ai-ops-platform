@@ -14,6 +14,10 @@ const operationNotice = ref('')
 const pending = ref<{ person: Person; action: 'enable' | 'disable' | 'delete' | 'resetPassword' | 'resetKey' } | null>(null)
 const openMenuId = ref<string | null>(null)
 const isOperating = ref(false)
+type PeopleSortKey = 'createdAt' | 'lastUsedAt'
+type PeopleSortDirection = 'none' | 'ascending' | 'descending'
+const sortDirections = ref<Record<PeopleSortKey, PeopleSortDirection>>({ createdAt: 'none', lastUsedAt: 'none' })
+const sortPriority = ref<PeopleSortKey[]>([])
 let request: AbortController | null = null
 
 const statusLabel: Record<Person['status'], string> = { active: '启用', disabled: '停用', offboarding: '待回收', unknown: '未知', external_missing: '已移除' }
@@ -25,6 +29,56 @@ function formatDate(value: string | null | undefined) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
   return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date)
+}
+
+function timestamp(value: string | null | undefined) {
+  if (!value) return null
+  const parsed = new Date(value).getTime()
+  return Number.isNaN(parsed) ? null : parsed
+}
+
+const displayedPeople = computed(() => {
+  const items = people.value?.items ?? []
+  if (!sortPriority.value.length) return items
+  return [...items].sort((left, right) => {
+    for (const key of sortPriority.value) {
+      const direction = sortDirections.value[key]
+      const leftTime = timestamp(left[key])
+      const rightTime = timestamp(right[key])
+      if (leftTime === null && rightTime === null) continue
+      if (leftTime === null) return 1
+      if (rightTime === null) return -1
+      const comparison = direction === 'ascending' ? leftTime - rightTime : rightTime - leftTime
+      if (comparison !== 0) return comparison
+    }
+    return 0
+  })
+})
+
+function toggleSort(key: PeopleSortKey) {
+  const current = sortDirections.value[key]
+  const next: PeopleSortDirection = current === 'none' ? 'descending' : current === 'descending' ? 'ascending' : 'none'
+  sortDirections.value = { ...sortDirections.value, [key]: next }
+  sortPriority.value = next === 'none'
+    ? sortPriority.value.filter((item) => item !== key)
+    : [key, ...sortPriority.value.filter((item) => item !== key)]
+}
+
+function sortDirection(key: PeopleSortKey) {
+  return sortDirections.value[key]
+}
+
+function sortButtonLabel(key: PeopleSortKey) {
+  const label = key === 'createdAt' ? '创建时间' : '最后使用'
+  const current = sortDirection(key)
+  if (current === 'ascending') return `取消按${label}排序`
+  if (current === 'descending') return `按${label}升序排序`
+  return `按${label}降序排序`
+}
+
+function sortIcon(key: PeopleSortKey) {
+  const current = sortDirection(key)
+  return current === 'ascending' ? '↑' : current === 'descending' ? '↓' : '↕'
 }
 
 function operationKey(prefix: string) {
@@ -133,7 +187,6 @@ onBeforeUnmount(() => { request?.abort(); cancelSearch(); document.removeEventLi
       <div>
         <div class="eyebrow">PEOPLE & PLATFORM KEY</div>
         <h1>人员信息管理</h1>
-        <p>员工自助注册；管理员只维护人员状态、固定密码重置与平台 Key 的安全重置。</p>
       </div>
       <div class="heading-actions"><button class="btn btn-white refresh-button" :disabled="isLoading" @click="loadPeople"><IconRefresh :size="17" :class="{ spinning: isLoading }" />刷新</button></div>
     </section>
@@ -157,9 +210,9 @@ onBeforeUnmount(() => { request?.abort(); cancelSearch(); document.removeEventLi
         <p v-if="operationNotice" class="person-operation-notice" role="status">{{ operationNotice }}</p>
         <div v-if="people.items.length" class="table-responsive" :class="{ 'has-open-person-menu': openMenuId !== null }">
           <table class="data-table people-table">
-            <thead><tr><th>人员</th><th>状态</th><th>API密钥（KEY掩码）</th><th>创建时间</th><th>最后使用</th><th>操作</th></tr></thead>
+            <thead><tr><th>人员</th><th>状态</th><th>API密钥（KEY掩码）</th><th :aria-sort="sortDirection('createdAt')"><button class="people-sort-button" type="button" :aria-label="sortButtonLabel('createdAt')" @click="toggleSort('createdAt')">创建时间 <span aria-hidden="true">{{ sortIcon('createdAt') }}</span></button></th><th :aria-sort="sortDirection('lastUsedAt')"><button class="people-sort-button" type="button" :aria-label="sortButtonLabel('lastUsedAt')" @click="toggleSort('lastUsedAt')">最后使用 <span aria-hidden="true">{{ sortIcon('lastUsedAt') }}</span></button></th><th>操作</th></tr></thead>
             <tbody>
-              <tr v-for="person in people.items" :key="person.id">
+              <tr v-for="person in displayedPeople" :key="person.id">
                 <td><div class="person-cell"><span class="person-avatar" :class="`avatar-${person.tone}`">{{ person.name.slice(0, 1) }}</span><span><strong>{{ person.name }}</strong><small>{{ person.username }}</small></span></div></td>
                 <td><span class="person-status" :class="`status-${person.status}`"><i />{{ statusLabel[person.status] }}</span></td>
                 <td><code class="masked-key">{{ person.apiKeyMasked ?? '未创建' }}</code></td>
@@ -193,6 +246,6 @@ onBeforeUnmount(() => { request?.abort(); cancelSearch(); document.removeEventLi
 </template>
 
 <style scoped>
-.people-dashboard { max-width: 1500px; }.people-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px; }.people-panel-main { padding: 0; overflow: visible; }.people-filters { display: flex; align-items: center; gap: 10px; padding: 15px 17px; border-bottom: 1px solid var(--line); }.people-filters label { display: flex; align-items: center; gap: 7px; min-width: 150px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); }.people-filters input, .people-filters select { min-width: 0; width: 100%; padding: 8px 0; border: 0; outline: 0; color: var(--navy); background: transparent; font: inherit; font-size: 12px; }.people-search { flex: 1; max-width: 360px; }.people-table { min-width: 860px; }.people-table th { text-transform: none; }.people-table th:last-child { width: 64px; min-width: 64px; padding: 0; text-align: center; }.table-responsive.has-open-person-menu { padding-bottom: 164px; }.person-cell { display: flex; align-items: center; gap: 9px; min-width: 170px; }.person-cell > span:last-child { display: grid; gap: 2px; }.person-cell small { color: var(--muted); font-size: 10px; }.masked-key { color: var(--navy); font-size: 11px; }.person-operation-notice { display: flex; align-items: center; margin: 0 16px 12px; padding: 10px 12px; border: 1px solid #cfe8d6; border-radius: 8px; color: #26754e; background: #f4fbf6; font-size: 12px; }.person-action-cell { position: relative; width: 64px; min-width: 64px; padding: 0 !important; text-align: center; }.person-action-menu { position: relative; display: flex; justify-content: center; }.person-menu-trigger { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; }.person-menu-trigger:hover, .person-menu-trigger[aria-expanded="true"] { border-color: var(--line); color: var(--navy); background: #f7fafb; }.person-menu-popover { position: absolute; z-index: 20; top: calc(100% + 5px); right: 0; display: grid; width: 158px; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 14px 30px rgba(24, 36, 51, .16); }.person-menu-popover button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; color: #40515e; background: transparent; font: inherit; font-size: 11px; text-align: left; }.person-menu-popover button:hover, .person-menu-popover button:focus-visible { outline: 0; color: var(--navy); background: #f1f6f7; }.person-menu-popover button.danger { margin-top: 3px; border-top: 1px solid #edf0f3; border-radius: 0 0 6px 6px; color: var(--danger); }.person-action-dialog { width: min(100% - 28px, 480px); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 22px 60px rgba(0, 0, 0, .25); }.person-action-dialog header { display: flex; align-items: center; justify-content: space-between; padding: 18px; border-bottom: 1px solid var(--line); }.person-action-dialog header > div { display: flex; align-items: center; gap: 10px; }.person-action-dialog h2 { margin: 0; color: var(--navy); font-size: 16px; }.person-action-dialog-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: var(--brand); background: #e7f2f2; }.person-action-dialog-body { padding: 20px 18px; }.person-action-dialog-body strong { color: var(--navy); }.person-action-dialog-body p { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.65; }.dialog-error { display: flex; align-items: flex-start; gap: 6px; color: var(--danger) !important; }.person-action-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; border-top: 1px solid var(--line); }
+.people-dashboard { max-width: 1500px; }.people-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px; }.people-panel-main { padding: 0; overflow: visible; }.people-filters { display: flex; align-items: center; gap: 10px; padding: 15px 17px; border-bottom: 1px solid var(--line); }.people-filters label { display: flex; align-items: center; gap: 7px; min-width: 150px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); }.people-filters input, .people-filters select { min-width: 0; width: 100%; padding: 8px 0; border: 0; outline: 0; color: var(--navy); background: transparent; font: inherit; font-size: 12px; }.people-search { flex: 1; max-width: 360px; }.people-table { min-width: 860px; }.people-table th { text-transform: none; }.people-sort-button { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; cursor: pointer; }.people-sort-button:hover { color: var(--brand); }.people-sort-button:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 3px; }.people-sort-button span { color: var(--brand); font-size: 13px; line-height: 1; }.people-table th:last-child { width: 64px; min-width: 64px; padding: 0; text-align: center; }.table-responsive.has-open-person-menu { padding-bottom: 164px; }.person-cell { display: flex; align-items: center; gap: 9px; min-width: 170px; }.person-cell > span:last-child { display: grid; gap: 2px; }.person-cell small { color: var(--muted); font-size: 10px; }.masked-key { color: var(--navy); font-size: 11px; }.person-operation-notice { display: flex; align-items: center; margin: 0 16px 12px; padding: 10px 12px; border: 1px solid #cfe8d6; border-radius: 8px; color: #26754e; background: #f4fbf6; font-size: 12px; }.person-action-cell { position: relative; width: 64px; min-width: 64px; padding: 0 !important; text-align: center; }.person-action-menu { position: relative; display: flex; justify-content: center; }.person-menu-trigger { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 1px solid transparent; border-radius: 7px; color: var(--muted); background: transparent; }.person-menu-trigger:hover, .person-menu-trigger[aria-expanded="true"] { border-color: var(--line); color: var(--navy); background: #f7fafb; }.person-menu-popover { position: absolute; z-index: 20; top: calc(100% + 5px); right: 0; display: grid; width: 158px; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 14px 30px rgba(24, 36, 51, .16); }.person-menu-popover button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; color: #40515e; background: transparent; font: inherit; font-size: 11px; text-align: left; }.person-menu-popover button:hover, .person-menu-popover button:focus-visible { outline: 0; color: var(--navy); background: #f1f6f7; }.person-menu-popover button.danger { margin-top: 3px; border-top: 1px solid #edf0f3; border-radius: 0 0 6px 6px; color: var(--danger); }.person-action-dialog { width: min(100% - 28px, 480px); border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 22px 60px rgba(0, 0, 0, .25); }.person-action-dialog header { display: flex; align-items: center; justify-content: space-between; padding: 18px; border-bottom: 1px solid var(--line); }.person-action-dialog header > div { display: flex; align-items: center; gap: 10px; }.person-action-dialog h2 { margin: 0; color: var(--navy); font-size: 16px; }.person-action-dialog-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; color: var(--brand); background: #e7f2f2; }.person-action-dialog-body { padding: 20px 18px; }.person-action-dialog-body strong { color: var(--navy); }.person-action-dialog-body p { margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.65; }.dialog-error { display: flex; align-items: flex-start; gap: 6px; color: var(--danger) !important; }.person-action-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px; border-top: 1px solid var(--line); }
 @media (max-width: 720px) { .people-summary-grid { grid-template-columns: 1fr; }.people-filters { align-items: stretch; flex-direction: column; }.people-filters label, .people-search { width: 100%; max-width: none; } }
 </style>

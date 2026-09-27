@@ -38,7 +38,7 @@ button { cursor: pointer; }
 .environment-pill { display: flex; align-items: center; gap: 7px; margin: 0 6px 18px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 7px; color: #9dafbe; background: rgba(255,255,255,.035); font-size: 11px; }
 .environment-pill span { width: 7px; height: 7px; border-radius: 99px; background: #2fb344; box-shadow: 0 0 0 3px rgba(47,179,68,.12); }
 .environment-pill strong { margin-left: auto; color: #74cdd0; font-size: 9px; letter-spacing: .12em; }
-.primary-nav { flex: 1; min-height: 0; display: grid; align-content: start; gap: 11px; padding-right: 2px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }
+.primary-nav { flex: 1; min-height: 0; display: grid; align-content: start; gap: 18px; padding-right: 2px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }
 .nav-section { display: grid; gap: 2px; }
 .nav-section-label { padding: 0 12px 4px; color: #718596; font-size: 8px; font-weight: 800; letter-spacing: .12em; }
 .nav-item { position: relative; display: flex; align-items: center; gap: 11px; min-height: 42px; padding: 0 12px; border-radius: 7px; color: #aebdca; text-decoration: none; font-size: 13px; font-weight: 500; transition: .18s ease; }

@@ -107,7 +107,6 @@ async function load() {
   try {
     const result = await fetchExternalProviders()
     providers.value = result.items
-    notice.value = result.meta.notice
   } catch (error) {
     errorMessage.value = error instanceof ExternalProvidersApiError ? error.message : '第三方账号暂时无法加载。'
   } finally {

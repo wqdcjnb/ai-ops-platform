@@ -9,8 +9,6 @@ node_modules
 **/playwright-report
 **/test-results
 output
-docs-site/.vitepress/cache
-docs-site/.vitepress/dist
 apps/server/data
 *.sqlite
 *.sqlite3

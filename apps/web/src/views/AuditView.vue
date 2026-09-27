@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  IconAlertTriangle, IconArrowLeft, IconArrowRight, IconBan, IconChevronRight, IconCircleCheck,
+  IconAlertTriangle, IconArrowLeft, IconArrowRight, IconChevronRight, IconCircleCheck,
   IconDatabase, IconDownload, IconFingerprint, IconHistory, IconLock, IconRefresh, IconSearch, IconShieldLock, IconUser, IconX,
 } from '@tabler/icons-vue'
 import { AuditApiError, exportAudit, fetchAuditDetail, fetchAuditEvents, type AuditDetail, type AuditEvent, type AuditFilters, type AuditResponse } from '../audit-api'
@@ -71,8 +71,6 @@ const summaryCards = computed(() => {
     { label: '审计事件', value: value?.total ?? '—', hint: '当前筛选范围', icon: IconHistory, tone: 'teal' },
     { label: '操作成功', value: value?.success ?? '—', hint: '已完成的操作', icon: IconCircleCheck, tone: 'green' },
     { label: '执行失败', value: value?.failed ?? '—', hint: '服务或依赖异常', icon: IconAlertTriangle, tone: 'red' },
-    { label: '权限拒绝', value: value?.denied ?? '—', hint: '被安全边界阻止', icon: IconBan, tone: 'amber' },
-    { label: '敏感变更', value: value?.sensitiveChanges ?? '—', hint: '仅记录“已变化”', icon: IconLock, tone: 'violet' },
   ]
 })
 
@@ -181,7 +179,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
           <label><IconUser :size="14" /><select v-model="actor" aria-label="审计操作人" @change="applyFilters"><option value="all">全部操作人</option><option v-for="option in audit.options.actors" :key="option.id" :value="option.id">{{ option.label }}</option></select></label>
           <label><select v-model="action" aria-label="审计动作" @change="applyFilters"><option value="all">全部动作</option><option value="login">登录</option><option value="logout">退出登录</option><option value="access">访问</option><option value="create">创建</option><option value="update">更新</option><option value="disable">停用</option><option value="enable">启用</option><option value="rotate">轮换</option><option value="reset">重置 Key</option><option value="export">导出</option><option value="acknowledge">确认</option><option value="verify">验证连接</option><option value="view">查看</option><option value="sync">同步</option><option value="restart">重启服务</option><option value="draft">保存草稿</option><option value="publish">发布</option><option value="rollback">回滚</option></select></label>
           <label><select v-model="resource" aria-label="审计对象" @change="applyFilters"><option value="all">全部对象</option><option value="session">会话</option><option value="authorization">权限校验</option><option value="gateway_request">网关请求</option><option value="person">人员</option><option value="people">人员目录</option><option value="key">Key</option><option value="upstream">第三方账号</option><option value="export">导出</option><option value="conversation">对话审计</option><option value="service">服务</option></select></label>
-          <label><select v-model="result" aria-label="审计结果" @change="applyFilters"><option value="all">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="denied">已拒绝</option></select></label>
+          <label><select v-model="result" aria-label="审计结果" @change="applyFilters"><option value="all">全部结果</option><option value="success">成功</option><option value="failed">失败</option></select></label>
           <label><select v-model="source" aria-label="审计来源" @change="applyFilters"><option value="all">全部来源</option><option value="web">管理页面</option><option value="api">管理接口</option><option value="system">系统任务</option></select></label>
           <span class="realtime-search-hint" aria-live="polite">输入即搜索</span>
           <button class="text-button" type="button" @click="clearFilters">清除</button>
