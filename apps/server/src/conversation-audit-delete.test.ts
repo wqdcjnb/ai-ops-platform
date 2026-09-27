@@ -22,7 +22,6 @@ describe('conversation audit record deletion', () => {
   it('deletes the local audit record while retaining a deletion proof and audit event', async () => {
     const database = new PlatformDatabase({ filename: ':memory:' })
     databases.push(database)
-    database.seedDepartment({ id: 'dept-conversation-audit', name: '对话审计部' })
     database.seedUser({
       id: 'person-conversation-audit',
       username: 'conversation-audit@example.com',
@@ -30,7 +29,6 @@ describe('conversation audit record deletion', () => {
       role: 'employee',
       roleLabel: '员工',
       password: 'test-password',
-      departmentId: 'dept-conversation-audit',
     })
     database.seedApiKey({
       id: 'key-conversation-audit',
@@ -38,8 +36,7 @@ describe('conversation audit record deletion', () => {
       maskedValue: 'sk-test••••delete',
       purpose: '删除测试',
       status: 'active',
-      expiresAt: null,
-      models: ['gpt-5.6-terra'],
+      secretValue: 'conversation-delete-key',
     })
 
     const startedAt = new Date().toISOString()
@@ -50,7 +47,6 @@ describe('conversation audit record deletion', () => {
       id: recordId,
       requestId,
       keyId: 'key-conversation-audit',
-      externalTokenId: null,
       personId: 'person-conversation-audit',
       keyMasked: 'sk-test••••delete',
       purpose: '删除测试',

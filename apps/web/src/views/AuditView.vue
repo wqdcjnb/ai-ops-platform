@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  IconAlertTriangle, IconArrowLeft, IconArrowRight, IconChevronRight, IconCircleCheck,
+  IconAlertTriangle, IconChevronRight, IconCircleCheck,
   IconDatabase, IconDownload, IconFingerprint, IconHistory, IconLock, IconRefresh, IconSearch, IconShieldLock, IconUser, IconX,
 } from '@tabler/icons-vue'
 import { AuditApiError, exportAudit, fetchAuditDetail, fetchAuditEvents, type AuditDetail, type AuditEvent, type AuditFilters, type AuditResponse } from '../audit-api'
+import AppPagination from '../components/AppPagination.vue'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const audit = ref<AuditResponse | null>(null)
@@ -50,7 +51,7 @@ let detailRequest: AbortController | undefined
 
 const resultText = { success: '成功', failed: '失败', denied: '已拒绝' }
 const resourceText: Record<string, string> = { session: '会话', authorization: '权限校验', gateway_request: '网关请求', person: '人员', people: '人员目录', key: 'Key', upstream: '第三方账号', export: '导出', conversation: '对话审计', service: '服务' }
-const roleText = { super_admin: '超级管理员', admin: '管理员', department_lead: '部门负责人', finance: '财务', employee: '员工', system: '系统任务' }
+const roleText = { super_admin: '超级管理员', employee: '员工', system: '系统任务' }
 const sourceSystemText = { ai_ops: 'AI OPS' }
 const sourceStateText = { ready: '已接入', unavailable: '暂不可读', not_configured: '未配置' }
 const updatedAt = computed(() => audit.value ? timeText(audit.value.meta.generatedAt) : '—')
@@ -187,7 +188,7 @@ onBeforeUnmount(() => { request?.abort(); detailRequest?.abort() })
 
         <div v-if="audit.items.length" class="table-responsive"><table class="data-table audit-table"><thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>关联标识</th><th>变更摘要</th><th>来源</th><th>结果</th><th /></tr></thead><tbody><tr v-for="item in audit.items" :key="item.id"><td><div class="audit-event-id"><strong>{{ timeText(item.occurredAt) }}</strong></div></td><td><div class="audit-actor"><strong>{{ item.actor.name }}</strong></div></td><td><span class="audit-action">{{ item.actionLabel }}</span></td><td><div class="audit-resource"><strong>{{ item.resource.name }}</strong></div></td><td><code class="audit-link-id" :title="item.key ? `关联 Key：${item.key.masked}` : `请求 ID：${item.requestId}`">{{ item.key?.masked ?? item.requestId }}</code></td><td><div class="audit-summary"><p :title="listSummary(item)">{{ listSummary(item) }}</p></div></td><td><div class="audit-source"><strong>{{ item.source.label }}</strong></div></td><td><span class="audit-result" :class="item.result.status"><i />{{ resultText[item.result.status] }}</span></td><td><button class="row-action enabled" :disabled="detailLoadingId === item.id" :aria-label="`查看 ${item.id} 审计详情`" @click="openDetail(item)"><IconRefresh v-if="detailLoadingId === item.id" :size="15" class="spinning" /><IconChevronRight v-else :size="17" /></button></td></tr></tbody></table></div>
         <div v-else class="people-empty"><IconFingerprint :size="25" /><strong>没有符合条件的审计事件</strong><span>调整日期、操作人、动作、对象、结果或来源。</span><button class="text-button" @click="clearFilters">清除筛选</button></div>
-        <footer class="usage-pagination"><span>共 {{ audit.pagination.total }} 条 · 第 {{ audit.pagination.page }}/{{ Math.max(audit.pagination.totalPages, 1) }} 页</span><div><button :disabled="audit.pagination.page <= 1" aria-label="上一页" @click="changePage(audit.pagination.page - 1)"><IconArrowLeft :size="15" /></button><button :disabled="audit.pagination.page >= audit.pagination.totalPages" aria-label="下一页" @click="changePage(audit.pagination.page + 1)"><IconArrowRight :size="15" /></button></div></footer>
+        <AppPagination :page="audit.pagination.page" :total-pages="audit.pagination.totalPages" :total="audit.pagination.total" aria-label="审计日志分页" @change="changePage" />
       </section>
       <footer class="page-footer">数据来源：{{ sourceLabel }} · 只展示字段级摘要 · 不保存完整 Key、认证信息、请求正文或对话正文 · 页面无删除入口</footer>
     </template>

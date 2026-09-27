@@ -187,11 +187,10 @@ function beginGatewayAudit(database: PlatformDatabase | undefined, key: Platform
   try {
     const requestedRecordId = `conv-audit-${input.requestId.replace(/^req-/u, '').replace(/[^a-z0-9-]/giu, '-').toLowerCase()}`
     const grouping = groupingForBody(input.body)
-    const recordId = database.startConversationAuditCapture({
+    const record = database.startConversationAuditCapture({
       id: requestedRecordId,
       requestId: input.requestId,
       keyId: key.id,
-      externalTokenId: key.externalTokenId,
       personId: key.ownerUserId,
       keyMasked: key.maskedValue,
       purpose: key.purpose,
@@ -205,8 +204,8 @@ function beginGatewayAudit(database: PlatformDatabase | undefined, key: Platform
       groupingLabel: grouping.label,
       httpStatus: input.httpStatus ?? null,
     })
-    if (!recordId) return null
-    return { database, requestId: input.requestId, recordId, startedAt: input.startedAt }
+    if (!record) return null
+    return { database, requestId: input.requestId, recordId: record.id, startedAt: input.startedAt }
   } catch (error) {
     log.warn({ requestId: input.requestId, error: error instanceof Error ? error.message : 'unknown' }, 'conversation audit capture start failed')
     return null
@@ -855,7 +854,8 @@ async function authorizeGatewayClient(authorization: string | undefined, options
 }
 
 function keyAllowsModel(key: PlatformGatewayKey, model: string) {
-  return key.models.some((allowed) => samePublicModel(allowed, model)) || samePublicModel(key.model, model)
+  void key
+  return samePublicModel(PUBLIC_MODEL_ID, model)
 }
 
 function authorizeModel(key: PlatformGatewayKey | null, requestedModel: string, resolvedModel: string, requestId: string, reply: any) {

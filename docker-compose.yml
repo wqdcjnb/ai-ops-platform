@@ -28,7 +28,9 @@ services:
       AI_OPS_EXTERNAL_PROVIDERS_FILE: /app/data/external-providers.json
       AI_OPS_ALLOW_INSECURE_EXTERNAL_PROVIDER: ${AI_OPS_ALLOW_INSECURE_EXTERNAL_PROVIDER:-false}
     ports:
-      - "127.0.0.1:4175:4175"
+      # Keep the first installation local-only. The launcher can switch this
+      # to 0.0.0.0 for a trusted LAN deployment.
+      - "${AI_OPS_BIND_ADDRESS:-127.0.0.1}:${AI_OPS_GATEWAY_PORT:-4175}:4175"
     volumes:
       - platform-data:/app/data
     healthcheck:
@@ -51,7 +53,7 @@ services:
       server:
         condition: service_healthy
     ports:
-      - "127.0.0.1:4174:4174"
+      - "${AI_OPS_BIND_ADDRESS:-127.0.0.1}:${AI_OPS_WEB_PORT:-4174}:4174"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4174/').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s

@@ -6,30 +6,26 @@ export const personSchema = z.object({
   id: z.string(),
   name: z.string(),
   initials: z.string(),
-  title: z.string(),
-  manager: z.string(),
-  status: z.enum(['active', 'disabled', 'offboarding', 'unknown', 'external_missing']),
-  username: z.string().nullable().optional(),
-  createdAt: z.string().datetime().nullable().optional(),
+  title: z.literal('员工'),
+  status: z.enum(['active', 'disabled']),
+  username: z.string(),
+  createdAt: z.string().datetime(),
   lastUsedAt: z.string().datetime().nullable().optional(),
   apiKeyMasked: keyMaskSchema,
   keyCount: z.number().int().nonnegative(),
-  goal: z.object({ used: z.number(), limit: z.number(), percent: z.number(), state: z.literal('normal') }),
-  lastActiveAt: z.string().datetime().nullable(),
   tone: z.enum(['coral', 'blue', 'violet', 'green', 'amber']),
 })
 
 export const peopleFiltersSchema = z.object({
   search: z.string().trim().max(60).default(''),
   status: z.enum(['all', 'active', 'disabled']).default('all'),
-  goal: z.literal('all').default('all'),
   page: z.number().int().min(1).default(1),
   pageSize: z.number().int().min(1).max(50).default(20),
 })
 
 export const peopleResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), timezone: z.literal('Asia/Shanghai'), notice: z.string() }),
-  summary: z.object({ total: z.number().int().nonnegative(), active: z.number().int().nonnegative(), disabled: z.number().int().nonnegative(), offboarding: z.number().int().nonnegative() }),
+  summary: z.object({ total: z.number().int().nonnegative(), active: z.number().int().nonnegative(), disabled: z.number().int().nonnegative() }),
   items: z.array(personSchema),
   page: z.number().int().positive(),
   pageSize: z.number().int().positive(),

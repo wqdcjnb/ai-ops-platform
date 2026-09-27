@@ -9,7 +9,7 @@ declare module 'fastify' {
   }
 }
 
-export const appRoleSchema = z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee'])
+export const appRoleSchema = z.enum(['super_admin', 'employee'])
 export type AppRole = z.infer<typeof appRoleSchema>
 
 export const authUserSchema = z.object({
@@ -23,7 +23,6 @@ export const authUserSchema = z.object({
   displayName: z.string(),
   role: appRoleSchema,
   roleLabel: z.string(),
-  departmentId: z.string().nullable(),
 })
 export type AuthUser = z.infer<typeof authUserSchema>
 
@@ -35,8 +34,7 @@ export const loginBodySchema = z.object({
   password: value.password,
 }))
 
-/** Public employee registration. Department assignment is deliberately not a
- * registration field: administrators manage departments after registration. */
+/** Public employee registration uses only a name, email address and password. */
 export const registrationBodySchema = z.object({
   realName: z.string().trim().min(2).max(40),
   email: z.string().trim().email().max(320).transform((value) => value.toLocaleLowerCase('en-US')),
@@ -119,7 +117,6 @@ function bootstrapAdminAccount(): BootstrapAccount {
       displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
       role: 'super_admin',
       roleLabel: '超级管理员',
-      departmentId: null,
     },
     password: configuredAdminPassword(),
   }
@@ -127,9 +124,6 @@ function bootstrapAdminAccount(): BootstrapAccount {
 
 const roleLabels: Record<AppRole, string> = {
   super_admin: '超级管理员',
-  admin: '运营管理员',
-  department_lead: '部门负责人',
-  finance: '财务只读',
   employee: '员工',
 }
 
@@ -141,7 +135,6 @@ function toAuthUser(user: PlatformUser): AuthUser {
     displayName: user.displayName,
     role: user.role,
     roleLabel: roleLabels[user.role],
-    departmentId: user.departmentId,
   }
 }
 

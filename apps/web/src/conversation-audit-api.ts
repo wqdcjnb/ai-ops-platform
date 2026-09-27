@@ -6,7 +6,7 @@ const captureStateSchema = z.enum(['captured', 'metadata_only', 'deleted', 'expi
 const groupingSchema = z.enum(['conversation', 'independent_call'])
 const auditStatusSchema = z.enum(['streaming', 'succeeded', 'failed', 'cancelled', 'body_unavailable'])
 const optionSchema = z.object({ id: z.string(), label: z.string() })
-const roleSchema = z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee'])
+const roleSchema = z.enum(['super_admin', 'employee'])
 
 export const conversationAuditFiltersSchema = z.object({
   period: periodSchema,
@@ -24,7 +24,7 @@ const baseRecordSchema = z.object({
   id: z.string(),
   requestId: z.string().regex(/^req-[a-z0-9-]+$/),
   capturedAt: z.string().datetime(),
-  person: z.object({ id: z.string(), name: z.string(), department: z.string() }),
+  person: z.object({ id: z.string(), name: z.string() }),
   key: z.object({ id: z.string(), masked: z.string() }),
   purpose: optionSchema,
   model: z.object({ id: z.string(), label: z.string(), actualModel: z.string().nullable() }),
@@ -36,7 +36,6 @@ const baseRecordSchema = z.object({
 })
 
 const extendedRecordFields = {
-  externalTokenId: z.string().nullable().optional().default(null),
   endpoint: z.string().nullable().optional().default(null),
   startedAt: z.string().datetime().optional(),
   completedAt: z.string().datetime().nullable().optional().default(null),

@@ -52,11 +52,8 @@ async function handleLogout() {
         <button class="icon-button mobile-close" aria-label="关闭导航" @click="mobileNavOpen = false"><IconX :size="20" /></button>
       </div>
 
-      <div class="environment-pill"><span /> 本机验证环境 <strong>DEV</strong></div>
-
       <nav class="primary-nav" aria-label="管理端主导航">
-        <section v-for="section in adminNavSections" :key="section.label" class="nav-section">
-          <div class="nav-section-label">{{ section.label }}</div>
+        <template v-for="section in adminNavSections" :key="section.label">
           <template v-for="item in section.items" :key="item.label">
             <RouterLink v-if="item.to" :to="item.to" class="nav-item" active-class="" :class="{ active: route.path === item.to }" @click="mobileNavOpen = false">
               <component :is="item.icon" :size="18" stroke-width="1.8" />
@@ -68,7 +65,7 @@ async function handleLogout() {
               <small>{{ item.badge ?? '待开发' }}</small>
             </span>
           </template>
-        </section>
+        </template>
       </nav>
 
       <div class="sidebar-footer">

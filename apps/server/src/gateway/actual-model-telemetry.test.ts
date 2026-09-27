@@ -3,7 +3,7 @@ import { serializerCompiler, validatorCompiler } from 'fastify-type-provider-zod
 import { describe, expect, it } from 'vitest'
 import type { GatewayConfig } from '../gateway-config.js'
 import { conversationAuditQuerySchema, createDatabaseConversationAudits } from '../conversation-audit.js'
-import { createPlatformDatabase, hashPlatformApiKey } from '../platform-db.js'
+import { createPlatformDatabase } from '../platform-db.js'
 import { registerGatewayRoutes } from './routes.js'
 import type { GatewayUpstream } from './openai-compatible.js'
 
@@ -21,8 +21,8 @@ describe('actual upstream model telemetry', () => {
     const database = createPlatformDatabase({ filename: ':memory:' })
     database.seedUser({ id: 'employee-1', username: 'employee@example.com', displayName: '测试员工', role: 'employee', roleLabel: '员工', password: 'test-password' })
     database.createApiKey({
-      id: 'key-1', ownerUserId: 'employee-1', maskedValue: 'sk-aiops••••••test', secretHash: hashPlatformApiKey('employee-platform-key'),
-      purpose: 'AI OPS', status: 'active', expiresAt: null, model: 'ai-ops', models: ['ai-ops'],
+      id: 'key-1', ownerUserId: 'employee-1', maskedValue: 'sk-aiops••••••test', secretValue: 'employee-platform-key',
+      purpose: 'AI OPS', status: 'active',
     })
     const upstream: GatewayUpstream = {
       async listModels() { return [{ id: 'ai-ops', object: 'model', created: 0, owned_by: 'ai-ops-relay' }] },
@@ -64,8 +64,8 @@ describe('actual upstream model telemetry', () => {
     const database = createPlatformDatabase({ filename: ':memory:' })
     database.seedUser({ id: 'employee-topic-title', username: 'topic-title@example.com', displayName: '标题测试员工', role: 'employee', roleLabel: '员工', password: 'test-password' })
     database.createApiKey({
-      id: 'key-topic-title', ownerUserId: 'employee-topic-title', maskedValue: 'sk-aiops••••••topic', secretHash: hashPlatformApiKey('topic-title-key'),
-      purpose: 'AI OPS', status: 'active', expiresAt: null, model: 'ai-ops', models: ['ai-ops'],
+      id: 'key-topic-title', ownerUserId: 'employee-topic-title', maskedValue: 'sk-aiops••••••topic', secretValue: 'topic-title-key',
+      purpose: 'AI OPS', status: 'active',
     })
     const upstream: GatewayUpstream = {
       async listModels() { return [{ id: 'ai-ops', object: 'model', created: 0, owned_by: 'ai-ops-relay' }] },

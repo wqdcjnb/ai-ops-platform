@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { IconAlertTriangle, IconBrain, IconRefresh, IconSearch } from '@tabler/icons-vue'
 import { fetchModels, ModelsApiError, type ModelItem, type ModelsResponse } from '../models-api'
+import AppPagination from '../components/AppPagination.vue'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 // This is an administrator-facing upstream catalogue. Employee clients never
@@ -10,6 +11,8 @@ const source = 'owned' as const
 const models = ref<ModelsResponse | null>(null)
 const search = ref('')
 const modelSourceId = ref('all')
+const page = ref(1)
+const pageSize = 10
 const isLoading = ref(false)
 const errorMessage = ref('')
 let request: AbortController | null = null
@@ -33,6 +36,12 @@ const modelSourceOptions = computed<ModelSourceOption[]>(() => {
 const visibleModels = computed(() => modelSourceId.value === 'all'
   ? models.value?.items ?? []
   : (models.value?.items ?? []).filter((item) => relaySources(item).some((channel) => channel.id === modelSourceId.value)))
+const totalPages = computed(() => Math.max(Math.ceil(visibleModels.value.length / pageSize), 1))
+const currentPage = computed(() => Math.min(Math.max(page.value, 1), totalPages.value))
+const pagedModels = computed(() => {
+  const start = (currentPage.value - 1) * pageSize
+  return visibleModels.value.slice(start, start + pageSize)
+})
 
 function relaySources(item: ModelItem): ModelChannel[] {
   return item.channels ?? []
@@ -49,6 +58,7 @@ function resetFilters() {
 
 function applyFilters() {
   cancelSearch()
+  page.value = 1
   void loadData()
 }
 
@@ -60,6 +70,11 @@ function manualRefresh() {
 function clearFilters() {
   resetFilters()
   applyFilters()
+}
+
+function changePage(next: number) {
+  if (next < 1 || next > totalPages.value) return
+  page.value = next
 }
 
 async function loadData(options: { forceRefresh?: boolean; retainVisibleModels?: boolean } = {}) {
@@ -82,6 +97,7 @@ async function loadData(options: { forceRefresh?: boolean; retainVisibleModels?:
     if (nextModels.meta.source !== source) throw new ModelsApiError('数据来源与当前页面不一致，请重试。')
     models.value = nextModels
     if (modelSourceId.value !== 'all' && !nextModels.items.some((item) => relaySources(item).some((channel) => channel.id === modelSourceId.value))) modelSourceId.value = 'all'
+    if (page.value > totalPages.value) page.value = totalPages.value
   } catch (error) {
     if (next.signal.aborted || request !== next) return
     const requestId = error instanceof ModelsApiError ? error.requestId : undefined
@@ -91,7 +107,10 @@ async function loadData(options: { forceRefresh?: boolean; retainVisibleModels?:
   }
 }
 
-const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadData())
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => {
+  page.value = 1
+  void loadData()
+})
 onMounted(() => void loadData())
 onBeforeUnmount(() => request?.abort())
 </script>
@@ -102,7 +121,6 @@ onBeforeUnmount(() => request?.abort())
       <div>
         <div class="eyebrow">RELAY MODEL CATALOG</div>
         <h1>模型目录</h1>
-        <p>记录各中转站账号同步回来的模型；同名模型只保留一行，并合并显示全部来源。</p>
       </div>
       <div class="heading-actions">
         <span class="updated-at">更新于 {{ updatedAt }}</span>
@@ -114,7 +132,7 @@ onBeforeUnmount(() => request?.abort())
       <div>
         <span class="catalog-source-kicker">对外统一模型</span>
         <strong>AI OPS <code>ai-ops</code></strong>
-        <p>员工的 Key、WorkBuddy 与 Codex 只接入 AI OPS。这里仅用于管理员查看中转站已同步的原始模型和来源，不向员工暴露或要求选择这些模型。</p>
+        <p>统一查看已同步模型及其来源。</p>
       </div>
       <div class="catalog-source-assurance"><span><i />按来源合并</span><small>由第三方账号同步触发更新</small></div>
     </section>
@@ -127,19 +145,19 @@ onBeforeUnmount(() => request?.abort())
 
     <template v-else-if="models">
       <section class="panel models-main-panel">
-        <header class="panel-header"><div><span class="panel-title">已同步模型</span><span class="panel-subtitle">模型名称相同的记录已合并；来源标签代表可供网关路由的中转站账号。</span></div><span class="source-tag live">{{ visibleModels.length }} 个模型</span></header>
+        <header class="panel-header"><div><span class="panel-title">已同步模型</span><span class="panel-subtitle">来源标签显示当前可用的账号。</span></div><span class="source-tag live">{{ visibleModels.length }} 个模型</span></header>
         <form class="model-filters" @submit.prevent="applyFilters">
           <label class="model-search"><IconSearch :size="16" /><input v-model="search" aria-label="搜索模型" maxlength="60" type="search" placeholder="搜索模型名称" /></label>
-          <label><select v-model="modelSourceId" aria-label="模型来源"><option value="all">全部来源</option><option v-for="item in modelSourceOptions" :key="item.id" :value="item.id">{{ item.label }}</option></select></label>
+          <label><select v-model="modelSourceId" aria-label="模型来源" @change="page = 1"><option value="all">全部来源</option><option v-for="item in modelSourceOptions" :key="item.id" :value="item.id">{{ item.label }}</option></select></label>
           <span class="realtime-search-hint" aria-live="polite">输入即搜索</span>
           <button class="text-button" type="button" @click="clearFilters">清除</button>
         </form>
 
-        <div v-if="visibleModels.length" class="table-responsive">
+        <div v-if="pagedModels.length" class="table-responsive">
           <table class="data-table models-table">
             <thead><tr><th>模型</th><th>来源中转站</th><th>状态</th></tr></thead>
             <tbody>
-              <tr v-for="item in visibleModels" :key="item.id">
+              <tr v-for="item in pagedModels" :key="item.id">
                 <td><div class="model-identity"><span><IconBrain :size="17" /></span><div><strong>{{ item.displayName }}</strong></div></div></td>
                 <td><div class="channel-list-cell"><span v-for="channel in relaySources(item)" :key="channel.id" class="channel-chip" :title="channel.name">{{ channel.name }}</span><small v-if="!relaySources(item).length">未标注来源</small></div></td>
                 <td><span class="model-status" :class="`status-${item.status}`">{{ statusLabel(item.status) }}</span></td>
@@ -148,6 +166,7 @@ onBeforeUnmount(() => request?.abort())
           </table>
         </div>
         <div v-else class="people-empty"><IconBrain :size="24" /><strong>{{ models.items.length === 0 ? '暂未同步到模型' : '没有符合条件的模型' }}</strong><span>{{ models.items.length === 0 ? '请先在“第三方账号”接入中转站并同步模型目录。' : '调整搜索词或来源筛选后重试。' }}</span><button v-if="models.items.length > 0" class="text-button" @click="clearFilters">清除筛选</button></div>
+        <AppPagination :page="currentPage" :total-pages="totalPages" :total="visibleModels.length" aria-label="模型目录分页" @change="changePage" />
       </section>
       <footer class="page-footer">该目录只记录中转站的模型和来源。员工始终使用一个平台 Key 调用 <code>ai-ops</code>，不需要管理上游模型或上游凭据。</footer>
     </template>

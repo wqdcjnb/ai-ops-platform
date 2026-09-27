@@ -2,11 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { IconAlertTriangle, IconDotsVertical, IconKey, IconRefresh, IconTrash, IconUserCheck, IconUserOff, IconUsers } from '@tabler/icons-vue'
 import { deletePerson, disablePerson, enablePerson, fetchPeople, PeopleApiError, resetPersonKey, resetPersonPassword, type PeopleFilters, type PeopleResponse, type Person } from '../people-api'
+import AppPagination from '../components/AppPagination.vue'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
 
 const people = ref<PeopleResponse | null>(null)
 const search = ref('')
 const status = ref<PeopleFilters['status']>('all')
+const page = ref(1)
+const pageSize = 10
 const isLoading = ref(false)
 const errorMessage = ref('')
 const operationError = ref('')
@@ -20,9 +23,10 @@ const sortDirections = ref<Record<PeopleSortKey, PeopleSortDirection>>({ created
 const sortPriority = ref<PeopleSortKey[]>([])
 let request: AbortController | null = null
 
-const statusLabel: Record<Person['status'], string> = { active: '启用', disabled: '停用', offboarding: '待回收', unknown: '未知', external_missing: '已移除' }
+const statusLabel: Record<Person['status'], string> = { active: '启用', disabled: '停用' }
 const total = computed(() => people.value?.summary.total ?? 0)
 const active = computed(() => people.value?.summary.active ?? 0)
+const totalPages = computed(() => Math.max(Math.ceil((people.value?.total ?? 0) / pageSize), 1))
 
 function formatDate(value: string | null | undefined) {
   if (!value) return '—'
@@ -92,7 +96,13 @@ async function loadPeople() {
   isLoading.value = true
   errorMessage.value = ''
   try {
-    people.value = await fetchPeople({ search: search.value.trim(), status: status.value, goal: 'all', page: 1, pageSize: 50 }, next.signal)
+    const nextPeople = await fetchPeople({ search: search.value.trim(), status: status.value, page: page.value, pageSize }, next.signal)
+    const nextTotalPages = Math.max(Math.ceil(nextPeople.total / pageSize), 1)
+    if (page.value > nextTotalPages) {
+      page.value = nextTotalPages
+      return void loadPeople()
+    }
+    people.value = nextPeople
   } catch (error) {
     if (!next.signal.aborted) errorMessage.value = `${error instanceof Error ? error.message : '人员数据暂时无法加载'}${error instanceof PeopleApiError && error.requestId ? ` · 请求 ID ${error.requestId}` : ''}`
   } finally {
@@ -100,13 +110,30 @@ async function loadPeople() {
   }
 }
 
-function clearFilters() {
-  search.value = ''
-  status.value = 'all'
+function applyFilters() {
+  cancelSearch()
+  page.value = 1
   void loadPeople()
 }
 
-const { cancel: cancelSearch } = useDebouncedSearch(search, () => void loadPeople())
+function clearFilters() {
+  search.value = ''
+  status.value = 'all'
+  applyFilters()
+}
+
+const { cancel: cancelSearch } = useDebouncedSearch(search, () => {
+  page.value = 1
+  void loadPeople()
+})
+
+function changePage(next: number) {
+  if (!people.value || next < 1 || next > totalPages.value) return
+  cancelSearch()
+  openMenuId.value = null
+  page.value = next
+  void loadPeople()
+}
 
 function openAction(person: Person, action: NonNullable<typeof pending.value>['action']) {
   if (isOperating.value) return
@@ -197,9 +224,9 @@ onBeforeUnmount(() => { request?.abort(); cancelSearch(); document.removeEventLi
     </section>
 
     <section class="panel people-panel-main">
-      <form class="people-filters" @submit.prevent="loadPeople">
+      <form class="people-filters" @submit.prevent="applyFilters">
         <label class="people-search"><input v-model="search" aria-label="搜索人员" type="search" maxlength="60" placeholder="搜索姓名或邮箱" /></label>
-        <label><select v-model="status" aria-label="按状态筛选" @change="loadPeople"><option value="all">全部状态</option><option value="active">启用</option><option value="disabled">停用</option></select></label>
+        <label><select v-model="status" aria-label="按状态筛选" @change="applyFilters"><option value="all">全部状态</option><option value="active">启用</option><option value="disabled">停用</option></select></label>
         <button class="text-button" type="button" @click="clearFilters">清除筛选</button>
       </form>
 
@@ -232,6 +259,7 @@ onBeforeUnmount(() => { request?.abort(); cancelSearch(); document.removeEventLi
           </table>
         </div>
         <div v-else class="people-empty"><IconUsers :size="24" /><strong>没有符合条件的员工</strong><span>新员工需要在登录页自行注册。</span></div>
+        <AppPagination :page="page" :total-pages="totalPages" :total="people.total" aria-label="人员信息管理分页" @change="changePage" />
       </template>
     </section>
 

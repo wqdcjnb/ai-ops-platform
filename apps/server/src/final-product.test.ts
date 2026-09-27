@@ -54,7 +54,7 @@ describe('final relay-account product boundaries', () => {
     expect(employeeKeyAfterAdminReset.json().secret).toMatch(/^sk-aiops-/)
     expect(employeeKeyAfterAdminReset.json().secret).not.toBe(employeeSecret)
 
-    const retiredAdminCreate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie: adminCookie, 'x-csrf-token': adminCsrf }, payload: { displayName: '不应创建', departmentId: 'unassigned' } })
+    const retiredAdminCreate = await app.inject({ method: 'POST', url: '/api/people', headers: { cookie: adminCookie, 'x-csrf-token': adminCsrf }, payload: { displayName: '不应创建' } })
     expect(retiredAdminCreate.statusCode).toBe(410)
   })
 })

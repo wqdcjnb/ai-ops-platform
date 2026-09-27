@@ -38,7 +38,7 @@ const changeSchema = z.object({
 export const auditEventSchema = z.object({
   id: z.string(),
   occurredAt: z.string().datetime(),
-  actor: z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']) }),
+  actor: z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'employee', 'system']) }),
   action: actionSchema,
   actionLabel: z.string(),
   resource: z.object({ type: resourceTypeSchema, id: z.string(), name: z.string() }),

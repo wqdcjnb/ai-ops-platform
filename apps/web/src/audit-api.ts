@@ -14,7 +14,7 @@ export const auditFiltersSchema = z.object({ period: periodSchema, search: z.str
 
 const changeSchema = z.object({ field: z.string(), label: z.string(), before: z.string().nullable(), after: z.string().nullable(), sensitive: z.boolean() })
 export const auditEventSchema = z.object({
-  id: z.string(), occurredAt: z.string().datetime(), actor: z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee', 'system']) }), action: actionSchema, actionLabel: z.string(),
+  id: z.string(), occurredAt: z.string().datetime(), actor: z.object({ id: z.string(), name: z.string(), role: z.enum(['super_admin', 'employee', 'system']) }), action: actionSchema, actionLabel: z.string(),
   resource: z.object({ type: resourceTypeSchema, id: z.string(), name: z.string() }), result: z.object({ status: resultStatusSchema, code: z.string() }),
   source: z.object({ type: sourceTypeSchema, label: z.string(), ipMasked: z.string().nullable(), client: z.string() }), requestId: z.string().regex(/^req-[a-z0-9-]+$/), summary: z.string(), changes: z.array(changeSchema), sourceSystem: sourceSystemSchema.optional(), key: z.object({ id: z.string(), masked: z.string(), owner: z.string().nullable().optional() }).optional(), transport: z.object({ responseCode: z.number().int().min(100).max(599), durationMs: z.number().int().nonnegative(), traceId: z.string().nullable().optional() }).optional(), contentAvailable: z.literal(false), credentialValueAvailable: z.literal(false),
 })

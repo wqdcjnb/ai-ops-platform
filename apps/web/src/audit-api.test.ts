@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { auditDetailResponseSchema, auditFiltersSchema, auditResponseSchema } from './audit-api'
 
-const event = { id: 'audit-test', occurredAt: '2026-09-15T10:00:00.000Z', actor: { id: 'admin-1', name: '管理员', role: 'admin' }, action: 'rotate', actionLabel: '轮换 Key', resource: { type: 'key', id: 'key-1', name: 'sk-ops••••••1234' }, result: { status: 'success', code: 'KEY_ROTATED' }, source: { type: 'api', label: '管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }, requestId: 'req-audit-test', summary: '仅记录变化摘要', changes: [{ field: 'secret', label: '密钥内容', before: '已变化', after: '已变化', sensitive: true }], contentAvailable: false, credentialValueAvailable: false }
+const event = { id: 'audit-test', occurredAt: '2026-09-15T10:00:00.000Z', actor: { id: 'user-super-admin', name: '超级管理员', role: 'super_admin' }, action: 'rotate', actionLabel: '轮换 Key', resource: { type: 'key', id: 'key-1', name: 'sk-ops••••••1234' }, result: { status: 'success', code: 'KEY_ROTATED' }, source: { type: 'api', label: '管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }, requestId: 'req-audit-test', summary: '仅记录变化摘要', changes: [{ field: 'secret', label: '密钥内容', before: '已变化', after: '已变化', sensitive: true }], contentAvailable: false, credentialValueAvailable: false }
 const meta = { source: 'database', generatedAt: '2026-09-15T10:00:00.000Z', period: '7d', notice: '本地审计' }
 const localIntegrity = { deletionAllowed: false, appendOnlyVerified: false, verified: false, hashChainVerified: false, checkpointVerified: false, algorithm: 'not_configured', checkedAt: null, checkpointUpdatedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '待验证' }
 

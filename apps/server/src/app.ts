@@ -30,8 +30,6 @@ import {
   createDatabaseConversationAudits,
   getDatabaseConversationAuditRecord,
 } from './conversation-audit.js'
-import { createDatabaseSearch, searchQuerySchema } from './search.js'
-import { dataScopeFor } from './data-scope.js'
 import { createPlatformDatabase, hashPlatformApiKey, type PlatformDatabase } from './platform-db.js'
 import { isPublicModelId, PUBLIC_MODEL_ID, PUBLIC_MODEL_NAME } from './public-model.js'
 import { loadGatewayConfig, type GatewayConfig } from './gateway-config.js'
@@ -51,7 +49,6 @@ import {
 import { createLocalModelAnalytics, modelAnalyticsQuerySchema } from './model-analytics.js'
 
 const SYSTEM_AUDIT_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
-const RETIRED_MESSAGE = '此旧控制面入口已经下线。请使用第三方账号、人员信息管理或员工自助入口。'
 
 const errorResponseSchema = z.object({
   error: z.object({
@@ -133,26 +130,6 @@ function parseInput(schema: z.ZodTypeAny, input: unknown, requestId: string, rep
   return null
 }
 
-function isRetiredPath(path: string, method: string) {
-  return path.startsWith('/api/upstreams')
-    || path.startsWith('/api/channels')
-    || path.startsWith('/api/limits')
-    || path.startsWith('/api/routes')
-    || path.startsWith('/api/quota-requests')
-    || path.startsWith('/api/quota-reservations')
-    || path.startsWith('/api/settings')
-    || path === '/api/overview'
-    || path === '/api/operations/dashboard'
-    || path === '/api/platform/status'
-    || path === '/api/platform/restart'
-    || path === '/api/tasks/summary'
-    || path === '/api/people/sync'
-    || path === '/api/people/sync/preview'
-    || path === '/api/people/batch'
-    || (path === '/api/people' && method !== 'GET')
-    || (path.startsWith('/api/keys') && !/^\/api\/keys\/[^/]+\/audits(?:\/|$)/.test(path))
-}
-
 export function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: options.logger ?? false,
@@ -230,9 +207,6 @@ export function buildApp(options: BuildAppOptions = {}) {
       || path === '/api/auth/bootstrap'
     ) return
 
-    if (isRetiredPath(path, request.method)) {
-      return reply.status(410).send(errorPayload('RETIRED_CONTROL_PLANE', RETIRED_MESSAGE, request.id))
-    }
     if (authMode === 'disabled') return
 
     const user = auth.authenticate(request)
@@ -250,7 +224,7 @@ export function buildApp(options: BuildAppOptions = {}) {
 
     let roles: readonly AppRole[] = ['super_admin']
     if (path.startsWith('/api/me')) roles = ['employee']
-    else if (path.startsWith('/api/auth/')) roles = ['super_admin', 'admin', 'department_lead', 'finance', 'employee']
+    else if (path.startsWith('/api/auth/')) roles = ['super_admin', 'employee']
     if (!isRoleAllowed(user, roles)) {
       recordAuthenticationAudit({
         actorUserId: user.id,
@@ -499,14 +473,12 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.post('/api/auth/register', async (request, reply) => {
     const body = parseInput(registrationBodySchema, request.body, request.id, reply)
     if (!body) return
-    const departmentId = database.ensureDepartment('未分配')
     const id = 'person-' + randomUUID().replaceAll('-', '').slice(0, 16)
     try {
       database.createPerson({
         id,
         username: body.email,
         displayName: body.realName,
-        departmentId,
         password: body.password,
       }, {
         id: 'audit-' + id + '-register',
@@ -554,20 +526,14 @@ export function buildApp(options: BuildAppOptions = {}) {
     return reply.status(204).send()
   })
 
-  app.get('/api/search', async (request, reply) => {
-    const query = parseInput(searchQuerySchema, request.query, request.id, reply)
-    if (!query) return
-    return createDatabaseSearch(database, query, dataScopeFor(request.authUser))
-  })
-
   app.get('/api/people', async (request, reply) => {
     const query = parseInput(peopleQuerySchema, request.query, request.id, reply)
     if (!query) return
-    return createDatabasePeople(database, query, new Date(), dataScopeFor(request.authUser))
+    return createDatabasePeople(database, query, new Date())
   })
 
   app.post('/api/people', async (request, reply) => {
-    return reply.status(410).send(errorPayload('RETIRED_CONTROL_PLANE', '管理员不能创建员工账号；员工必须通过注册页面自助创建。', request.id))
+    return reply.status(410).send(errorPayload('ADMIN_EMPLOYEE_CREATION_DISABLED', '管理员不能创建员工账号；员工必须通过注册页面自助创建。', request.id))
   })
 
   const personActionError = (error: unknown, requestId: string, reply: any) => {
@@ -654,7 +620,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   })
 
   const currentPlatformKey = (ownerUserId: string) => database.listApiKeysForOwner(ownerUserId)
-    .find((key) => isPublicModelId(key.model) && key.status !== 'revoked') ?? null
+    .find((key) => key.status !== 'revoked') ?? null
 
   const employeePortalKeyResponse = (ownerUserId: string, requestId: string) => {
     const key = currentPlatformKey(ownerUserId)
@@ -685,8 +651,8 @@ export function buildApp(options: BuildAppOptions = {}) {
     const auditEventId = 'audit-' + idempotencyKey
     const existingOperation = database.findApiKeyOperation(idempotencyKey)
     if (existingOperation) {
-      if (existingOperation.personId !== ownerUserId || !isPublicModelId(existingOperation.model)) {
-        throw new ManagedKeyError('IDEMPOTENCY_KEY_REUSED', '幂等编号已用于其他员工或模型。')
+      if (existingOperation.personId !== ownerUserId) {
+        throw new ManagedKeyError('IDEMPOTENCY_KEY_REUSED', '幂等编号已用于其他员工。')
       }
       const key = database.listApiKeysForOwner(ownerUserId).find((item) => item.id === existingOperation.keyId)
       const secret = key ? database.readApiKeySecret(key.id) : null
@@ -702,7 +668,6 @@ export function buildApp(options: BuildAppOptions = {}) {
         maskedValue,
         secretHash: hashPlatformApiKey(secret),
         secretValue: secret,
-        model: PUBLIC_MODEL_ID,
       }, {
         id: auditEventId,
         actorUserId,
@@ -731,10 +696,6 @@ export function buildApp(options: BuildAppOptions = {}) {
       secretValue: secret,
       purpose: 'AI OPS 统一访问',
       status: 'active',
-      expiresAt: null,
-      model: PUBLIC_MODEL_ID,
-      models: [PUBLIC_MODEL_ID],
-      quotaMode: 'unlimited',
       secretRevealedAt: new Date().toISOString(),
       idempotencyKey,
     }, {
@@ -808,7 +769,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.get('/api/usage', async (request, reply) => {
     const query = parseInput(usageQuerySchema, request.query, request.id, reply)
     if (!query) return
-    return createDatabaseUsage(database, query, new Date(), dataScopeFor(request.authUser))
+    return createDatabaseUsage(database, query, new Date())
   })
 
   app.get('/api/usage/model-analytics', async (request, reply) => {
@@ -819,17 +780,16 @@ export function buildApp(options: BuildAppOptions = {}) {
       occurredAt: record.occurredAt,
       personId: record.personId,
       personName: record.personName,
-      departmentId: record.departmentId,
       modelId: record.actualModel || record.modelDisplayName,
       inputTokens: record.inputTokens,
       outputTokens: record.outputTokens,
-    })), query, new Date(), dataScopeFor(request.authUser))
+    })), query, new Date())
   })
 
   app.get('/api/usage/:requestId', async (request, reply) => {
     const params = parseInput(usageRequestParamsSchema, request.params, request.id, reply)
     if (!params) return
-    const result = createDatabaseUsageDetail(database, params.requestId, new Date(), dataScopeFor(request.authUser), true)
+    const result = createDatabaseUsageDetail(database, params.requestId, new Date(), true)
     if (!result) return reply.status(404).send(errorPayload('USAGE_NOT_FOUND', '未找到指定调用记录', request.id))
     return result
   })

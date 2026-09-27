@@ -35,13 +35,13 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
         path: '/login',
         name: 'login',
         component: AuthView,
-        meta: { title: '登录', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'], public: true },
+        meta: { title: '登录', roles: ['super_admin', 'employee'], public: true },
       },
       {
         path: '/register',
         name: 'register',
         component: AuthView,
-        meta: { title: '员工注册', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'], public: true },
+        meta: { title: '员工注册', roles: ['super_admin', 'employee'], public: true },
       },
       {
         path: '/employee',
@@ -96,7 +96,7 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
       {
         path: '/:pathMatch(.*)*',
         redirect: () => authenticated && role === 'employee' ? '/employee' : authenticated && role === 'super_admin' ? '/people' : '/login',
-        meta: { title: '页面未找到', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'] },
+        meta: { title: '页面未找到', roles: ['super_admin', 'employee'] },
       },
     ],
   })

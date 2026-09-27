@@ -1,7 +1,9 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [ValidateRange(1024, 65535)]
-  [int]$Port = 4176
+  [int]$Port = 4176,
+  [string]$WebOrigin,
+  [switch]$Restart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,6 +12,26 @@ $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectDirectory = Split-Path -Parent $scriptDirectory
 $connectorScript = Join-Path $scriptDirectory 'ai-ops-workbuddy-connector.mjs'
 $healthUrl = "http://127.0.0.1:$Port/health"
+
+function ConvertTo-AiOpsWebOrigin {
+  param([string]$Value)
+  if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+  try {
+    $uri = [Uri]$Value.Trim()
+    if ($uri.Scheme -notin @('http', 'https') -or -not $uri.Host -or $uri.UserInfo) { throw 'invalid' }
+    if ($uri.AbsolutePath -notin @('', '/')) { throw 'invalid' }
+    return $uri.GetLeftPart([System.UriPartial]::Authority)
+  } catch {
+    throw '页面地址必须是 http:// 或 https:// 开头的纯站点地址，例如 http://192.168.1.20:4174。'
+  }
+}
+
+$normalizedWebOrigin = ConvertTo-AiOpsWebOrigin -Value $WebOrigin
+$connectorOrigins = @('http://127.0.0.1:4174', 'http://localhost:4174')
+if ($normalizedWebOrigin -and $connectorOrigins -notcontains $normalizedWebOrigin) { $connectorOrigins += $normalizedWebOrigin }
+# The Node child inherits this value. It only controls which local browser
+# page may ask the loopback connector to edit its own Codex/WorkBuddy config.
+$env:AI_OPS_WORKBUDDY_CONNECTOR_ORIGINS = $connectorOrigins -join ','
 
 function Test-AiOpsLocalClientConnector {
   try {
@@ -21,7 +43,7 @@ function Test-AiOpsLocalClientConnector {
   }
 }
 
-if (Test-AiOpsLocalClientConnector) {
+if ((Test-AiOpsLocalClientConnector) -and -not $Restart) {
   Write-Output "AI OPS local client connector is already ready on port $Port."
   exit 0
 }
@@ -36,7 +58,7 @@ if ($listener) {
     exit 1
   }
   # The process is a known older AI OPS connector. Restart only that exact
-  # listener so newly added Codex endpoints become available.
+  # listener so newly added origins or Codex endpoints become available.
   Stop-Process -Id $listenerProcessId -Force
   Start-Sleep -Milliseconds 250
 }

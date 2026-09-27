@@ -39,14 +39,14 @@ const optionSchema = z.object({ id: z.string(), label: z.string() })
 const policySchema = z.object({ id: z.string(), label: z.string(), scope: z.string(), expiresAt: z.string().datetime() })
 const recordSchema = z.object({
   id: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/), capturedAt: z.string().datetime(),
-  person: z.object({ id: z.string(), name: z.string(), department: z.string() }),
+  person: z.object({ id: z.string(), name: z.string() }),
   key: z.object({ id: z.string(), masked: z.string() }), purpose: optionSchema,
   model: z.object({ id: z.string(), label: z.string(), actualModel: z.string().nullable() }), policy: policySchema,
   state: captureStateSchema,
   grouping: z.object({ type: groupingSchema, reliable: z.boolean(), label: z.string() }),
   metrics: z.object({ turns: z.number().int().nonnegative(), toolCalls: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }),
   contentAccess: z.object({ available: z.boolean(), requiresReason: z.boolean(), requiredRole: z.literal('super_admin') }),
-  externalTokenId: z.string().nullable(), endpoint: z.string().nullable(), startedAt: z.string().datetime(), completedAt: z.string().datetime().nullable(),
+  endpoint: z.string().nullable(), startedAt: z.string().datetime(), completedAt: z.string().datetime().nullable(),
   status: auditStatusSchema.nullable(), httpStatus: z.number().int().nullable(), promptBodyRef: z.string().nullable(), responseBodyRef: z.string().nullable(),
   promptBytes: z.number().int().nonnegative().nullable(), responseBytes: z.number().int().nonnegative().nullable(), retentionUntil: z.string().datetime(),
   exportCount: z.number().int().nonnegative(), streamed: z.boolean(), chunkCount: z.number().int().nonnegative(), terminationReason: z.string().nullable(),
@@ -56,7 +56,7 @@ const recordSchema = z.object({
 const metaSchema = z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() })
 export const conversationAuditResponseSchema = z.object({
   meta: metaSchema,
-  accessControl: z.object({ currentRole: z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee']), serverRbacVerified: z.literal(true), contentRequiresReason: z.boolean(), notice: z.string() }),
+  accessControl: z.object({ currentRole: z.enum(['super_admin', 'employee']), serverRbacVerified: z.literal(true), contentRequiresReason: z.boolean(), notice: z.string() }),
   summary: z.object({ total: z.number().int().nonnegative(), captured: z.number().int().nonnegative(), metadataOnly: z.number().int().nonnegative(), expiringSoon: z.number().int().nonnegative(), independentCalls: z.number().int().nonnegative() }),
   scope: z.object({ defaultCaptureEnabled: z.boolean(), activePolicies: z.number().int().nonnegative(), nearestExpiryAt: z.string().datetime(), storageEncryptedVerified: z.boolean(), accessAuditPersisted: z.boolean(), retention: z.object({ mode: z.enum(['metadata_only', 'encrypted_sqlite', 'encrypted_postgres']), proofRecords: z.number().int().nonnegative(), lastRunAt: z.string().datetime().nullable(), notice: z.string() }), notice: z.string() }),
   options: z.object({ people: z.array(optionSchema), keys: z.array(optionSchema), purposes: z.array(optionSchema), models: z.array(optionSchema), policies: z.array(optionSchema) }),
@@ -102,7 +102,7 @@ export type ConversationAuditRecord = z.infer<typeof recordSchema>
 export type ConversationAccessBody = z.infer<typeof conversationAccessBodySchema>
 
 function recordFromDatabase(row: PlatformConversationAuditRecord, now = new Date()): ConversationAuditRecord {
-  const realRecord = Boolean(row.auditStatus || row.promptBodyRef || row.responseBodyRef || row.externalTokenId)
+  const realRecord = Boolean(row.auditStatus || row.promptBodyRef || row.responseBodyRef || row.endpoint)
   const startedAt = row.startedAt ?? row.capturedAt
   const retentionUntil = row.retentionUntil ?? row.policyExpiresAt
   const state = row.deletedAt ? 'deleted' as const : row.state
@@ -114,7 +114,7 @@ function recordFromDatabase(row: PlatformConversationAuditRecord, now = new Date
     id: row.id,
     requestId: row.requestId,
     capturedAt: row.capturedAt,
-    person: { id: row.personId, name: row.personName, department: row.departmentName },
+    person: { id: row.personId, name: row.personName },
     key: { id: row.keyId, masked: row.keyMasked },
     purpose: { id: row.purposeId, label: row.purposeLabel },
     // The public model remains AI OPS for clients. The selected upstream model
@@ -126,7 +126,6 @@ function recordFromDatabase(row: PlatformConversationAuditRecord, now = new Date
     grouping: { type: row.groupingType, reliable: row.groupingReliable === 1, label: row.groupingLabel },
     metrics: { turns: row.turns, toolCalls: row.toolCalls, totalTokens: row.totalTokens },
     contentAccess: { available: bodyAccessible, requiresReason: false, requiredRole: 'super_admin' },
-    externalTokenId: row.externalTokenId ?? null,
     endpoint: row.endpoint ?? null,
     startedAt,
     completedAt: row.completedAt ?? null,
@@ -164,7 +163,7 @@ function createConversationAuditResponse(all: ConversationAuditRecord[], query: 
   const start = (query.page - 1) * query.pageSize
   const unique = <T extends { id: string; label: string }>(values: T[]) => [...new Map(values.map((item) => [item.id, item])).values()]
   const expiry = all.filter((item) => item.state === 'captured').map((item) => item.policy.expiresAt).sort()[0] ?? now.toISOString()
-  const hasRealCapture = all.some((item) => item.externalTokenId || item.endpoint || item.promptAvailable || item.responseAvailable || item.status === 'streaming')
+  const hasRealCapture = all.some((item) => item.endpoint || item.promptAvailable || item.responseAvailable || item.status === 'streaming')
   const retentionMode = hasRealCapture ? 'encrypted_sqlite' as const : 'metadata_only' as const
   return {
     meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: hasRealCapture ? '真实网关请求已在服务端采集；正文以加密引用保存在本地 SQLite，列表不返回正文。' : '当前没有可展示的正文采集记录；未采集的历史请求无法还原正文。' },

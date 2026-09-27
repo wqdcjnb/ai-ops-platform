@@ -3,7 +3,6 @@ import { buildApp } from './app.js'
 import { PlatformDatabase } from './platform-db.js'
 
 function seedEmployee(database: PlatformDatabase) {
-  database.seedDepartment({ id: 'dept-audit-retention', name: '审计保留测试部' })
   database.seedUser({
     id: 'person-audit-retention',
     username: 'audit-retention@example.com',
@@ -11,7 +10,7 @@ function seedEmployee(database: PlatformDatabase) {
     role: 'employee',
     roleLabel: '员工',
     password: 'test-password',
-    departmentId: 'dept-audit-retention',
+    status: 'disabled',
   })
   database.seedApiKey({
     id: 'key-audit-retention',
@@ -19,8 +18,7 @@ function seedEmployee(database: PlatformDatabase) {
     maskedValue: 'sk-test••••retention',
     purpose: '审计保留测试',
     status: 'active',
-    expiresAt: null,
-    models: ['ai-ops'],
+    secretValue: 'audit-retention-key',
   })
 }
 
@@ -59,7 +57,7 @@ describe('system audit retention', () => {
         result: 'success',
         requestId: 'req-delete-person-retention',
         summary: { message: '删除测试人员' },
-      }, new Date('2026-09-20T00:00:00.000Z'), { allowActive: true })
+      }, new Date('2026-09-20T00:00:00.000Z'))
       expect(deletion?.state).toBe('deleted')
 
       const cleanup = database.cleanupAuditEvents('startup', new Date('2026-09-27T00:00:00.000Z'))
@@ -91,7 +89,6 @@ describe('system audit retention', () => {
           id,
           requestId,
           keyId: 'key-audit-retention',
-          externalTokenId: null,
           personId: 'person-audit-retention',
           keyMasked: 'sk-test••••retention',
           purpose: '审计保留测试',
@@ -113,7 +110,7 @@ describe('system audit retention', () => {
       capture('conv-audit-retention-new', 'req-conversation-retention-new', '2026-09-26T16:00:00.000Z')
 
       const result = database.purgeConversationAuditRecordsBefore('2026-09-26T16:00:00.000Z')
-      expect(result).toMatchObject({ deletedRecords: 1, deletedContents: 2 })
+      expect(result).toMatchObject({ deletedRecords: 1, deletedContents: 1 })
       expect(database.listConversationAuditRecords().map((record) => record.id)).toEqual(['conv-audit-retention-new'])
       expect(database.getConversationAuditContent('conv-audit-retention-old')).toBeNull()
     } finally {

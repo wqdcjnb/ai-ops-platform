@@ -9,14 +9,14 @@ vi.mock('./people-api', async (importOriginal) => ({ ...await importOriginal<typ
 function response(): PeopleResponse {
   return {
     meta: { source: 'database', generatedAt: '2026-09-27T10:00:00.000Z', timezone: 'Asia/Shanghai', notice: '本地身份库' },
-    summary: { total: 3, active: 3, disabled: 0, offboarding: 0 },
+    summary: { total: 3, active: 3, disabled: 0 },
     items: [
-      { id: 'person-1', name: '甲员工', initials: '甲', title: '', manager: '', status: 'active', username: 'first@example.com', createdAt: '2026-09-01T08:00:00.000Z', lastUsedAt: '2026-09-05T08:00:00.000Z', apiKeyMasked: null, keyCount: 1, goal: { used: 0, limit: 1, percent: 0, state: 'normal' }, lastActiveAt: '2026-09-05T08:00:00.000Z', tone: 'blue' },
-      { id: 'person-2', name: '乙员工', initials: '乙', title: '', manager: '', status: 'active', username: 'second@example.com', createdAt: '2026-09-03T08:00:00.000Z', lastUsedAt: null, apiKeyMasked: null, keyCount: 1, goal: { used: 0, limit: 1, percent: 0, state: 'normal' }, lastActiveAt: null, tone: 'green' },
-      { id: 'person-3', name: '丙员工', initials: '丙', title: '', manager: '', status: 'active', username: 'third@example.com', createdAt: '2026-09-02T08:00:00.000Z', lastUsedAt: '2026-09-04T08:00:00.000Z', apiKeyMasked: null, keyCount: 1, goal: { used: 0, limit: 1, percent: 0, state: 'normal' }, lastActiveAt: '2026-09-04T08:00:00.000Z', tone: 'violet' },
+      { id: 'person-1', name: '甲员工', initials: '甲', title: '员工', status: 'active', username: 'first@example.com', createdAt: '2026-09-01T08:00:00.000Z', lastUsedAt: '2026-09-05T08:00:00.000Z', apiKeyMasked: null, keyCount: 1, tone: 'blue' },
+      { id: 'person-2', name: '乙员工', initials: '乙', title: '员工', status: 'active', username: 'second@example.com', createdAt: '2026-09-03T08:00:00.000Z', lastUsedAt: null, apiKeyMasked: null, keyCount: 1, tone: 'green' },
+      { id: 'person-3', name: '丙员工', initials: '丙', title: '员工', status: 'active', username: 'third@example.com', createdAt: '2026-09-02T08:00:00.000Z', lastUsedAt: '2026-09-04T08:00:00.000Z', apiKeyMasked: null, keyCount: 1, tone: 'violet' },
     ],
     page: 1,
-    pageSize: 50,
+    pageSize: 10,
     total: 3,
   }
 }
@@ -43,6 +43,8 @@ describe('people view', () => {
   it('removes the redundant heading description and sorts both time columns', async () => {
     mount()
     await vi.waitFor(() => expect(names()).toEqual(['甲员工', '乙员工', '丙员工']))
+    expect(fetchPeople).toHaveBeenCalledWith(expect.objectContaining({ page: 1, pageSize: 10 }), expect.any(AbortSignal))
+    expect(host.querySelector('[aria-label="人员信息管理分页"]')).not.toBeNull()
     expect(host.textContent).not.toContain('员工自助注册；管理员只维护人员状态')
 
     const createdAt = sortButton('创建时间')

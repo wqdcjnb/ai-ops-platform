@@ -6,7 +6,6 @@ function captureInput(requestId: string, startedAt: string, prompt = '重复请�
     id: `conv-audit-${requestId.replace(/^req-/u, '')}`,
     requestId,
     keyId: 'key-deduplication',
-    externalTokenId: null,
     personId: 'person-deduplication',
     keyMasked: 'sk-test••••dedupe',
     purpose: '去重测试',
@@ -22,7 +21,6 @@ describe('conversation audit retry deduplication', () => {
   it('keeps one audit record for a near-immediate identical retry, while retaining a later intentional repeat', () => {
     const database = new PlatformDatabase({ filename: ':memory:' })
     try {
-      database.seedDepartment({ id: 'dept-deduplication', name: '去重测试部' })
       database.seedUser({
         id: 'person-deduplication',
         username: 'deduplication@example.com',
@@ -30,7 +28,6 @@ describe('conversation audit retry deduplication', () => {
         role: 'employee',
         roleLabel: '员工',
         password: 'test-password',
-        departmentId: 'dept-deduplication',
       })
       database.seedApiKey({
         id: 'key-deduplication',
@@ -38,8 +35,7 @@ describe('conversation audit retry deduplication', () => {
         maskedValue: 'sk-test••••dedupe',
         purpose: '去重测试',
         status: 'active',
-        expiresAt: null,
-        models: ['ai-ops'],
+        secretValue: 'deduplication-key',
       })
 
       const firstStartedAt = '2026-09-27T08:00:00.000Z'
@@ -48,10 +44,10 @@ describe('conversation audit retry deduplication', () => {
       const distinct = database.startConversationAuditCapture(captureInput('req-deduplication-distinct', '2026-09-27T08:00:06.000Z', '这是另一条消息'))
       const laterRepeat = database.startConversationAuditCapture(captureInput('req-deduplication-later', '2026-09-27T08:00:16.000Z'))
 
-      expect(first).toBe('conv-audit-deduplication-first')
+      expect(first?.id).toBe('conv-audit-deduplication-first')
       expect(retry).toBeNull()
-      expect(distinct).toBe('conv-audit-deduplication-distinct')
-      expect(laterRepeat).toBe('conv-audit-deduplication-later')
+      expect(distinct?.id).toBe('conv-audit-deduplication-distinct')
+      expect(laterRepeat?.id).toBe('conv-audit-deduplication-later')
       expect(database.listConversationAuditRecords()).toHaveLength(3)
     } finally {
       database.close()
@@ -61,7 +57,6 @@ describe('conversation audit retry deduplication', () => {
   it('retains a retry after the earlier identical request has completed with a failure', () => {
     const database = new PlatformDatabase({ filename: ':memory:' })
     try {
-      database.seedDepartment({ id: 'dept-deduplication', name: '去重测试部' })
       database.seedUser({
         id: 'person-deduplication',
         username: 'deduplication@example.com',
@@ -69,7 +64,6 @@ describe('conversation audit retry deduplication', () => {
         role: 'employee',
         roleLabel: '员工',
         password: 'test-password',
-        departmentId: 'dept-deduplication',
       })
       database.seedApiKey({
         id: 'key-deduplication',
@@ -77,8 +71,7 @@ describe('conversation audit retry deduplication', () => {
         maskedValue: 'sk-test••••dedupe',
         purpose: '去重测试',
         status: 'active',
-        expiresAt: null,
-        models: ['ai-ops'],
+        secretValue: 'deduplication-key-2',
       })
 
       const first = database.startConversationAuditCapture(captureInput('req-deduplication-failed', '2026-09-27T08:10:00.000Z'))
@@ -90,8 +83,8 @@ describe('conversation audit retry deduplication', () => {
       })
       const retry = database.startConversationAuditCapture(captureInput('req-deduplication-recovered', '2026-09-27T08:10:05.000Z'))
 
-      expect(first).toBe('conv-audit-deduplication-failed')
-      expect(retry).toBe('conv-audit-deduplication-recovered')
+      expect(first?.id).toBe('conv-audit-deduplication-failed')
+      expect(retry?.id).toBe('conv-audit-deduplication-recovered')
       expect(database.listConversationAuditRecords()).toHaveLength(2)
     } finally {
       database.close()

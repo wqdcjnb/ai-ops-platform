@@ -119,7 +119,7 @@ export function createOwnedModels(query: ModelsQuery, providers: readonly Extern
       source: 'owned',
       generatedAt: now.toISOString(),
       notice: all.length
-        ? '已登记 ' + providers.length + ' 个第三方账号，其中 ' + routable + ' 个可路由；同名模型已合并全部来源。员工 Key 只调用 AI OPS。'
+        ? '已登记 ' + providers.length + ' 个第三方账号，其中 ' + routable + ' 个可路由；同名模型已合并全部来源。'
         : '暂未同步任何中转站模型；请先在“第三方账号”接入账号并同步全部模型。',
     },
     summary: {

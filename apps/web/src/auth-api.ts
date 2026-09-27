@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { withCsrfHeader } from './csrf'
 
-export const appRoleSchema = z.enum(['super_admin', 'admin', 'department_lead', 'finance', 'employee'])
+export const appRoleSchema = z.enum(['super_admin', 'employee'])
 export type AppRole = z.infer<typeof appRoleSchema>
 
 export const authUserSchema = z.object({
