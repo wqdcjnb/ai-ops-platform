@@ -8,7 +8,7 @@
 - 已安装并启动 Docker Desktop（需包含 Docker Compose）
 - 员工电脑使用系统自带的 Windows PowerShell 即可；**不需要安装 Node.js**
 
-项目可以放在任意磁盘和任意文件夹。启动脚本中的 `cd /d "%~dp0"` 只会切换到脚本自身所在目录，并不要求 Docker 或项目必须位于 `D:` 盘。
+项目可以放在任意磁盘和任意文件夹。
 
 ## 首次启动
 
