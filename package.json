@@ -13,8 +13,11 @@
   "scripts": {
     "dev:web": "npm run dev --workspace @ai-ops/web",
     "dev:server": "npm run dev --workspace @ai-ops/server",
-    "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present && node --test scripts/workbuddy-config.test.mjs scripts/codex-config.test.mjs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "connector:local": "node scripts/ai-ops-workbuddy-connector.mjs",
+    "connector:workbuddy": "npm run connector:local",
+    "connector:codex": "npm run connector:local"
   },
   "devDependencies": {
     "typescript": "~5.9.3"

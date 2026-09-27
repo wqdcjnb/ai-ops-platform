@@ -6,6 +6,7 @@ export type AppRole = z.infer<typeof appRoleSchema>
 
 export const authUserSchema = z.object({
   id: z.string(),
+  email: z.string().min(1).max(320).optional(),
   username: z.string(),
   displayName: z.string(),
   role: appRoleSchema,
@@ -47,22 +48,22 @@ export async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthRespon
   return parseAuthResponse(response, '登录状态暂时无法确认')
 }
 
-export async function login(username: string, password: string, signal?: AbortSignal) {
+export async function login(email: string, password: string, signal?: AbortSignal) {
   return parseAuthResponse(await fetch('/api/auth/login', {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
     signal,
   }), '登录失败')
 }
 
-export async function bootstrapAdmin(signal?: AbortSignal) {
-  return parseAuthResponse(await fetch('/api/auth/bootstrap', {
+export async function registerEmployee(realName: string, email: string, password: string, signal?: AbortSignal) {
+  return parseAuthResponse(await fetch('/api/auth/register', {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify({ realName, email, password }),
     signal,
-  }), '自动进入管理控制台失败')
+  }), '注册失败')
 }
 
 export async function logout(signal?: AbortSignal) {

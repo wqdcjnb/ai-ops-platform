@@ -3,7 +3,6 @@ import { dirname, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { z } from 'zod'
-import { createConversationAuditMetadataSeeds, createConversationUsageLinkSeeds, type ConversationAuditMetadataSeed, type ConversationUsageLinkSeed } from './conversation-audit-seeds.js'
 
 const migrationSql = [
   `CREATE TABLE IF NOT EXISTS departments (
@@ -69,7 +68,7 @@ const migrationSql = [
     actual_model TEXT NOT NULL,
     channel_id TEXT NOT NULL,
     channel_name TEXT NOT NULL,
-    channel_type TEXT NOT NULL CHECK (channel_type IN ('official_api', 'cpa_oauth')),
+    channel_type TEXT NOT NULL CHECK (channel_type IN ('official_api')),
     protocol TEXT NOT NULL CHECK (protocol IN ('chat_completions', 'responses')),
     streamed INTEGER NOT NULL CHECK (streamed IN (0, 1)),
     input_tokens INTEGER NOT NULL CHECK (input_tokens >= 0),
@@ -77,7 +76,7 @@ const migrationSql = [
     points REAL NOT NULL CHECK (points >= 0),
     first_token_ms INTEGER CHECK (first_token_ms >= 0),
     total_latency_ms INTEGER NOT NULL CHECK (total_latency_ms >= 0),
-    cost_type TEXT NOT NULL CHECK (cost_type IN ('official_actual', 'platform_estimate', 'cpa_estimate')),
+    cost_type TEXT NOT NULL CHECK (cost_type IN ('platform_estimate')),
     cost_amount_usd REAL NOT NULL CHECK (cost_amount_usd >= 0),
     status TEXT NOT NULL CHECK (status IN ('succeeded', 'failed', 'cancelled')),
     error_category TEXT CHECK (error_category IN ('rate_limit', 'timeout', 'authentication', 'server', 'cancelled')),
@@ -99,7 +98,7 @@ const migrationSql = [
     actor_user_id TEXT NOT NULL REFERENCES users(id),
     record_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
-    action TEXT NOT NULL CHECK (action IN ('view_synthetic')),
+    action TEXT NOT NULL CHECK (action IN ('view')),
     reason_provided INTEGER NOT NULL CHECK (reason_provided IN (0, 1)),
     reason_length INTEGER NOT NULL CHECK (reason_length BETWEEN 8 AND 200),
     acknowledged_sensitive_scope INTEGER NOT NULL CHECK (acknowledged_sensitive_scope IN (0, 1)),
@@ -236,7 +235,7 @@ const migrationSql = [
   `CREATE TABLE IF NOT EXISTS conversation_usage_links (
     record_id TEXT PRIMARY KEY REFERENCES conversation_audit_records(id),
     usage_request_id TEXT NOT NULL REFERENCES usage_requests(request_id),
-    link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed', 'gateway_capture'))
+    link_source TEXT NOT NULL CHECK (link_source = 'gateway_capture')
   );
   CREATE INDEX IF NOT EXISTS conversation_usage_links_usage_idx ON conversation_usage_links(usage_request_id);`,
   `CREATE TABLE IF NOT EXISTS route_policy_overrides (
@@ -356,7 +355,7 @@ const migrationSql = [
   `CREATE TABLE IF NOT EXISTS managed_channel_mappings (
     marker TEXT PRIMARY KEY,
     external_channel_id TEXT NOT NULL UNIQUE,
-    source TEXT NOT NULL CHECK (source IN ('cpa')),
+    source TEXT NOT NULL CHECK (source IN ('relay')),
     model_snapshot_json TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_request_id TEXT
@@ -367,6 +366,32 @@ const migrationSql = [
     result_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   );`,
+  `ALTER TABLE usage_requests ADD COLUMN ai_ops_auth_ms INTEGER NOT NULL DEFAULT 0 CHECK (ai_ops_auth_ms >= 0);
+  ALTER TABLE usage_requests ADD COLUMN context_compaction_ms INTEGER NOT NULL DEFAULT 0 CHECK (context_compaction_ms >= 0);
+  ALTER TABLE usage_requests ADD COLUMN upstream_first_token_ms INTEGER CHECK (upstream_first_token_ms >= 0);
+  ALTER TABLE usage_requests ADD COLUMN upstream_total_ms INTEGER NOT NULL DEFAULT 0 CHECK (upstream_total_ms >= 0);
+  ALTER TABLE usage_requests ADD COLUMN context_original_chars INTEGER NOT NULL DEFAULT 0 CHECK (context_original_chars >= 0);
+  ALTER TABLE usage_requests ADD COLUMN context_forwarded_chars INTEGER NOT NULL DEFAULT 0 CHECK (context_forwarded_chars >= 0);
+  ALTER TABLE usage_requests ADD COLUMN context_dropped_messages INTEGER NOT NULL DEFAULT 0 CHECK (context_dropped_messages >= 0);
+  ALTER TABLE usage_requests ADD COLUMN context_stripped_chars INTEGER NOT NULL DEFAULT 0 CHECK (context_stripped_chars >= 0);`,
+  // Business deletion state cannot depend on the time-limited audit ledger.
+  // Backfill it before the first retention cleanup so existing soft-deleted
+  // people and Keys remain unavailable after their audit records expire.
+  `CREATE TABLE IF NOT EXISTS entity_deletions (
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('person', 'key')),
+    entity_id TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (entity_type, entity_id)
+  );
+  CREATE INDEX IF NOT EXISTS entity_deletions_deleted_at_idx ON entity_deletions(deleted_at DESC);
+  INSERT OR IGNORE INTO entity_deletions(entity_type, entity_id, deleted_at)
+    SELECT resource_type, resource_id, MAX(occurred_at)
+    FROM audit_events
+    WHERE action = 'delete'
+      AND result = 'success'
+      AND resource_type IN ('person', 'key')
+      AND resource_id IS NOT NULL
+    GROUP BY resource_type, resource_id;`,
 ]
 
 export const databaseStatusSchema = z.object({
@@ -600,13 +625,21 @@ export interface PlatformUsageRequestSeed {
   apiKeyId: string
   purpose: { id: string; name: string; alias: string }
   model: { id: string; displayName: string; actualModel: string }
-  channel: { id: string; name: string; type: 'official_api' | 'cpa_oauth' }
+  channel: { id: string; name: string; type: 'official_api' }
   protocol?: 'chat_completions' | 'responses'
   streamed?: boolean
   tokens: { input: number; output: number }
   points: number
-  latency: { firstTokenMs: number | null; totalMs: number }
-  cost: { type: 'official_actual' | 'platform_estimate' | 'cpa_estimate'; amountUsd: number }
+  latency: {
+    firstTokenMs: number | null
+    totalMs: number
+    aiOpsAuthMs?: number
+    contextCompactionMs?: number
+    upstreamFirstTokenMs?: number | null
+    upstreamTotalMs?: number
+  }
+  context?: { originalChars: number; forwardedChars: number; droppedMessages: number; strippedChars: number }
+  cost: { type: 'platform_estimate'; amountUsd: number }
   status: 'succeeded' | 'failed' | 'cancelled'
   error?: { category: 'rate_limit' | 'timeout' | 'authentication' | 'server' | 'cancelled'; summary: string } | null
   routeAlias: string
@@ -661,7 +694,7 @@ export interface PlatformSyncedPerson {
 export interface PlatformManagedChannelMapping {
   marker: string
   externalChannelId: string
-  source: 'cpa'
+  source: 'relay'
   modelSnapshot: string[]
   updatedAt: string
   lastRequestId: string | null
@@ -683,6 +716,11 @@ export interface PlatformPersonEnableResult {
 
 export interface PlatformPersonDeleteResult {
   state: 'deleted' | 'not_disabled'
+  idempotent: boolean
+  person: { id: string; displayName: string }
+}
+
+export interface PlatformPersonPasswordResetResult {
   idempotent: boolean
   person: { id: string; displayName: string }
 }
@@ -750,6 +788,8 @@ export interface PlatformApiKeyReset {
   maskedValue: string
   secretHash: string
   secretValue: string
+  /** Lets a reset move a legacy key onto the current public model ID. */
+  model?: string
 }
 
 export interface PlatformApiKeyResetResult {
@@ -764,7 +804,7 @@ export interface PlatformConversationAccessCreate {
   actorUserId: string
   recordId: string
   requestId: string
-  action: 'view_synthetic'
+  action: 'view'
   reasonProvided: boolean
   reasonLength: number
   acknowledgedSensitiveScope: boolean
@@ -845,6 +885,7 @@ export interface PlatformConversationAuditRecord {
   purposeLabel: string
   modelId: string
   modelLabel: string
+  actualModel: string | null
   policyId: string
   policyLabel: string
   policyScope: string
@@ -877,6 +918,17 @@ export interface PlatformConversationAuditRecord {
   promptHash: string | null
   responseHash: string | null
   captureError: string | null
+  /** Set when an operator intentionally removes the encrypted conversation body. */
+  deletedAt: string | null
+}
+
+export interface PlatformConversationAuditDeleteResult {
+  id: string
+  requestId: string
+  deletedAt: string
+  deletedContentBytes: number
+  auditEventId: string
+  idempotent: boolean
 }
 
 export interface ConversationAuditCleanupStatus {
@@ -886,12 +938,12 @@ export interface ConversationAuditCleanupStatus {
 
 export interface PlatformConversationUsageLink {
   usageRequestId: string
-  linkSource: 'synthetic_seed' | 'gateway_capture'
+  linkSource: 'gateway_capture'
 }
 
 export interface PlatformUsageConversationLink {
   recordId: string
-  linkSource: 'synthetic_seed' | 'gateway_capture'
+  linkSource: 'gateway_capture'
 }
 
 export interface PlatformAuthSessionCreate {
@@ -910,6 +962,26 @@ export interface SessionCleanupResult {
   deletedExpired: number
   deletedRevoked: number
   revokedRetentionHours: typeof REVOKED_SESSION_RETENTION_HOURS
+}
+
+export const SYSTEM_AUDIT_RETENTION_DAYS = 30
+export type AuditCleanupTrigger = 'startup' | 'scheduled'
+export interface AuditCleanupResult {
+  triggeredBy: AuditCleanupTrigger
+  completedAt: string
+  cutoffAt: string
+  deletedEvents: number
+  retainedEvents: number
+}
+
+export interface ConversationAuditPurgeResult {
+  cutoffAt: string
+  deletedRecords: number
+  deletedContents: number
+  deletedOperationEvents: number
+  deletedAccessEvents: number
+  deletedUsageLinks: number
+  deletedExpiryProofs: number
 }
 
 export interface AuditChainVerification {
@@ -1036,15 +1108,16 @@ export function hashPlatformApiKey(value: string) {
   return createHash('sha256').update(`ai-ops-gateway:${value}`).digest('hex')
 }
 
-export function stableNewApiPersonId(externalUserId: string) {
-  return `person-new-api-${createHash('sha256').update(`new-api-user:${externalUserId}`).digest('hex').slice(0, 24)}`
+function stableExternalPersonId(externalUserId: string) {
+  return `person-external-${createHash('sha256').update(`external-user:${externalUserId}`).digest('hex').slice(0, 24)}`
 }
 
 // The gateway still authenticates with a one-way hash. The encrypted copy is
-// only for the super-admin's explicit "查看 Key" action, so a local operator
-// can recover a credential without putting it in the list, audit log, or
-// request telemetry. Set AI_OPS_KEY_ENCRYPTION_SECRET outside local demos;
-// the fallback keeps a fresh local SQLite database usable without extra setup.
+// returned only to the authenticated employee who owns that Key, so they can
+// reconnect another client without putting it in a list, audit log, or request
+// telemetry. Super-admin list/action routes never return the raw value. Set
+// AI_OPS_KEY_ENCRYPTION_SECRET outside local demos; the fallback keeps a fresh
+// local SQLite database usable without extra setup.
 function platformKeyEncryptionKey() {
   return createHash('sha256')
     .update(`ai-ops-key-view:${process.env.AI_OPS_KEY_ENCRYPTION_SECRET?.trim() || 'local-development-only-change-me'}`)
@@ -1070,6 +1143,7 @@ export function decryptPlatformApiKey(value: string) {
     return null
   }
 }
+
 
 function auditEncryptionKey() {
   return createHash('sha256')
@@ -1099,7 +1173,16 @@ export function decryptConversationAuditPayload(value: string) {
   }
 }
 
-const AUDIT_RETENTION_DAYS = 30
+const CONVERSATION_AUDIT_RETENTION_DAYS = 30
+// OpenAI-compatible clients can resend the exact same request when a local
+// connection is interrupted after the gateway has already accepted it. They
+// receive a fresh HTTP request id on the retry, so the request_id unique
+// constraint alone cannot prevent a duplicate conversation-audit row.
+//
+// Keep the window intentionally short: this is only a retry guard, not a
+// blanket content de-duplication rule. A person who intentionally repeats the
+// same prompt after this interval still gets a separate audit record.
+const AUDIT_DUPLICATE_CAPTURE_WINDOW_MS = 15_000
 
 function auditSafeValue(value: unknown, depth = 0): unknown {
   if (depth > 12) return '[TRUNCATED]'
@@ -1207,9 +1290,9 @@ export class PlatformDatabase {
   }
 
   /**
-   * Conversation capture was introduced after the original demo schema. Keep
-   * this idempotent bootstrap separate from the numbered demo migrations so an
-   * existing local SQLite file can be upgraded without dropping its records.
+   * Conversation capture evolved after the initial schema. Keep this
+   * idempotent bootstrap separate from numbered migrations so existing local
+   * SQLite files can be upgraded without dropping their real records.
    */
   private ensureConversationAuditSchema() {
     const hasColumn = (table: string, column: string) => {
@@ -1238,12 +1321,15 @@ export class PlatformDatabase {
     addColumn('conversation_audit_records', 'prompt_hash TEXT', 'prompt_hash')
     addColumn('conversation_audit_records', 'response_hash TEXT', 'response_hash')
     addColumn('conversation_audit_records', 'capture_error TEXT', 'capture_error')
+    addColumn('conversation_audit_records', 'deleted_at TEXT', 'deleted_at')
     this.db.exec(`CREATE INDEX IF NOT EXISTS conversation_audit_records_key_idx ON conversation_audit_records(key_id, captured_at DESC);`)
     this.db.exec(`CREATE INDEX IF NOT EXISTS conversation_audit_records_status_idx ON conversation_audit_records(audit_status, retention_until);`)
-    // Direct content access no longer requires a reason. Rebuild the legacy
-    // table once so existing SQLite files accept zero-length reason metadata.
+    this.db.exec(`CREATE INDEX IF NOT EXISTS conversation_audit_records_deleted_idx ON conversation_audit_records(deleted_at, captured_at DESC);`)
+    // Direct content access no longer requires a reason. Rebuild the table
+    // when needed so existing SQLite files accept zero-length reason metadata
+    // and use the current action vocabulary.
     const accessEventsSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversation_access_events'").get() as { sql: string } | undefined
-    if (accessEventsSql?.sql.includes('reason_length BETWEEN 8 AND 200')) {
+    if (accessEventsSql && (!accessEventsSql.sql.includes("action TEXT NOT NULL CHECK (action IN ('view'))") || accessEventsSql.sql.includes('reason_length BETWEEN 8 AND 200'))) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         this.db.exec(`CREATE TABLE conversation_access_events_next (
@@ -1251,7 +1337,7 @@ export class PlatformDatabase {
           actor_user_id TEXT NOT NULL REFERENCES users(id),
           record_id TEXT NOT NULL,
           request_id TEXT NOT NULL,
-          action TEXT NOT NULL CHECK (action IN ('view_synthetic')),
+          action TEXT NOT NULL CHECK (action IN ('view')),
           reason_provided INTEGER NOT NULL CHECK (reason_provided IN (0, 1)),
           reason_length INTEGER NOT NULL CHECK (reason_length BETWEEN 0 AND 200),
           acknowledged_sensitive_scope INTEGER NOT NULL CHECK (acknowledged_sensitive_scope IN (0, 1)),
@@ -1260,7 +1346,7 @@ export class PlatformDatabase {
         INSERT INTO conversation_access_events_next(
           id, actor_user_id, record_id, request_id, action, reason_provided, reason_length,
           acknowledged_sensitive_scope, occurred_at
-        ) SELECT id, actor_user_id, record_id, request_id, action, reason_provided, reason_length,
+        ) SELECT id, actor_user_id, record_id, request_id, 'view', reason_provided, reason_length,
           acknowledged_sensitive_scope, occurred_at FROM conversation_access_events;
         DROP TABLE conversation_access_events;
         ALTER TABLE conversation_access_events_next RENAME TO conversation_access_events;
@@ -1297,20 +1383,56 @@ export class PlatformDatabase {
     );
     CREATE INDEX IF NOT EXISTS conversation_audit_operation_record_idx ON conversation_audit_operation_events(record_id, occurred_at DESC);
     CREATE INDEX IF NOT EXISTS conversation_audit_operation_actor_idx ON conversation_audit_operation_events(actor_user_id, occurred_at DESC);`)
-    // SQLite cannot alter a CHECK constraint in place. Preserve historical
-    // synthetic links while widening the source enum for real gateway
-    // captures, so an upgraded database can join request metadata correctly.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS conversation_audit_deletions (
+      record_id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL,
+      actor_user_id TEXT NOT NULL REFERENCES users(id),
+      deleted_at TEXT NOT NULL,
+      deleted_content_bytes INTEGER NOT NULL CHECK (deleted_content_bytes >= 0),
+      audit_event_id TEXT NOT NULL UNIQUE
+    );
+    CREATE INDEX IF NOT EXISTS conversation_audit_deletions_deleted_idx ON conversation_audit_deletions(deleted_at DESC);`)
+    // Deletion proofs must outlive the audit-record row. Rebuild the earlier
+    // tombstone-only table so a hard delete can retain its proof without a
+    // foreign-key reference to the removed conversation record.
+    const deletionSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversation_audit_deletions'").get() as { sql: string } | undefined
+    if (deletionSql && (!hasColumn('conversation_audit_deletions', 'request_id') || deletionSql.sql.includes('REFERENCES conversation_audit_records'))) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        this.db.exec(`CREATE TABLE conversation_audit_deletions_next (
+          record_id TEXT PRIMARY KEY,
+          request_id TEXT NOT NULL,
+          actor_user_id TEXT NOT NULL REFERENCES users(id),
+          deleted_at TEXT NOT NULL,
+          deleted_content_bytes INTEGER NOT NULL CHECK (deleted_content_bytes >= 0),
+          audit_event_id TEXT NOT NULL UNIQUE
+        );
+        INSERT INTO conversation_audit_deletions_next(
+          record_id, request_id, actor_user_id, deleted_at, deleted_content_bytes, audit_event_id
+        ) SELECT d.record_id, r.request_id, d.actor_user_id, d.deleted_at, d.deleted_content_bytes, d.audit_event_id
+          FROM conversation_audit_deletions d JOIN conversation_audit_records r ON r.id = d.record_id;
+        DROP TABLE conversation_audit_deletions;
+        ALTER TABLE conversation_audit_deletions_next RENAME TO conversation_audit_deletions;
+        CREATE INDEX conversation_audit_deletions_deleted_idx ON conversation_audit_deletions(deleted_at DESC);`)
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }
+    // SQLite cannot alter a CHECK constraint in place. Keep only links emitted
+    // by real gateway captures when bringing an existing database forward.
     const usageLinkSql = this.db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversation_usage_links'").get() as { sql: string } | undefined
-    if (usageLinkSql && !usageLinkSql.sql.includes("'gateway_capture'")) {
+    if (usageLinkSql && !usageLinkSql.sql.includes("link_source TEXT NOT NULL CHECK (link_source = 'gateway_capture')")) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         this.db.exec(`CREATE TABLE conversation_usage_links_next (
           record_id TEXT PRIMARY KEY REFERENCES conversation_audit_records(id),
           usage_request_id TEXT NOT NULL REFERENCES usage_requests(request_id),
-          link_source TEXT NOT NULL CHECK (link_source IN ('synthetic_seed', 'gateway_capture'))
+          link_source TEXT NOT NULL CHECK (link_source = 'gateway_capture')
         );
         INSERT INTO conversation_usage_links_next(record_id, usage_request_id, link_source)
-          SELECT record_id, usage_request_id, link_source FROM conversation_usage_links;
+          SELECT record_id, usage_request_id, link_source FROM conversation_usage_links WHERE link_source = 'gateway_capture';
         DROP TABLE conversation_usage_links;
         ALTER TABLE conversation_usage_links_next RENAME TO conversation_usage_links;
         CREATE INDEX conversation_usage_links_usage_idx ON conversation_usage_links(usage_request_id);`)
@@ -1322,6 +1444,34 @@ export class PlatformDatabase {
     }
     addColumn('conversation_audit_cleanup_runs', 'deleted_content_bytes INTEGER NOT NULL DEFAULT 0', 'deleted_content_bytes')
     addColumn('conversation_audit_expiry_proofs', 'deleted_content_bytes INTEGER NOT NULL DEFAULT 0', 'deleted_content_bytes')
+
+    // A previous version retained manually deleted rows as visible tombstones.
+    // Keep their deletion proof and immutable audit events, but remove the
+    // record and all of its local relationships to match hard-delete behavior.
+    const legacyDeleted = this.db.prepare('SELECT id FROM conversation_audit_records WHERE deleted_at IS NOT NULL').all() as Array<{ id: string }>
+    if (legacyDeleted.length) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        const deleteOperations = this.db.prepare('DELETE FROM conversation_audit_operation_events WHERE record_id = ?')
+        const deleteAccessEvents = this.db.prepare('DELETE FROM conversation_access_events WHERE record_id = ?')
+        const deleteUsageLink = this.db.prepare('DELETE FROM conversation_usage_links WHERE record_id = ?')
+        const deleteExpiryProof = this.db.prepare('DELETE FROM conversation_audit_expiry_proofs WHERE record_id = ?')
+        const deleteContent = this.db.prepare('DELETE FROM conversation_audit_contents WHERE record_id = ?')
+        const deleteRecord = this.db.prepare('DELETE FROM conversation_audit_records WHERE id = ?')
+        for (const record of legacyDeleted) {
+          deleteOperations.run(record.id)
+          deleteAccessEvents.run(record.id)
+          deleteUsageLink.run(record.id)
+          deleteExpiryProof.run(record.id)
+          deleteContent.run(record.id)
+          deleteRecord.run(record.id)
+        }
+        this.db.exec('COMMIT')
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    }
   }
 
   status(): DatabaseStatus {
@@ -1372,9 +1522,23 @@ export class PlatformDatabase {
     this.writeAuditChainCheckpoint(rows.length, head?.id ?? null, head?.eventHash ?? null, now.toISOString())
   }
 
+  private isEntityDeleted(entityType: 'person' | 'key', entityId: string) {
+    return Boolean(this.db.prepare(`SELECT 1 FROM entity_deletions
+      WHERE entity_type = ? AND entity_id = ? LIMIT 1`).get(entityType, entityId))
+  }
+
   private isPersonDeleted(personId: string) {
-    return Boolean(this.db.prepare(`SELECT 1 FROM audit_events
-      WHERE action = 'delete' AND resource_type = 'person' AND resource_id = ? AND result = 'success' LIMIT 1`).get(personId))
+    return this.isEntityDeleted('person', personId)
+  }
+
+  private isApiKeyDeleted(keyId: string) {
+    return this.isEntityDeleted('key', keyId)
+  }
+
+  private markEntityDeleted(entityType: 'person' | 'key', entityId: string, now = this.now()) {
+    this.db.prepare(`INSERT INTO entity_deletions(entity_type, entity_id, deleted_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(entity_type, entity_id) DO NOTHING`).run(entityType, entityId, now.toISOString())
   }
 
   hasAuditEvent(id: string) {
@@ -1395,8 +1559,8 @@ export class PlatformDatabase {
     const checkpoint = this.auditChainCheckpoint()
     const head = rows.at(-1)
     // A fresh/cleared local database legitimately has no audit rows yet. Older
-    // databases may also have an empty checkpoint table because the business
-    // demo data was removed after the checkpoint migration ran. Treat that
+    // databases may also have an empty checkpoint table after a historical
+    // data cleanup. Treat that
     // empty chain as valid; the first appended event will create the checkpoint
     // atomically in appendAuditEvent(). A missing checkpoint is only invalid
     // once there is at least one event to verify.
@@ -1414,6 +1578,38 @@ export class PlatformDatabase {
       algorithm: 'sha256', verified: checkpointVerified, hashChainVerified: true, checkpointVerified,
       checkedAt: now.toISOString(), checkpointUpdatedAt: checkpoint?.updatedAt ?? null, eventCount: rows.length,
       firstInvalidEventId: checkpointVerified ? null : checkpoint?.headEventId ?? head?.id ?? null,
+    }
+  }
+
+  /** Removes only expired system-audit events and immediately reseals the retained chain. */
+  cleanupAuditEvents(triggeredBy: AuditCleanupTrigger, now = this.now()): AuditCleanupResult {
+    const completedAt = now.toISOString()
+    const cutoffAt = new Date(now.getTime() - SYSTEM_AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const deletedEvents = Number(this.db.prepare('DELETE FROM audit_events WHERE occurred_at < ?').run(cutoffAt).changes)
+      this.rebuildAuditChain()
+      this.rebuildAuditCheckpoint(now)
+      const retainedEvents = Number((this.db.prepare('SELECT COUNT(*) AS count FROM audit_events').get() as { count: number }).count)
+      this.db.exec('COMMIT')
+      return { triggeredBy, completedAt, cutoffAt, deletedEvents, retainedEvents }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /** Administrative maintenance helper used for an explicit full audit-log purge. */
+  clearAuditEvents() {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const deletedEvents = Number(this.db.prepare('DELETE FROM audit_events').run().changes)
+      this.db.prepare('DELETE FROM audit_chain_checkpoints').run()
+      this.db.exec('COMMIT')
+      return { deletedEvents }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
     }
   }
 
@@ -1544,10 +1740,12 @@ export class PlatformDatabase {
     this.db.prepare(`INSERT INTO usage_requests(
       request_id, occurred_at, owner_user_id, api_key_id, purpose_id, purpose_name, purpose_alias,
       model_id, model_display_name, actual_model, channel_id, channel_name, channel_type, protocol,
-      streamed, input_tokens, output_tokens, points, first_token_ms, total_latency_ms, cost_type,
+      streamed, input_tokens, output_tokens, points, first_token_ms, total_latency_ms, ai_ops_auth_ms,
+      context_compaction_ms, upstream_first_token_ms, upstream_total_ms, context_original_chars,
+      context_forwarded_chars, context_dropped_messages, context_stripped_chars, cost_type,
       cost_amount_usd, status, error_category, error_summary, route_alias, retry_count,
       request_id_propagated, client_name, client_mode
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(request_id) DO UPDATE SET
       occurred_at = excluded.occurred_at, owner_user_id = excluded.owner_user_id, api_key_id = excluded.api_key_id,
       purpose_id = excluded.purpose_id, purpose_name = excluded.purpose_name, purpose_alias = excluded.purpose_alias,
@@ -1555,54 +1753,26 @@ export class PlatformDatabase {
       channel_id = excluded.channel_id, channel_name = excluded.channel_name, channel_type = excluded.channel_type,
       protocol = excluded.protocol, streamed = excluded.streamed, input_tokens = excluded.input_tokens,
       output_tokens = excluded.output_tokens, points = excluded.points, first_token_ms = excluded.first_token_ms,
-      total_latency_ms = excluded.total_latency_ms, cost_type = excluded.cost_type, cost_amount_usd = excluded.cost_amount_usd,
+      total_latency_ms = excluded.total_latency_ms, ai_ops_auth_ms = excluded.ai_ops_auth_ms,
+      context_compaction_ms = excluded.context_compaction_ms, upstream_first_token_ms = excluded.upstream_first_token_ms,
+      upstream_total_ms = excluded.upstream_total_ms, context_original_chars = excluded.context_original_chars,
+      context_forwarded_chars = excluded.context_forwarded_chars, context_dropped_messages = excluded.context_dropped_messages,
+      context_stripped_chars = excluded.context_stripped_chars, cost_type = excluded.cost_type, cost_amount_usd = excluded.cost_amount_usd,
       status = excluded.status, error_category = excluded.error_category, error_summary = excluded.error_summary,
       route_alias = excluded.route_alias, retry_count = excluded.retry_count,
       request_id_propagated = excluded.request_id_propagated, client_name = excluded.client_name, client_mode = excluded.client_mode`).run(
       seed.requestId, seed.occurredAt, seed.ownerUserId, seed.apiKeyId, seed.purpose.id, seed.purpose.name, seed.purpose.alias,
       seed.model.id, seed.model.displayName, seed.model.actualModel, seed.channel.id, seed.channel.name, seed.channel.type,
       seed.protocol ?? 'chat_completions', Number(seed.streamed ?? false), seed.tokens.input, seed.tokens.output,
-      seed.points, seed.latency.firstTokenMs, seed.latency.totalMs, seed.cost.type, seed.cost.amountUsd, seed.status,
+      seed.points, seed.latency.firstTokenMs, seed.latency.totalMs, seed.latency.aiOpsAuthMs ?? 0,
+      seed.latency.contextCompactionMs ?? 0, seed.latency.upstreamFirstTokenMs ?? null, seed.latency.upstreamTotalMs ?? 0,
+      seed.context?.originalChars ?? 0, seed.context?.forwardedChars ?? 0, seed.context?.droppedMessages ?? 0,
+      seed.context?.strippedChars ?? 0, seed.cost.type, seed.cost.amountUsd, seed.status,
       seed.error?.category ?? null, seed.error?.summary ?? null, seed.routeAlias, seed.retryCount ?? 0,
       Number(seed.requestIdPropagated ?? true), seed.client.name, seed.client.mode,
     )
   }
 
-  seedConversationAuditRecord(seed: ConversationAuditMetadataSeed) {
-    if (this.isPersonDeleted(seed.personId)) return
-    this.db.prepare(`INSERT INTO conversation_audit_records(
-      id, request_id, captured_at, person_id, key_id, key_masked, purpose_id, purpose_label,
-      model_id, model_label, policy_id, policy_label, policy_scope, policy_expires_at,
-      capture_state, redaction_status, redaction_findings, grouping_type, grouping_reliable,
-      grouping_label, turns, tool_calls, total_tokens, content_access_available
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      request_id = excluded.request_id, captured_at = excluded.captured_at, person_id = excluded.person_id,
-      key_id = excluded.key_id, key_masked = excluded.key_masked, purpose_id = excluded.purpose_id,
-      purpose_label = excluded.purpose_label, model_id = excluded.model_id, model_label = excluded.model_label,
-      policy_id = excluded.policy_id, policy_label = excluded.policy_label, policy_scope = excluded.policy_scope,
-      policy_expires_at = excluded.policy_expires_at, capture_state = excluded.capture_state,
-      redaction_status = excluded.redaction_status, redaction_findings = excluded.redaction_findings,
-      grouping_type = excluded.grouping_type, grouping_reliable = excluded.grouping_reliable,
-      grouping_label = excluded.grouping_label, turns = excluded.turns, tool_calls = excluded.tool_calls,
-      total_tokens = excluded.total_tokens, content_access_available = excluded.content_access_available`).run(
-      seed.id, seed.requestId, seed.capturedAt, seed.personId, seed.key.id, seed.key.masked,
-      seed.purpose.id, seed.purpose.label, seed.model.id, seed.model.label, seed.policy.id,
-      seed.policy.label, seed.policy.scope, seed.policy.expiresAt, seed.state, seed.redaction.status,
-      seed.redaction.findings, seed.grouping.type, Number(seed.grouping.reliable), seed.grouping.label,
-      seed.metrics.turns, seed.metrics.toolCalls, seed.metrics.totalTokens, Number(seed.contentAccessAvailable),
-    )
-  }
-
-  seedConversationUsageLink(seed: ConversationUsageLinkSeed) {
-    if (!this.db.prepare('SELECT 1 FROM conversation_audit_records WHERE id = ? LIMIT 1').get(seed.recordId)) return
-    if (!this.db.prepare('SELECT 1 FROM usage_requests WHERE request_id = ? LIMIT 1').get(seed.usageRequestId)) return
-    this.db.prepare(`INSERT INTO conversation_usage_links(record_id, usage_request_id, link_source)
-      VALUES (?, ?, ?)
-      ON CONFLICT(record_id) DO UPDATE SET usage_request_id = excluded.usage_request_id, link_source = excluded.link_source`).run(
-      seed.recordId, seed.usageRequestId, seed.linkSource,
-    )
-  }
 
   seedBusinessRule(seed: PlatformBusinessRuleSeed, now = this.now()) {
     const timestamp = now.toISOString()
@@ -1675,19 +1845,19 @@ export class PlatformDatabase {
   }
 
   listPeople() {
-    return this.db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.status,
+    return this.db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.status, u.created_at AS createdAt,
       u.external_user_id AS externalUserId, d.id AS departmentId, d.name AS departmentName
       FROM users u LEFT JOIN departments d ON d.id = u.department_id
       WHERE u.role = 'employee' AND NOT EXISTS (
-        SELECT 1 FROM audit_events deleted
-        WHERE deleted.action = 'delete' AND deleted.resource_type = 'person'
-          AND deleted.resource_id = u.id AND deleted.result = 'success'
+        SELECT 1 FROM entity_deletions deleted
+        WHERE deleted.entity_type = 'person' AND deleted.entity_id = u.id
       )
       ORDER BY u.created_at, u.display_name`).all() as Array<{
         id: string
         username: string
         displayName: string
         status: 'active' | 'disabled'
+        createdAt: string
         externalUserId: string | null
         departmentId: string | null
         departmentName: string | null
@@ -1715,9 +1885,9 @@ export class PlatformDatabase {
       FROM users u
       WHERE u.external_user_id = ? OR u.id = ?
       ORDER BY CASE WHEN u.external_user_id = ? THEN 0 ELSE 1 END
-      LIMIT 1`).get(person.externalUserId, stableNewApiPersonId(person.externalUserId), person.externalUserId) as { id: string; localUsername: string; localStatus: 'active' | 'disabled' } | undefined
-    const personId = existing?.id ?? stableNewApiPersonId(person.externalUserId)
-    const localUsername = existing?.localUsername ?? `new-api-${createHash('sha256').update(person.externalUserId).digest('hex').slice(0, 28)}`
+      LIMIT 1`).get(person.externalUserId, stableExternalPersonId(person.externalUserId), person.externalUserId) as { id: string; localUsername: string; localStatus: 'active' | 'disabled' } | undefined
+    const personId = existing?.id ?? stableExternalPersonId(person.externalUserId)
+    const localUsername = existing?.localUsername ?? `external-${createHash('sha256').update(person.externalUserId).digest('hex').slice(0, 28)}`
     const localStatus = person.status === 'disabled' ? 'disabled' : person.status === 'active' ? 'active' : existing?.localStatus ?? 'active'
     this.db.exec('BEGIN IMMEDIATE')
     try {
@@ -1727,7 +1897,7 @@ export class PlatformDatabase {
       } else {
         this.db.prepare(`INSERT INTO users(id, username, display_name, role, password_hash, status, department_id, external_user_id, created_at, updated_at)
           VALUES (?, ?, ?, 'employee', ?, ?, ?, ?, ?, ?)`).run(
-          personId, localUsername, person.displayName, hashPlatformPassword(`new-api-sync:${person.externalUserId}`), localStatus,
+          personId, localUsername, person.displayName, hashPlatformPassword(`external-sync:${person.externalUserId}`), localStatus,
           person.departmentId, person.externalUserId, timestamp, timestamp,
         )
       }
@@ -1819,7 +1989,7 @@ export class PlatformDatabase {
       FROM managed_channel_mappings WHERE marker = ? LIMIT 1`).get(marker) as {
         marker: string
         externalChannelId: string
-        source: 'cpa'
+        source: 'relay'
         modelSnapshotJson: string
         updatedAt: string
         lastRequestId: string | null
@@ -2135,6 +2305,49 @@ export class PlatformDatabase {
     return enabledPerson ? { state: 'enabled', idempotent: false, person: enabledPerson, keysEnabled } : null
   }
 
+  /**
+   * Administrative recovery action. The caller deliberately supplies no
+   * password value, so the fixed temporary password cannot appear in request
+   * payloads, audit summaries, or browser logs.
+   */
+  resetPersonPassword(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformPersonPasswordResetResult | null {
+    const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
+    if (previousOperation) {
+      if (previousOperation.resourceId !== personId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      let displayName = '人员'
+      try {
+        const summary = JSON.parse(previousOperation.summaryJson) as { resourceName?: unknown }
+        if (typeof summary.resourceName === 'string' && summary.resourceName) displayName = summary.resourceName
+      } catch { /* retain the safe fallback */ }
+      return { idempotent: true, person: { id: personId, displayName } }
+    }
+
+    const person = this.db.prepare(`SELECT id, display_name AS displayName
+      FROM users WHERE id = ? AND role = 'employee' LIMIT 1`).get(personId) as { id: string; displayName: string } | undefined
+    if (!person || this.isPersonDeleted(personId)) return null
+
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND role = 'employee'")
+        .run(hashPlatformPassword('123456'), now.toISOString(), personId)
+      this.appendAuditEvent({
+        ...auditEvent,
+        summary: {
+          ...auditEvent.summary,
+          code: 'PERSON_PASSWORD_RESET',
+          message: '管理员已重置员工登录密码；审计不保存密码值。',
+          resourceName: person.displayName,
+          changes: [{ field: 'password', label: '登录密码', before: '已隐藏', after: '已重置（不记录值）', sensitive: true }],
+        },
+      }, now)
+      this.db.exec('COMMIT')
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+    return { idempotent: false, person }
+  }
+
   deletePerson(personId: string, auditEvent: PlatformAuditEventSeed, now = this.now(), options: { allowActive?: boolean } = {}): PlatformPersonDeleteResult | null {
     const previousOperation = this.db.prepare('SELECT resource_id AS resourceId, summary_json AS summaryJson FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null; summaryJson: string } | undefined
     if (previousOperation) {
@@ -2164,6 +2377,7 @@ export class PlatformDatabase {
           resourceName: person.displayName,
         },
       }, now)
+      this.markEntityDeleted('person', personId, now)
       this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE owner_user_id = ? AND status <> 'revoked'").run(now.toISOString(), personId)
       this.db.prepare("UPDATE person_sync_records SET is_excluded = 1, updated_at = ? WHERE person_id = ?").run(now.toISOString(), personId)
       this.db.prepare(`DELETE FROM quota_policies
@@ -2181,20 +2395,18 @@ export class PlatformDatabase {
   listApiKeys(options: { includeDeleted?: boolean } = {}) {
     const deletedFilter = options.includeDeleted ? '' : `
        AND NOT EXISTS (
-         SELECT 1 FROM audit_events deleted_key
-         WHERE deleted_key.action = 'delete' AND deleted_key.resource_type = 'key'
-           AND deleted_key.resource_id = k.id AND deleted_key.result = 'success'
+         SELECT 1 FROM entity_deletions deleted_key
+         WHERE deleted_key.entity_type = 'key' AND deleted_key.entity_id = k.id
        )`
       const rows = this.db.prepare(`SELECT k.id, k.owner_user_id AS ownerUserId, k.masked_value AS maskedValue,
       k.purpose, k.status, k.expires_at AS expiresAt, k.models_json AS modelsJson, k.secret_ciphertext AS secretCiphertext,
       k.external_token_id AS externalTokenId, k.quota_mode AS quotaMode, k.last_used_at AS lastUsedAt, k.last_synced_at AS lastSyncedAt, k.secret_revealed_at AS secretRevealedAt, k.created_at AS createdAt,
       u.display_name AS ownerName, d.id AS departmentId, d.name AS departmentName
       FROM api_keys k JOIN users u ON u.id = k.owner_user_id
-      LEFT JOIN departments d ON d.id = u.department_id
+       LEFT JOIN departments d ON d.id = u.department_id
        WHERE NOT EXISTS (
-         SELECT 1 FROM audit_events deleted
-         WHERE deleted.action = 'delete' AND deleted.resource_type = 'person'
-           AND deleted.resource_id = u.id AND deleted.result = 'success'
+         SELECT 1 FROM entity_deletions deleted
+         WHERE deleted.entity_type = 'person' AND deleted.entity_id = u.id
        )${deletedFilter}
        ORDER BY k.created_at DESC, k.id`).all() as Array<{
         id: string
@@ -2468,8 +2680,17 @@ export class PlatformDatabase {
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`UPDATE api_keys SET masked_value = ?, secret_hash = ?, secret_ciphertext = ?, status = 'active', updated_at = ? WHERE id = ?`)
-        .run(replacement.maskedValue, replacement.secretHash, encryptPlatformApiKey(replacement.secretValue), timestamp, keyId)
+      this.db.prepare(`UPDATE api_keys
+        SET masked_value = ?, secret_hash = ?, secret_ciphertext = ?, models_json = COALESCE(?, models_json), status = 'active', updated_at = ?
+        WHERE id = ?`)
+        .run(
+          replacement.maskedValue,
+          replacement.secretHash,
+          encryptPlatformApiKey(replacement.secretValue),
+          replacement.model ? JSON.stringify([replacement.model]) : null,
+          timestamp,
+          keyId,
+        )
       this.appendAuditEvent(auditEvent, now)
       this.db.exec('COMMIT')
     } catch (error) {
@@ -2540,14 +2761,14 @@ export class PlatformDatabase {
     }
     const before = current()
     if (!before) return null
-    const alreadyDeleted = this.db.prepare(`SELECT 1 FROM audit_events
-      WHERE action = 'delete' AND resource_type = 'key' AND resource_id = ? AND result = 'success' LIMIT 1`).get(keyId)
+    const alreadyDeleted = this.isApiKeyDeleted(keyId)
     if (alreadyDeleted) return { state: 'already_deleted', idempotent: false, key: before }
     const timestamp = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.db.prepare("UPDATE api_keys SET status = 'revoked', updated_at = ? WHERE id = ?").run(timestamp, keyId)
       this.appendAuditEvent(auditEvent, now)
+      this.markEntityDeleted('key', keyId, now)
       this.db.prepare("DELETE FROM quota_policies WHERE level = 'key' AND subject_id = ?").run(keyId)
       this.db.exec('COMMIT')
     } catch (error) {
@@ -2974,7 +3195,11 @@ export class PlatformDatabase {
       r.model_id AS modelId, r.model_display_name AS modelDisplayName, r.actual_model AS actualModel,
       r.channel_id AS channelId, r.channel_name AS channelName, r.channel_type AS channelType,
       r.protocol, r.streamed, r.input_tokens AS inputTokens, r.output_tokens AS outputTokens, r.points,
-      r.first_token_ms AS firstTokenMs, r.total_latency_ms AS totalLatencyMs, r.cost_type AS costType,
+      r.first_token_ms AS firstTokenMs, r.total_latency_ms AS totalLatencyMs, r.ai_ops_auth_ms AS aiOpsAuthMs,
+      r.context_compaction_ms AS contextCompactionMs, r.upstream_first_token_ms AS upstreamFirstTokenMs,
+      r.upstream_total_ms AS upstreamTotalMs, r.context_original_chars AS contextOriginalChars,
+      r.context_forwarded_chars AS contextForwardedChars, r.context_dropped_messages AS contextDroppedMessages,
+      r.context_stripped_chars AS contextStrippedChars, r.cost_type AS costType,
       r.cost_amount_usd AS costAmountUsd, r.status, r.error_category AS errorCategory, r.error_summary AS errorSummary,
       r.route_alias AS routeAlias, r.retry_count AS retryCount, r.request_id_propagated AS requestIdPropagated,
       r.client_name AS clientName, r.client_mode AS clientMode
@@ -2986,9 +3211,11 @@ export class PlatformDatabase {
       ORDER BY r.occurred_at DESC, r.request_id DESC`).all(ownerUserId ?? null, ownerUserId ?? null) as Array<{
         requestId: string; occurredAt: string; personId: string; personName: string; departmentId: string | null; departmentName: string | null
         keyId: string; maskedValue: string; purposeId: string; purposeName: string; purposeAlias: string
-        modelId: string; modelDisplayName: string; actualModel: string; channelId: string; channelName: string; channelType: 'official_api' | 'cpa_oauth'
+        modelId: string; modelDisplayName: string; actualModel: string; channelId: string; channelName: string; channelType: 'official_api'
         protocol: 'chat_completions' | 'responses'; streamed: number; inputTokens: number; outputTokens: number; points: number
-        firstTokenMs: number | null; totalLatencyMs: number; costType: 'official_actual' | 'platform_estimate' | 'cpa_estimate'; costAmountUsd: number
+        firstTokenMs: number | null; totalLatencyMs: number; aiOpsAuthMs: number; contextCompactionMs: number
+        upstreamFirstTokenMs: number | null; upstreamTotalMs: number; contextOriginalChars: number; contextForwardedChars: number
+        contextDroppedMessages: number; contextStrippedChars: number; costType: 'platform_estimate'; costAmountUsd: number
         status: 'succeeded' | 'failed' | 'cancelled'; errorCategory: 'rate_limit' | 'timeout' | 'authentication' | 'server' | 'cancelled' | null; errorSummary: string | null
         routeAlias: string; retryCount: number; requestIdPropagated: number; clientName: 'Codex Desktop' | 'WorkBuddy'; clientMode: 'stream' | 'non_stream'
       }>
@@ -3247,7 +3474,25 @@ export class PlatformDatabase {
     if (existing) return existing.id
     const prompt = auditJson(input.prompt)
     const capturedAt = input.startedAt
-    const retentionUntil = input.retentionUntil ?? new Date(new Date(capturedAt).getTime() + AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
+    const capturedAtMs = Date.parse(capturedAt)
+    if (prompt && Number.isFinite(capturedAtMs)) {
+      const duplicateAfter = new Date(capturedAtMs - AUDIT_DUPLICATE_CAPTURE_WINDOW_MS).toISOString()
+      const duplicate = this.db.prepare(`SELECT id FROM conversation_audit_records
+        WHERE deleted_at IS NULL AND key_id = ? AND model_id = ? AND endpoint = ? AND prompt_hash = ?
+          AND audit_status IN ('streaming', 'succeeded')
+          AND captured_at >= ? AND captured_at <= ?
+        ORDER BY captured_at DESC LIMIT 1`).get(
+        input.keyId, input.model, input.endpoint, prompt.hash, duplicateAfter, capturedAt,
+      ) as { id: string } | undefined
+      // Do not attach the later request to the earlier record: a retry may
+      // have a different response body. Suppressing the audit handle leaves
+      // the original in-progress or successful capture intact while usage
+      // accounting continues for the actual upstream request. A retry after
+      // a completed failure is retained so the eventual successful response
+      // is not hidden from audit.
+      if (duplicate) return null
+    }
+    const retentionUntil = input.retentionUntil ?? new Date(new Date(capturedAt).getTime() + CONVERSATION_AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
     const promptRef = prompt ? `${input.id}:prompt` : null
     const turns = input.prompt && typeof input.prompt === 'object'
       ? Array.isArray((input.prompt as { messages?: unknown }).messages)
@@ -3292,7 +3537,7 @@ export class PlatformDatabase {
   }
 
   appendConversationAuditChunk(requestId: string, chunk: unknown, now = this.now()) {
-    const row = this.db.prepare(`SELECT id FROM conversation_audit_records WHERE request_id = ? LIMIT 1`).get(requestId) as { id: string } | undefined
+    const row = this.db.prepare(`SELECT id FROM conversation_audit_records WHERE request_id = ? AND deleted_at IS NULL LIMIT 1`).get(requestId) as { id: string } | undefined
     if (!row) return false
     const ref = `${row.id}:chunks`
     const existing = this.db.prepare(`SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE ref = ? LIMIT 1`).get(ref) as { encryptedPayload: string } | undefined
@@ -3314,10 +3559,13 @@ export class PlatformDatabase {
   completeConversationAuditCapture(requestId: string, completion: PlatformConversationAuditCompletion) {
     const row = this.db.prepare(`SELECT id, prompt_body_ref AS promptBodyRef, response_body_ref AS responseBodyRef,
       retention_until AS retentionUntil, streamed, chunk_count AS chunkCount, turns, tool_calls AS toolCalls,
-      total_tokens AS totalTokens FROM conversation_audit_records WHERE request_id = ? LIMIT 1`).get(requestId) as {
-        id: string; promptBodyRef: string | null; responseBodyRef: string | null; retentionUntil: string | null; streamed: number; chunkCount: number; turns: number; toolCalls: number; totalTokens: number
+      total_tokens AS totalTokens, deleted_at AS deletedAt FROM conversation_audit_records WHERE request_id = ? LIMIT 1`).get(requestId) as {
+        id: string; promptBodyRef: string | null; responseBodyRef: string | null; retentionUntil: string | null; streamed: number; chunkCount: number; turns: number; toolCalls: number; totalTokens: number; deletedAt: string | null
       } | undefined
     if (!row) return null
+    // A user can delete a record while a streaming upstream request is still
+    // completing. Do not let that completion recreate encrypted body data.
+    if (row.deletedAt) return this.getConversationAuditRecordById(row.id)
     const chunksRef = `${row.id}:chunks`
     const chunkRow = this.db.prepare(`SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE ref = ? LIMIT 1`).get(chunksRef) as { encryptedPayload: string } | undefined
     const storedChunks = chunkRow ? auditParse(decryptConversationAuditPayload(chunkRow.encryptedPayload)) : null
@@ -3329,7 +3577,7 @@ export class PlatformDatabase {
       ? completion.status
       : 'body_unavailable'
     const completedAt = completion.completedAt
-    const retentionUntil = new Date(new Date(completedAt).getTime() + AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
+    const retentionUntil = new Date(new Date(completedAt).getTime() + CONVERSATION_AUDIT_RETENTION_DAYS * 86_400_000).toISOString()
     const expired = new Date(retentionUntil).getTime() <= new Date(completedAt).getTime()
     const contentAvailable = Boolean(row.promptBodyRef || response)
     const responseRef = response ? `${row.id}:response` : null
@@ -3368,11 +3616,19 @@ export class PlatformDatabase {
 
   getConversationAuditContent(recordId: string): PlatformConversationAuditContent | null {
     const row = this.db.prepare(`SELECT prompt_body_ref AS promptBodyRef, response_body_ref AS responseBodyRef,
-      prompt_bytes AS promptBytes, response_bytes AS responseBytes, prompt_hash AS promptHash, response_hash AS responseHash
+      prompt_bytes AS promptBytes, response_bytes AS responseBytes, prompt_hash AS promptHash, response_hash AS responseHash,
+      deleted_at AS deletedAt
       FROM conversation_audit_records WHERE id = ? LIMIT 1`).get(recordId) as {
         promptBodyRef: string | null; responseBodyRef: string | null; promptBytes: number | null; responseBytes: number | null; promptHash: string | null; responseHash: string | null
+        deletedAt: string | null
       } | undefined
     if (!row) return null
+    if (row.deletedAt) {
+      return {
+        prompt: null, response: null, chunks: [], promptAvailable: false, responseAvailable: false,
+        promptBytes: null, responseBytes: null, promptHash: null, responseHash: null,
+      }
+    }
     const read = (ref: string | null) => {
       if (!ref) return null
       const item = this.db.prepare('SELECT encrypted_payload AS encryptedPayload FROM conversation_audit_contents WHERE ref = ? LIMIT 1').get(ref) as { encryptedPayload: string } | undefined
@@ -3394,7 +3650,8 @@ export class PlatformDatabase {
     const row = this.db.prepare(`SELECT r.id, r.request_id AS requestId, r.captured_at AS capturedAt,
       r.person_id AS personId, u.display_name AS personName, COALESCE(d.name, '未归属部门') AS departmentName,
       r.key_id AS keyId, r.key_masked AS keyMasked, r.purpose_id AS purposeId, r.purpose_label AS purposeLabel,
-      r.model_id AS modelId, r.model_label AS modelLabel, r.policy_id AS policyId, r.policy_label AS policyLabel,
+      r.model_id AS modelId, r.model_label AS modelLabel, usage.actual_model AS actualModel,
+      r.policy_id AS policyId, r.policy_label AS policyLabel,
       r.policy_scope AS policyScope, r.policy_expires_at AS policyExpiresAt, r.capture_state AS state,
       r.redaction_status AS redactionStatus, r.redaction_findings AS redactionFindings,
       r.grouping_type AS groupingType, r.grouping_reliable AS groupingReliable, r.grouping_label AS groupingLabel,
@@ -3404,8 +3661,12 @@ export class PlatformDatabase {
       r.response_body_ref AS responseBodyRef, r.prompt_bytes AS promptBytes, r.response_bytes AS responseBytes,
       r.retention_until AS retentionUntil, r.export_count AS exportCount, r.streamed, r.chunk_count AS chunkCount,
       r.termination_reason AS terminationReason, r.prompt_hash AS promptHash, r.response_hash AS responseHash,
-      r.capture_error AS captureError
-      FROM conversation_audit_records r JOIN users u ON u.id = r.person_id LEFT JOIN departments d ON d.id = u.department_id
+      r.capture_error AS captureError, r.deleted_at AS deletedAt
+      FROM conversation_audit_records r
+      JOIN users u ON u.id = r.person_id
+      LEFT JOIN departments d ON d.id = u.department_id
+      LEFT JOIN conversation_usage_links usage_link ON usage_link.record_id = r.id
+      LEFT JOIN usage_requests usage ON usage.request_id = usage_link.usage_request_id
       WHERE r.id = ? LIMIT 1`).get(id) as PlatformConversationAuditRecord | undefined
     return row ?? null
   }
@@ -3445,6 +3706,81 @@ export class PlatformDatabase {
     this.db.prepare('UPDATE conversation_audit_records SET export_count = export_count + 1 WHERE id = ?').run(recordId)
   }
 
+  /**
+   * Hard-delete one local conversation audit record. The encrypted payload and
+   * all record-local relationships go away together; the deletion proof and
+   * append-only audit event remain independently queryable.
+   */
+  deleteConversationAuditRecord(recordId: string, auditEvent: PlatformAuditEventSeed, now = this.now()): PlatformConversationAuditDeleteResult | null {
+    const existingAudit = this.db.prepare('SELECT resource_id AS resourceId FROM audit_events WHERE id = ? LIMIT 1').get(auditEvent.id) as { resourceId: string | null } | undefined
+    const readRecord = () => this.db.prepare(`SELECT id, request_id AS requestId,
+      content_access_available AS contentAccessAvailable, prompt_body_ref AS promptBodyRef,
+      response_body_ref AS responseBodyRef
+      FROM conversation_audit_records WHERE id = ? LIMIT 1`).get(recordId) as {
+        id: string; requestId: string; contentAccessAvailable: number
+        promptBodyRef: string | null; responseBodyRef: string | null
+      } | undefined
+    const priorDeletion = () => this.db.prepare(`SELECT request_id AS requestId, deleted_at AS deletedAt, deleted_content_bytes AS deletedContentBytes,
+      audit_event_id AS auditEventId FROM conversation_audit_deletions WHERE record_id = ? LIMIT 1`).get(recordId) as {
+        requestId: string; deletedAt: string; deletedContentBytes: number; auditEventId: string
+      } | undefined
+    const resultFromProof = (deletion: NonNullable<ReturnType<typeof priorDeletion>>) => ({
+      id: recordId,
+      requestId: deletion.requestId,
+      deletedAt: deletion.deletedAt,
+      deletedContentBytes: deletion.deletedContentBytes,
+      auditEventId: deletion.auditEventId,
+      idempotent: true,
+    })
+
+    if (existingAudit) {
+      if (existingAudit.resourceId !== recordId) throw new Error('IDEMPOTENCY_KEY_REUSED')
+      const deletion = priorDeletion()
+      return deletion ? resultFromProof(deletion) : null
+    }
+
+    const deletion = priorDeletion()
+    if (deletion) return resultFromProof(deletion)
+
+    const record = readRecord()
+    if (!record || record.contentAccessAvailable !== 1 || (!record.promptBodyRef && !record.responseBodyRef)) return null
+
+    const deletedAt = now.toISOString()
+    const actorUserId = auditEvent.actorUserId ?? 'user-super-admin'
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const bytesRow = this.db.prepare(`SELECT COALESCE(SUM(byte_length), 0) AS bytes
+        FROM conversation_audit_contents WHERE record_id = ?`).get(recordId) as { bytes: number | bigint | null }
+      const deletedContentBytes = Number(bytesRow.bytes ?? 0)
+      this.db.prepare('DELETE FROM conversation_audit_contents WHERE record_id = ?').run(recordId)
+      this.db.prepare(`INSERT INTO conversation_audit_deletions(
+        record_id, request_id, actor_user_id, deleted_at, deleted_content_bytes, audit_event_id
+      ) VALUES (?, ?, ?, ?, ?, ?)`).run(recordId, record.requestId, actorUserId, deletedAt, deletedContentBytes, auditEvent.id)
+      this.db.prepare('DELETE FROM conversation_audit_operation_events WHERE record_id = ?').run(recordId)
+      this.db.prepare('DELETE FROM conversation_access_events WHERE record_id = ?').run(recordId)
+      this.db.prepare('DELETE FROM conversation_usage_links WHERE record_id = ?').run(recordId)
+      this.db.prepare('DELETE FROM conversation_audit_expiry_proofs WHERE record_id = ?').run(recordId)
+      this.db.prepare('DELETE FROM conversation_audit_records WHERE id = ?').run(recordId)
+      this.appendAuditEvent({
+        ...auditEvent,
+        actorUserId,
+        summary: { ...auditEvent.summary, conversationRequestId: record.requestId, deletedContentBytes },
+      }, now)
+      this.db.exec('COMMIT')
+      return {
+        id: record.id,
+        requestId: record.requestId,
+        deletedAt,
+        deletedContentBytes,
+        auditEventId: auditEvent.id,
+        idempotent: false,
+      }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   recordConversationAccess(event: PlatformConversationAccessCreate, now = this.now(), auditEvent?: PlatformAuditEventSeed) {
     const occurredAt = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
@@ -3472,7 +3808,7 @@ export class PlatformDatabase {
       WHERE (? IS NULL OR e.record_id = ?)
       ORDER BY e.occurred_at DESC, e.id DESC
       LIMIT 20`).all(recordId ?? null, recordId ?? null) as Array<{
-        id: string; actorUserId: string; actorName: string; recordId: string; requestId: string; action: 'view_synthetic'
+        id: string; actorUserId: string; actorName: string; recordId: string; requestId: string; action: 'view'
         reasonProvided: number; reasonLength: number; acknowledgedSensitiveScope: number; occurredAt: string
       }>
   }
@@ -3481,7 +3817,8 @@ export class PlatformDatabase {
     return this.db.prepare(`SELECT r.id, r.request_id AS requestId, r.captured_at AS capturedAt,
       r.person_id AS personId, u.display_name AS personName, COALESCE(d.name, '未归属部门') AS departmentName,
       r.key_id AS keyId, r.key_masked AS keyMasked, r.purpose_id AS purposeId, r.purpose_label AS purposeLabel,
-      r.model_id AS modelId, r.model_label AS modelLabel, r.policy_id AS policyId, r.policy_label AS policyLabel,
+      r.model_id AS modelId, r.model_label AS modelLabel, usage.actual_model AS actualModel,
+      r.policy_id AS policyId, r.policy_label AS policyLabel,
       r.policy_scope AS policyScope, r.policy_expires_at AS policyExpiresAt, r.capture_state AS state,
       r.redaction_status AS redactionStatus, r.redaction_findings AS redactionFindings,
       r.grouping_type AS groupingType, r.grouping_reliable AS groupingReliable, r.grouping_label AS groupingLabel,
@@ -3492,10 +3829,12 @@ export class PlatformDatabase {
       r.response_body_ref AS responseBodyRef, r.prompt_bytes AS promptBytes, r.response_bytes AS responseBytes,
       r.retention_until AS retentionUntil, r.export_count AS exportCount, r.streamed, r.chunk_count AS chunkCount,
       r.termination_reason AS terminationReason, r.prompt_hash AS promptHash, r.response_hash AS responseHash,
-      r.capture_error AS captureError
+      r.capture_error AS captureError, r.deleted_at AS deletedAt
       FROM conversation_audit_records r
       JOIN users u ON u.id = r.person_id
       LEFT JOIN departments d ON d.id = u.department_id
+      LEFT JOIN conversation_usage_links usage_link ON usage_link.record_id = r.id
+      LEFT JOIN usage_requests usage ON usage.request_id = usage_link.usage_request_id
       ORDER BY r.captured_at DESC, r.id DESC`).all() as unknown as PlatformConversationAuditRecord[]
   }
 
@@ -3511,12 +3850,54 @@ export class PlatformDatabase {
     return row ?? null
   }
 
+  /**
+   * Explicit maintenance purge for locally stored conversation-audit data.
+   * The caller supplies an absolute cutoff; every record-local payload and
+   * relationship older than it is removed in the same transaction.
+   */
+  purgeConversationAuditRecordsBefore(cutoff: Date | string): ConversationAuditPurgeResult {
+    const cutoffDate = cutoff instanceof Date ? cutoff : new Date(cutoff)
+    if (Number.isNaN(cutoffDate.getTime())) throw new Error('CONVERSATION_AUDIT_PURGE_CUTOFF_INVALID')
+    const cutoffAt = cutoffDate.toISOString()
+    const recordsBeforeCutoff = `record_id IN (
+      SELECT id FROM conversation_audit_records WHERE captured_at < ?
+    )`
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const deletedOperationEvents = Number(this.db.prepare(`DELETE FROM conversation_audit_operation_events
+        WHERE ${recordsBeforeCutoff}`).run(cutoffAt).changes)
+      const deletedAccessEvents = Number(this.db.prepare(`DELETE FROM conversation_access_events
+        WHERE ${recordsBeforeCutoff}`).run(cutoffAt).changes)
+      const deletedUsageLinks = Number(this.db.prepare(`DELETE FROM conversation_usage_links
+        WHERE ${recordsBeforeCutoff}`).run(cutoffAt).changes)
+      const deletedExpiryProofs = Number(this.db.prepare(`DELETE FROM conversation_audit_expiry_proofs
+        WHERE ${recordsBeforeCutoff}`).run(cutoffAt).changes)
+      const deletedContents = Number(this.db.prepare(`DELETE FROM conversation_audit_contents
+        WHERE ${recordsBeforeCutoff}`).run(cutoffAt).changes)
+      const deletedRecords = Number(this.db.prepare('DELETE FROM conversation_audit_records WHERE captured_at < ?').run(cutoffAt).changes)
+      this.db.exec('COMMIT')
+      return {
+        cutoffAt,
+        deletedRecords,
+        deletedContents,
+        deletedOperationEvents,
+        deletedAccessEvents,
+        deletedUsageLinks,
+        deletedExpiryProofs,
+      }
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   cleanupConversationAuditMetadata(triggeredBy: 'startup', now = this.now()) {
     const completedAt = now.toISOString()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const candidates = this.db.prepare(`SELECT id FROM conversation_audit_records r
         WHERE COALESCE(retention_until, policy_expires_at) <= ?
+        AND deleted_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM conversation_audit_expiry_proofs p WHERE p.record_id = r.id)
         ORDER BY id`).all(completedAt) as Array<{ id: string }>
       if (!candidates.length) {
@@ -3631,10 +4012,12 @@ export class PlatformDatabase {
       quotaReservations: count('quota_reservations'),
       routePolicyOverrides: count('route_policy_overrides'),
       channelHealthSnapshots: count('channel_health_snapshots'),
+      entityDeletions: count('entity_deletions'),
       auditEvents: count('audit_events'),
       usageRequests: count('usage_requests'),
       conversationAccessEvents: count('conversation_access_events'),
       conversationAuditRecords: count('conversation_audit_records'),
+      conversationAuditDeletions: count('conversation_audit_deletions'),
       conversationAuditCleanupRuns: count('conversation_audit_cleanup_runs'),
       conversationAuditExpiryProofs: count('conversation_audit_expiry_proofs'),
       conversationUsageLinks: count('conversation_usage_links'),
@@ -3677,169 +4060,4 @@ export class PlatformDatabase {
 
 export function createPlatformDatabase(options: PlatformDatabaseOptions = {}) {
   return new PlatformDatabase(options)
-}
-
-export function seedDemoData(database: PlatformDatabase, now = new Date()) {
-  const departments: PlatformDepartmentSeed[] = [
-    { id: 'company-xinzhi', name: '新知科技' },
-    { id: 'content', name: '内容运营', parentId: 'company-xinzhi' },
-    { id: 'ads', name: '广告投放', parentId: 'company-xinzhi' },
-    { id: 'global', name: '跨境运营', parentId: 'company-xinzhi' },
-    { id: 'service', name: '客户服务', parentId: 'company-xinzhi' },
-    { id: 'merch', name: '商品运营', parentId: 'company-xinzhi' },
-  ]
-  for (const department of departments) database.seedDepartment(department)
-
-  const roleDefinitions: PlatformRoleDefinitionSeed[] = [
-    { id: 'super_admin', name: '超级管理员', dataScope: '全公司', permissionSummary: '组织、服务、策略与敏感审计', highPrivilege: true },
-    { id: 'admin', name: '运营管理员', dataScope: '全公司运营数据', permissionSummary: '人员、Key、额度、路由与告警', highPrivilege: true },
-    { id: 'department_lead', name: '部门负责人', dataScope: '本部门', permissionSummary: '人员、Key、用量与额度只读', highPrivilege: false },
-    { id: 'finance', name: '财务只读', dataScope: '全公司汇总', permissionSummary: '成本、额度和用量只读', highPrivilege: false },
-    { id: 'employee', name: '员工', dataScope: '本人', permissionSummary: '个人 Key、模型与用量', highPrivilege: false },
-  ]
-  for (const role of roleDefinitions) database.seedRoleDefinition(role)
-
-  database.seedUser({
-    id: 'user-super-admin',
-    username: process.env.AUTH_ADMIN_USERNAME ?? 'admin',
-    displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
-    role: 'super_admin',
-    roleLabel: '超级管理员',
-    password: process.env.AI_OPS_ADMIN_ONLY === 'true' ? 'local-admin-password-disabled' : process.env.AUTH_ADMIN_PASSWORD ?? 'admin-demo',
-  })
-  database.seedUser({
-    id: 'person-lin',
-    username: process.env.AUTH_EMPLOYEE_USERNAME ?? 'employee',
-    displayName: process.env.AUTH_EMPLOYEE_DISPLAY_NAME ?? '林筱雨',
-    role: 'employee',
-    roleLabel: '员工',
-    password: process.env.AUTH_EMPLOYEE_PASSWORD ?? 'employee-demo',
-    departmentId: 'content',
-    employeeCode: 'OPS-017',
-    managerName: '内容运营负责人',
-    joinedAt: '2025-03-17',
-  })
-
-  const people: PlatformUserSeed[] = [
-    { id: 'user-ops-admin', username: 'ops-admin', displayName: '运营管理员', role: 'admin', roleLabel: '运营管理员', password: 'demo-ops-admin' },
-    { id: 'user-service-admin', username: 'service-admin', displayName: '服务管理员', role: 'admin', roleLabel: '运营管理员', password: 'demo-service-admin' },
-    { id: 'lead-content', username: 'lead-content', displayName: '内容运营负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-content', departmentId: 'content' },
-    { id: 'lead-ads', username: 'lead-ads', displayName: '广告投放负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-ads', departmentId: 'ads' },
-    { id: 'lead-global', username: 'lead-global', displayName: '跨境运营负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-global', departmentId: 'global' },
-    { id: 'lead-service', username: 'lead-service', displayName: '客户服务负责人', role: 'department_lead', roleLabel: '部门负责人', password: 'demo-lead-service', departmentId: 'service' },
-    { id: 'user-finance', username: 'finance-reader', displayName: '财务只读', role: 'finance', roleLabel: '财务只读', password: 'demo-finance-reader' },
-    { id: 'person-zhou', username: 'demo-zhou', displayName: '周明远', role: 'employee', roleLabel: '员工', password: 'demo-person-zhou', departmentId: 'ads' },
-    { id: 'person-chen', username: 'demo-chen', displayName: '陈安琪', role: 'employee', roleLabel: '员工', password: 'demo-person-chen', departmentId: 'global' },
-    { id: 'person-xu', username: 'demo-xu', displayName: '许嘉禾', role: 'employee', roleLabel: '员工', password: 'demo-person-xu', departmentId: 'service' },
-    { id: 'person-tang', username: 'demo-tang', displayName: '唐语宁', role: 'employee', roleLabel: '员工', password: 'demo-person-tang', departmentId: 'merch' },
-    { id: 'person-he', username: 'demo-he', displayName: '何沐晨', role: 'employee', roleLabel: '员工', password: 'demo-person-he', departmentId: 'content' },
-    { id: 'person-luo', username: 'demo-luo', displayName: '罗一帆', role: 'employee', roleLabel: '员工', password: 'demo-person-luo', departmentId: 'ads' },
-    { id: 'person-su', username: 'demo-su', displayName: '苏澄', role: 'employee', roleLabel: '员工', password: 'demo-person-su', departmentId: 'global' },
-    { id: 'person-qiao', username: 'demo-qiao', displayName: '乔南星', role: 'employee', roleLabel: '员工', password: 'demo-person-qiao', departmentId: 'service' },
-    { id: 'person-guo', username: 'demo-guo', displayName: '郭子谦', role: 'employee', roleLabel: '员工', password: 'demo-person-guo', departmentId: 'merch' },
-    { id: 'person-yan', username: 'demo-yan', displayName: '严可欣', role: 'employee', roleLabel: '员工', password: 'demo-person-yan', status: 'disabled', departmentId: 'content' },
-    { id: 'person-wei', username: 'demo-wei', displayName: '魏昭', role: 'employee', roleLabel: '员工', password: 'demo-person-wei', departmentId: 'service' },
-  ]
-  for (const person of people) database.seedUser(person)
-  database.setUserDepartment('user-super-admin', null)
-  database.setUserDepartment('person-lin', 'content')
-
-  const keys: PlatformApiKeySeed[] = [
-    { id: 'key-lin-1', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••7F2A', purpose: '商品文案', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-copy'] },
-    { id: 'key-lin-2', ownerUserId: 'person-lin', maskedValue: 'sk-ops••••••3C91', purpose: '临时项目', status: 'expiring', expiresAt: '2026-10-15T15:59:59.000Z', models: ['ecommerce-copy'] },
-    { id: 'key-zhou-1', ownerUserId: 'person-zhou', maskedValue: 'sk-ops••••••8B14', purpose: '策略分析', status: 'active', expiresAt: '2027-01-31T15:59:59.000Z', models: ['ecommerce-analysis'] },
-    { id: 'key-chen-1', ownerUserId: 'person-chen', maskedValue: 'sk-ops••••••6D20', purpose: '多语翻译', status: 'active', expiresAt: '2026-12-31T15:59:59.000Z', models: ['ecommerce-translate'] },
-    { id: 'key-xu-1', ownerUserId: 'person-xu', maskedValue: 'sk-ops••••••A921', purpose: '回复建议', status: 'revoked', expiresAt: '2026-09-01T15:59:59.000Z', models: ['ecommerce-service'] },
-  ]
-  for (const key of keys) database.seedApiKey(key)
-
-  const policies: PlatformQuotaPolicySeed[] = [
-    { id: 'quota-company-month', level: 'company', subjectId: 'company-xinzhi', period: 'month', targetPoints: 12000 },
-    { id: 'quota-content-month', level: 'department', subjectId: 'content', period: 'month', targetPoints: 2600 },
-    { id: 'quota-ads-month', level: 'department', subjectId: 'ads', period: 'month', targetPoints: 2400 },
-    { id: 'quota-lin-month', level: 'person', subjectId: 'person-lin', period: 'month', targetPoints: 860 },
-    { id: 'quota-copy-month', level: 'purpose', subjectId: 'ecommerce-copy', period: 'month', targetPoints: 5000 },
-    { id: 'quota-key-lin-1-month', level: 'key', subjectId: 'key-lin-1', period: 'month', targetPoints: 860 },
-  ]
-  for (const policy of policies) database.seedQuotaPolicy(policy)
-  database.seedTemporaryQuotaRequest({
-    id: 'quota-request-demo-001', requesterUserId: 'person-lin', departmentId: 'content', targetPoints: 800,
-    durationHours: 72, reasonLength: 34, idempotencyKey: 'quota-request-demo-001',
-  }, now)
-
-  const businessRules: PlatformBusinessRuleSeed[] = [
-    { id: 'timezone', version: 'draft-v0.1', label: '业务时区', value: 'Asia/Shanghai (UTC+8)', impact: '账期、告警窗口和日志展示', status: 'fixed' },
-    { id: 'currency', version: 'draft-v0.1', label: '预算单位', value: 'CNY · 点数', impact: '预算、分摊与软目标展示', status: 'unverified' },
-    { id: 'billing-cycle', version: 'draft-v0.1', label: '用量周期', value: '自然月 · 每月 1 日重置', impact: '个人、用途与公司软目标', status: 'fixed' },
-    { id: 'failed-billing', version: 'draft-v0.1', label: '失败请求计费', value: '不计点数', impact: '失败、取消及上游异常', status: 'unverified' },
-    { id: 'retry-billing', version: 'draft-v0.1', label: '重试计费', value: '按最终成功请求记一次', impact: '网关自动重试与成本归集', status: 'unverified' },
-  ]
-  for (const rule of businessRules) database.seedBusinessRule(rule)
-  if (database.listBusinessRuleVersions().length === 0) {
-    database.seedBusinessRuleVersion({
-      id: 'business-rule-v0-1',
-      version: 'draft-v0.1',
-      items: database.listBusinessRules().map(({ id, label, value, impact, status }) => ({ id, label, value, impact, status })),
-      actorUserId: 'user-super-admin',
-      note: 'SQLite 初始业务口径基线',
-      status: 'published',
-      isCurrent: true,
-    })
-  }
-
-  const featureFlags: PlatformFeatureFlagSeed[] = [
-    { id: 'management-writes', label: '管理写操作', enabled: false, reason: '登录、RBAC、幂等、审计和回滚未完成', risk: 'high' },
-    { id: 'conversation-capture', label: '对话正文采集', enabled: false, reason: '独立存储、加密、脱敏和到期清理未完成', risk: 'high' },
-    { id: 'hard-quota', label: '硬额度阻断', enabled: false, reason: '并发预留、结算和恢复路径未验收', risk: 'high' },
-    { id: 'data-export', label: '数据导出', enabled: false, reason: '数据范围、敏感扫描和导出审计未完成', risk: 'medium' },
-    { id: 'employee-portal', label: '员工自助入口', enabled: false, reason: '本人数据范围与接入说明尚未完成', risk: 'medium' },
-  ]
-  for (const feature of featureFlags) database.seedFeatureFlag(feature)
-
-  const retentionPolicies: PlatformRetentionPolicySeed[] = [
-    { id: 'usage-metadata', label: '调用元数据', days: 180, appliesTo: '请求 ID、Token、耗时、成本与状态', cleanupState: 'unverified', minimumNecessary: true },
-    { id: 'conversation-content', label: '对话审计正文', days: 7, appliesTo: '仅限获准策略采集的脱敏内容', cleanupState: 'not_configured', minimumNecessary: true },
-    { id: 'operation-audit', label: '操作审计', days: 365, appliesTo: '管理员操作与访问原因证明', cleanupState: 'unverified', minimumNecessary: true },
-    { id: 'export-files', label: '导出文件', days: 7, appliesTo: '异步生成的受控下载文件', cleanupState: 'not_configured', minimumNecessary: true },
-  ]
-  for (const policy of retentionPolicies) database.seedRetentionPolicy(policy)
-
-  database.seedBackupStatus({
-    id: 'platform-sqlite',
-    notice: '尚未配置平台数据库备份作业；页面不允许直接下载数据库、密钥或认证文件。',
-  })
-
-  const auditEvents: PlatformAuditEventSeed[] = [
-    { id: 'audit-login-success', actorUserId: 'user-super-admin', action: 'login', resourceType: 'session', resourceId: 'session-demo-01', result: 'success', requestId: 'req-audit-login-01', summary: { message: '超级管理员通过本机演示身份进入管理控制台。' } },
-    { id: 'audit-key-rotate', actorUserId: 'user-super-admin', action: 'rotate', resourceType: 'key', resourceId: 'key-lin-1', result: 'success', requestId: 'req-audit-key-02', summary: { message: '完成访问 Key 轮换；审计记录不保存新旧密钥值。', sensitive: true } },
-    { id: 'audit-quota-update', actorUserId: 'user-ops-admin', action: 'update', resourceType: 'quota', resourceId: 'quota-content-month', result: 'success', requestId: 'req-audit-quota-03', summary: { message: '将内容运营月度软目标从 2,000 点调整为 2,600 点。' } },
-    { id: 'audit-export-denied', actorUserId: 'user-ops-admin', action: 'export', resourceType: 'export', resourceId: 'export-usage-01', result: 'denied', requestId: 'req-audit-export-05', summary: { message: '导出范围包含无权访问的部门，申请被权限边界拒绝。' } },
-  ]
-  for (const event of auditEvents) database.seedAuditEvent(event)
-
-  const usageSeeds: Array<Omit<PlatformUsageRequestSeed, 'occurredAt'> & { minutes: number }> = [
-    { requestId: 'req-demo-001', minutes: 8, ownerUserId: 'person-lin', apiKeyId: 'key-lin-1', purpose: { id: 'copy', name: '商品文案', alias: 'ecommerce-copy' }, model: { id: 'model-mini', displayName: '通用轻量模型', actualModel: 'gpt-5.1-mini' }, channel: { id: 'channel-official-cn-1', name: 'Official CN · 01', type: 'official_api' }, protocol: 'responses', streamed: true, tokens: { input: 1840, output: 726 }, points: 2.6, latency: { firstTokenMs: 620, totalMs: 2180 }, cost: { type: 'official_actual', amountUsd: .00191 }, status: 'succeeded', routeAlias: 'ecommerce-copy', client: { name: 'Codex Desktop', mode: 'stream' } },
-    { requestId: 'req-demo-002', minutes: 19, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'analysis', name: '策略分析', alias: 'ecommerce-analysis' }, model: { id: 'model-general', displayName: '通用高能力模型', actualModel: 'gpt-5.1' }, channel: { id: 'channel-official-global-1', name: 'Official Global · 01', type: 'official_api' }, streamed: true, tokens: { input: 6230, output: 2140 }, points: 8.4, latency: { firstTokenMs: 1680, totalMs: 8940 }, cost: { type: 'platform_estimate', amountUsd: .02919 }, status: 'succeeded', routeAlias: 'ecommerce-analysis', client: { name: 'WorkBuddy', mode: 'stream' } },
-    { requestId: 'req-demo-003', minutes: 31, ownerUserId: 'person-xu', apiKeyId: 'key-xu-1', purpose: { id: 'service', name: '回复建议', alias: 'ecommerce-service' }, model: { id: 'model-mini', displayName: '通用轻量模型', actualModel: 'gpt-5.1-mini' }, channel: { id: 'channel-official-cn-2', name: 'Official CN · 02', type: 'official_api' }, tokens: { input: 960, output: 188 }, points: 1.2, latency: { firstTokenMs: null, totalMs: 3840 }, cost: { type: 'official_actual', amountUsd: .00062 }, status: 'failed', error: { category: 'rate_limit', summary: '上游短时 429，已记录且未保存完整响应。' }, routeAlias: 'ecommerce-service', retryCount: 1, client: { name: 'Codex Desktop', mode: 'non_stream' } },
-    { requestId: 'req-demo-004', minutes: 47, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'experiment', name: '高能力实验', alias: 'ecommerce-pro-lab' }, model: { id: 'model-lab', displayName: 'CPA 高能力实验', actualModel: 'pro-oauth-lab' }, channel: { id: 'channel-cpa-lab-1', name: 'CPA Lab · 01', type: 'cpa_oauth' }, protocol: 'responses', streamed: true, tokens: { input: 4820, output: 1680 }, points: 6.5, latency: { firstTokenMs: 2420, totalMs: 11320 }, cost: { type: 'cpa_estimate', amountUsd: .0184 }, status: 'succeeded', routeAlias: 'ecommerce-pro-lab', client: { name: 'WorkBuddy', mode: 'stream' } },
-    { requestId: 'req-demo-005', minutes: 73, ownerUserId: 'person-lin', apiKeyId: 'key-lin-2', purpose: { id: 'translate', name: '多语翻译', alias: 'ecommerce-translate' }, model: { id: 'model-mini', displayName: '通用轻量模型', actualModel: 'gpt-5.1-mini' }, channel: { id: 'channel-official-cn-1', name: 'Official CN · 01', type: 'official_api' }, streamed: true, tokens: { input: 3260, output: 1420 }, points: 4.7, latency: { firstTokenMs: 810, totalMs: 4260 }, cost: { type: 'official_actual', amountUsd: .00366 }, status: 'succeeded', routeAlias: 'ecommerce-translate', client: { name: 'Codex Desktop', mode: 'stream' } },
-    { requestId: 'req-demo-006', minutes: 126, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'analysis', name: '策略分析', alias: 'ecommerce-analysis' }, model: { id: 'model-general', displayName: '通用高能力模型', actualModel: 'gpt-5.1' }, channel: { id: 'channel-official-global-1', name: 'Official Global · 01', type: 'official_api' }, tokens: { input: 7120, output: 1830 }, points: 9, latency: { firstTokenMs: null, totalMs: 12000 }, cost: { type: 'platform_estimate', amountUsd: .0272 }, status: 'failed', error: { category: 'timeout', summary: '总耗时超过路由阈值，已在官方分组内结束请求。' }, routeAlias: 'ecommerce-analysis', retryCount: 1, client: { name: 'WorkBuddy', mode: 'non_stream' } },
-    { requestId: 'req-demo-007', minutes: 184, ownerUserId: 'person-xu', apiKeyId: 'key-xu-1', purpose: { id: 'service', name: '回复建议', alias: 'ecommerce-service' }, model: { id: 'model-mini', displayName: '通用轻量模型', actualModel: 'gpt-5.1-mini' }, channel: { id: 'channel-official-cn-1', name: 'Official CN · 01', type: 'official_api' }, protocol: 'responses', streamed: true, tokens: { input: 1280, output: 640 }, points: 1.9, latency: { firstTokenMs: 540, totalMs: 1980 }, cost: { type: 'official_actual', amountUsd: .0016 }, status: 'succeeded', routeAlias: 'ecommerce-service', client: { name: 'Codex Desktop', mode: 'stream' } },
-    { requestId: 'req-demo-008', minutes: 265, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'experiment', name: '高能力实验', alias: 'ecommerce-pro-lab' }, model: { id: 'model-lab', displayName: 'CPA 高能力实验', actualModel: 'pro-oauth-lab' }, channel: { id: 'channel-cpa-lab-1', name: 'CPA Lab · 01', type: 'cpa_oauth' }, protocol: 'responses', streamed: true, tokens: { input: 2290, output: 0 }, points: 2.3, latency: { firstTokenMs: null, totalMs: 1320 }, cost: { type: 'cpa_estimate', amountUsd: .0062 }, status: 'cancelled', error: { category: 'cancelled', summary: '客户端主动取消流式响应。' }, routeAlias: 'ecommerce-pro-lab', client: { name: 'WorkBuddy', mode: 'stream' } },
-    { requestId: 'req-demo-009', minutes: 1_580, ownerUserId: 'person-lin', apiKeyId: 'key-lin-1', purpose: { id: 'copy', name: '商品文案', alias: 'ecommerce-copy' }, model: { id: 'model-mini', displayName: '通用轻量模型', actualModel: 'gpt-5.1-mini' }, channel: { id: 'channel-official-cn-2', name: 'Official CN · 02', type: 'official_api' }, streamed: true, tokens: { input: 2410, output: 990 }, points: 3.4, latency: { firstTokenMs: 730, totalMs: 3120 }, cost: { type: 'official_actual', amountUsd: .00258 }, status: 'succeeded', routeAlias: 'ecommerce-copy', client: { name: 'Codex Desktop', mode: 'stream' } },
-    { requestId: 'req-demo-010', minutes: 1_940, ownerUserId: 'person-chen', apiKeyId: 'key-chen-1', purpose: { id: 'translate', name: '多语翻译', alias: 'ecommerce-translate' }, model: { id: 'model-general', displayName: '通用高能力模型', actualModel: 'gpt-5.1' }, channel: { id: 'channel-official-global-1', name: 'Official Global · 01', type: 'official_api' }, protocol: 'responses', streamed: true, tokens: { input: 8640, output: 3210 }, points: 11.9, latency: { firstTokenMs: 1920, totalMs: 10480 }, cost: { type: 'platform_estimate', amountUsd: .0429 }, status: 'succeeded', routeAlias: 'ecommerce-translate', client: { name: 'WorkBuddy', mode: 'stream' } },
-    { requestId: 'req-demo-011', minutes: 3_080, ownerUserId: 'person-xu', apiKeyId: 'key-xu-1', purpose: { id: 'service', name: '回复建议', alias: 'ecommerce-service' }, model: { id: 'model-mini', displayName: '通用轻量模型', actualModel: 'gpt-5.1-mini' }, channel: { id: 'channel-official-cn-1', name: 'Official CN · 01', type: 'official_api' }, streamed: true, tokens: { input: 770, output: 430 }, points: 1.2, latency: { firstTokenMs: 510, totalMs: 1690 }, cost: { type: 'official_actual', amountUsd: .00105 }, status: 'succeeded', routeAlias: 'ecommerce-service', client: { name: 'Codex Desktop', mode: 'stream' } },
-    { requestId: 'req-demo-012', minutes: 4_330, ownerUserId: 'person-zhou', apiKeyId: 'key-zhou-1', purpose: { id: 'experiment', name: '高能力实验', alias: 'ecommerce-pro-lab' }, model: { id: 'model-lab', displayName: 'CPA 高能力实验', actualModel: 'pro-oauth-lab' }, channel: { id: 'channel-cpa-lab-1', name: 'CPA Lab · 01', type: 'cpa_oauth' }, streamed: true, tokens: { input: 5560, output: 1940 }, points: 7.5, latency: { firstTokenMs: 2840, totalMs: 13620 }, cost: { type: 'cpa_estimate', amountUsd: .0212 }, status: 'succeeded', routeAlias: 'ecommerce-pro-lab', client: { name: 'WorkBuddy', mode: 'stream' } },
-  ]
-  for (const { minutes, ...request } of usageSeeds) database.seedUsageRequest({ ...request, occurredAt: new Date(now.getTime() - minutes * 60_000).toISOString() })
-
-  // Conversation audit rows must represent an actual authenticated gateway
-  // request in a running environment. Keep the legacy fixtures available only
-  // to the unit-test database, where the historical contract is exercised.
-  if (process.env.NODE_ENV === 'test' || process.env.AI_OPS_SEED_LEGACY_AUDIT_DATA === 'true') {
-    for (const record of createConversationAuditMetadataSeeds(now)) database.seedConversationAuditRecord(record)
-    for (const link of createConversationUsageLinkSeeds()) database.seedConversationUsageLink(link)
-  }
-
-  return database.tableCounts()
 }

@@ -1,43 +1,54 @@
-# AI 运营平台文档中心
+# AI OPS 最终方案总览
 
-<div class="hero-label">TEAM AI / 从需求到落地</div>
-<p class="hero-lead">让每位运营人员获得合适的 AI 能力，让每一次调用都有归属、额度和成本记录。</p>
-
-::: tip 当前阶段 · 文档整理与接入验证
-当前主链路：超级管理员 → AI OPS → New API Token/渠道 → CPA → Codex。CPA 和 New API 随 Docker Compose 一起启动，AI OPS 是唯一管理入口；业务链路及各项能力需按验收标准逐项验证。
+::: tip 文档状态
+本页及其导航页构成当前唯一有效的产品基线。文档会明确区分“当前已交付”和“后续扩展”，不把旧代码、旧部署或路线图误写成已完成能力。
 :::
 
-<div class="cards">
-<div class="card"><small>01 / REQUIREMENTS</small><strong><a href="/requirements/core">明确要做什么 →</a></strong><p>八个核心模块、一期范围与验收条件。</p></div>
-<div class="card"><small>02 / ARCHITECTURE</small><strong><a href="/technical/architecture">理解系统如何协作 →</a></strong><p>客户端、管理网关与账号适配层的职责。</p></div>
-<div class="card"><small>03 / WORKSPACE</small><strong><a href="/portal">打开本机后台 →</a></strong><p>经过检查的服务入口与最近可用状态。</p></div>
-<div class="card"><small>04 / DELIVERY</small><strong><a href="/requirements/phases">按阶段开始开发 →</a></strong><p>里程碑、任务顺序、交付物与阶段门禁。</p></div>
-</div>
+AI OPS 是一个把多个已授权中转站整合为一个自定义虚拟模型服务的平台。员工只看到并调用AI OPS，不会看到上游地址、原始模型名、供应商凭据或路由细节。
 
-## 项目目标
+~~~mermaid
+flowchart TB
+  P1[中转站 A]
+  P2[中转站 B]
+  P3[中转站 C]
+  P1 --> A[供应商适配层]
+  P2 --> A
+  P3 --> A
+  A --> C[AI OPS内部目录]
+  C --> G[AI OPS网关]
+  G --> K[员工全能力 Key]
+  K --> X[Codex]
+  K --> W[WorkBuddy]
+  K --> M[标准多模态 API]
+  SA[超级管理员] --> CP[控制台]
+  CP --> A
+  CP --> C
+  CP --> G
+~~~
 
-- 只为超级管理员提供人员、模型、Key 和审计管理。
-- 一个 Key 只绑定一个人员和一个模型；不使用分组。
-- CPA OAuth、渠道 Key、New API 对象和员工最终接入 Key 分层管理。
-- 按 Key 查看真实请求、Prompt 和回复正文，正文最多保留 30 天。
-- 不要求管理员打开或登录 New API/CPA 管理网站；所有管理读写、健康检查和同步都在 AI OPS 内完成。
+## 最终目标
 
-## 状态约定
+- 超级管理员接入多个中转站并自动同步模型。
+- 员工用真实姓名、邮箱和密码注册、登录并管理自己的接入状态。
+- 每位员工默认拥有一个统一 Key；这个 Key 只需调用AI OPS，AI OPS覆盖平台已启用的所有能力。
+- 同一 Key 支持文本、代码、图片、视频和音频，不把所有能力错误地塞进单一聊天接口。
+- 员工可从门户直接写入 Codex 或 WorkBuddy 的 AI OPS 模型配置，不影响本地对话；Codex 登录状态只用于提示，不会为未登录用户创建虚拟身份。
+- 网关对多个候选站点并发执行轻量健康探测，首个成功者获胜；真实请求只向该一个站点提交。
+- 管理员能查看第三方账号健康度、同步模型、基础用量、审计和对话审计；成本、设备连接和媒体任务工作台属于后续扩展。
 
-| 状态 | 含义 |
-| --- | --- |
-| 已验证 | 有本机检查或验收记录，只覆盖记录所述范围 |
-| 项目声明 | 来自上游项目说明，尚未在当前部署验证 |
-| 计划开发 | 已提出的需求，未完成实现 |
-| 待验证 | 需要实际请求、权限或故障测试确认 |
-| 待配置 | 尚未确认部署地址或接入参数 |
+## 不做什么
 
-## 当前需要确定
+- 不管理、出租、共享或轮换个人 Codex 账号。
+- 不把上游中转站的 API Key 下发给员工。
+- 不在员工浏览器中保存完整平台 Key 或上游凭据。
+- 不承诺每个客户端都能显示所有模态；客户端没有视频界面时，可通过标准 API 使用同一 Key。
+- 不把“一个 Key”误解为“无限额度”或“任意中转站均可调用”。平台只开放已验证且组织允许的模型。
 
-New API 当前部署版本的 Token 永不过期字段、停用接口差异，以及真实正文采集的具体改造点。参见[项目待办](/records/todo)。
+## 阅读路径
 
-## 阅读顺序
-
-[核心功能](/requirements/core) → [实施范围](/requirements/phases) → [架构与职责](/technical/architecture) → [验收标准](/requirements/acceptance)。
-
-每页顶部可以下载对应 Markdown 原文。后续文档在此维护，历史交付文件仍保留。
+- 先阅读 [产品需求与边界](/product/requirements)，确认角色、Key 和功能范围。
+- 再阅读 [总体架构](/technical/architecture) 与 [中转站与AI OPS目录](/technical/catalog)。
+- 性能实现以 [网关路由与低延迟](/technical/gateway) 为准。
+- 多模态任务以 [图片、视频与异步任务](/technical/multimodal) 为准。
+- 客户端接入以 [Codex 与 WorkBuddy 连接器](/technical/connectors) 和 [会话连续性与记录](/technical/conversations) 为准。
+- 开发前必须按 [实施路线图](/delivery/roadmap) 与 [验收标准](/delivery/acceptance) 分阶段交付。

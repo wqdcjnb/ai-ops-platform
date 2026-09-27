@@ -2,8 +2,7 @@ import { z } from 'zod'
 import { withCsrfHeader } from './csrf'
 
 const periodSchema = z.enum(['today', '7d', '30d'])
-const captureStateSchema = z.enum(['captured', 'metadata_only', 'expired'])
-const redactionStateSchema = z.enum(['passed', 'review_required', 'not_applicable'])
+const captureStateSchema = z.enum(['captured', 'metadata_only', 'deleted', 'expired'])
 const groupingSchema = z.enum(['conversation', 'independent_call'])
 const auditStatusSchema = z.enum(['streaming', 'succeeded', 'failed', 'cancelled', 'body_unavailable'])
 const optionSchema = z.object({ id: z.string(), label: z.string() })
@@ -17,9 +16,6 @@ export const conversationAuditFiltersSchema = z.object({
   purpose: z.string(),
   model: z.string(),
   policy: z.string(),
-  state: z.union([z.literal('all'), captureStateSchema]),
-  redaction: z.union([z.literal('all'), redactionStateSchema]),
-  grouping: z.union([z.literal('all'), groupingSchema]),
   page: z.number().int().positive(),
   pageSize: z.number().int().min(5).max(50),
 })
@@ -31,10 +27,9 @@ const baseRecordSchema = z.object({
   person: z.object({ id: z.string(), name: z.string(), department: z.string() }),
   key: z.object({ id: z.string(), masked: z.string() }),
   purpose: optionSchema,
-  model: z.object({ id: z.string(), label: z.string() }),
+  model: z.object({ id: z.string(), label: z.string(), actualModel: z.string().nullable() }),
   policy: z.object({ id: z.string(), label: z.string(), scope: z.string(), expiresAt: z.string().datetime() }),
   state: captureStateSchema,
-  redaction: z.object({ status: redactionStateSchema, findings: z.number().int().nonnegative(), rawContentAvailable: z.boolean() }),
   grouping: z.object({ type: groupingSchema, reliable: z.boolean(), label: z.string() }),
   metrics: z.object({ turns: z.number().int().nonnegative(), toolCalls: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative() }),
   contentAccess: z.object({ available: z.boolean(), requiresReason: z.boolean(), requiredRole: z.literal('super_admin') }),
@@ -64,8 +59,8 @@ const extendedRecordFields = {
 // Compatibility defaults keep old metadata-only rows readable. A row claiming
 // to contain body data must carry the new encrypted references.
 export const conversationRecordSchema = baseRecordSchema.extend(extendedRecordFields).superRefine((value, ctx) => {
-  if (value.redaction.rawContentAvailable && !value.promptBodyRef && !value.responseBodyRef) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['redaction', 'rawContentAvailable'], message: '正文可用记录必须带加密正文引用' })
+  if ((value.promptAvailable || value.responseAvailable) && !value.promptBodyRef && !value.responseBodyRef) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['promptBodyRef'], message: '正文可用记录必须带加密正文引用' })
   }
   if (!value.startedAt && (value.promptBodyRef || value.responseBodyRef)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['startedAt'], message: '真实采集记录必须带开始时间' })
@@ -73,20 +68,20 @@ export const conversationRecordSchema = baseRecordSchema.extend(extendedRecordFi
 })
 
 export const conversationAuditResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() }),
+  meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), period: periodSchema, notice: z.string() }),
   accessControl: z.object({ currentRole: roleSchema, serverRbacVerified: z.literal(true), contentRequiresReason: z.boolean(), notice: z.string() }),
-  summary: z.object({ total: z.number().int().nonnegative(), captured: z.number().int().nonnegative(), metadataOnly: z.number().int().nonnegative(), expiringSoon: z.number().int().nonnegative(), independentCalls: z.number().int().nonnegative(), reviewRequired: z.number().int().nonnegative() }),
+  summary: z.object({ total: z.number().int().nonnegative(), captured: z.number().int().nonnegative(), metadataOnly: z.number().int().nonnegative(), expiringSoon: z.number().int().nonnegative(), independentCalls: z.number().int().nonnegative() }),
   scope: z.object({
     defaultCaptureEnabled: z.boolean(),
     activePolicies: z.number().int().nonnegative(),
     nearestExpiryAt: z.string().datetime(),
     storageEncryptedVerified: z.boolean(),
     accessAuditPersisted: z.boolean(),
-    retention: z.object({ mode: z.enum(['metadata_only', 'encrypted_sqlite']), proofRecords: z.number().int().nonnegative(), lastRunAt: z.string().datetime().nullable(), notice: z.string() }),
+    retention: z.object({ mode: z.enum(['metadata_only', 'encrypted_sqlite', 'encrypted_postgres']), proofRecords: z.number().int().nonnegative(), lastRunAt: z.string().datetime().nullable(), notice: z.string() }),
     notice: z.string(),
   }).superRefine((value, ctx) => {
-    if (value.defaultCaptureEnabled && (!value.storageEncryptedVerified || value.retention.mode !== 'encrypted_sqlite')) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['retention', 'mode'], message: '真实采集必须使用已验证的加密 SQLite 存储' })
+    if (value.defaultCaptureEnabled && (!value.storageEncryptedVerified || (value.retention.mode !== 'encrypted_sqlite' && value.retention.mode !== 'encrypted_postgres'))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['retention', 'mode'], message: '真实采集必须使用已验证的本地加密存储' })
     }
   }),
   options: z.object({ people: z.array(optionSchema), keys: z.array(optionSchema), purposes: z.array(optionSchema), models: z.array(optionSchema), policies: z.array(optionSchema) }),
@@ -100,42 +95,42 @@ const messageSchema = z.object({
   label: z.string(),
   occurredAt: z.string().datetime(),
   text: z.string(),
-  redacted: z.boolean(),
-  redactionLabels: z.array(z.string()),
   tool: z.object({ name: z.string(), summary: z.string(), argumentsAvailable: z.boolean(), outputAvailable: z.boolean(), arguments: z.unknown().optional(), output: z.unknown().optional() }).nullable(),
 })
 
 export const conversationAccessResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'database']), generatedAt: z.string().datetime(), notice: z.string() }),
+  meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), notice: z.string() }),
   record: conversationRecordSchema,
-  access: z.object({ accessRecordId: z.string(), auditEventId: z.string().regex(/^audit-[a-z0-9-]+$/).nullable(), reasonAccepted: z.literal(true), persisted: z.boolean(), authorizedByServerRbac: z.literal(true), copyAllowed: z.boolean(), exportAllowed: z.boolean(), deleteAllowed: z.literal(false) }).superRefine((value, ctx) => {
+  access: z.object({ accessRecordId: z.string(), auditEventId: z.string().regex(/^audit-[a-z0-9-]+$/).nullable(), reasonAccepted: z.literal(true), persisted: z.boolean(), authorizedByServerRbac: z.literal(true), copyAllowed: z.boolean(), exportAllowed: z.boolean(), deleteAllowed: z.boolean() }).superRefine((value, ctx) => {
     if (!value.copyAllowed && value.exportAllowed) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['exportAllowed'], message: '导出不能绕过复制权限' })
   }),
   content: z.object({
-    synthetic: z.boolean(),
-    decrypted: z.boolean(),
-    redactionPassed: z.boolean(),
+    decrypted: z.literal(true),
     conversationTitle: z.string(),
     messages: z.array(messageSchema),
     prompt: z.unknown().optional(),
     response: z.unknown().optional(),
     chunks: z.array(z.unknown()).optional(),
-  }).superRefine((value, ctx) => {
-    if (value.synthetic && value.decrypted) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['decrypted'], message: '合成内容不能标记为已解密' })
-    if (!value.synthetic && !value.decrypted) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['decrypted'], message: '真实正文必须标记为已解密' })
   }),
   retention: z.object({ expiresAt: z.string().datetime(), cleanupState: z.enum(['scheduled', 'expired', 'not_applicable']), deletionProofAvailable: z.boolean(), notice: z.string() }),
-  linkedUsage: z.object({ auditRequestId: z.string(), usageRequestId: z.string().nullable(), metadataEndpoint: z.string().nullable(), linkVerified: z.boolean(), source: z.enum(['synthetic_seed', 'gateway_capture', 'unavailable']), notice: z.string() }),
-}).superRefine((value, ctx) => {
-  if (value.content.synthetic && (value.access.copyAllowed || value.access.exportAllowed)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['access', 'copyAllowed'], message: '合成内容不能开放复制或导出' })
-  }
+  linkedUsage: z.object({ auditRequestId: z.string(), usageRequestId: z.string().nullable(), metadataEndpoint: z.string().nullable(), linkVerified: z.boolean(), source: z.enum(['gateway_capture', 'unavailable']), notice: z.string() }),
+})
+
+export const conversationDeleteBodySchema = z.object({
+  idempotencyKey: z.string().regex(/^conversation-delete-[a-z0-9-]{8,96}$/),
+  acknowledgeImpact: z.literal(true),
+})
+
+export const conversationDeleteResponseSchema = z.object({
+  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
+  record: z.object({ id: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/), state: z.literal('deleted') }),
+  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string().regex(/^audit-[a-z0-9-]+$/) }),
 })
 
 export const conversationAccessHistoryResponseSchema = z.object({
   meta: z.object({ source: z.literal('database'), generatedAt: z.string().datetime(), notice: z.string() }),
   record: z.object({ id: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/) }),
-  items: z.array(z.object({ id: z.string(), actorName: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/), action: z.enum(['view_synthetic', 'view', 'copy', 'export']), reasonProvided: z.boolean(), reasonLength: z.number().int().min(0).max(200), acknowledgedSensitiveScope: z.boolean(), occurredAt: z.string().datetime() })).max(50),
+  items: z.array(z.object({ id: z.string(), actorName: z.string(), requestId: z.string().regex(/^req-[a-z0-9-]+$/), action: z.enum(['view', 'copy', 'export']), reasonProvided: z.boolean(), reasonLength: z.number().int().min(0).max(200), acknowledgedSensitiveScope: z.boolean(), occurredAt: z.string().datetime() })).max(5),
 })
 
 const operationResponseSchema = z.object({ status: z.literal('ok'), operationId: z.string(), auditEventId: z.string(), requestId: z.string() })
@@ -145,6 +140,8 @@ export type ConversationAuditRecord = z.infer<typeof conversationRecordSchema>
 export type ConversationAuditResponse = z.infer<typeof conversationAuditResponseSchema>
 export type ConversationAccessResponse = z.infer<typeof conversationAccessResponseSchema>
 export type ConversationAccessHistoryResponse = z.infer<typeof conversationAccessHistoryResponseSchema>
+export type ConversationDeleteBody = z.infer<typeof conversationDeleteBodySchema>
+export type ConversationDeleteResponse = z.infer<typeof conversationDeleteResponseSchema>
 
 export class ConversationAuditApiError extends Error {
   constructor(message: string, readonly requestId?: string) { super(message) }
@@ -191,4 +188,9 @@ export async function copyConversationAudit(id: string, signal?: AbortSignal) {
 
 export async function exportConversationAudit(id: string, signal?: AbortSignal) {
   return parseBlobResponse(await fetch(`/api/audits/${encodeURIComponent(id)}/export`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify({}), signal }), '导出正文失败')
+}
+
+export async function deleteConversationAudit(id: string, payload: ConversationDeleteBody, signal?: AbortSignal) {
+  const body = conversationDeleteBodySchema.parse(payload)
+  return parseResponse(await fetch(`/api/conversation-audits/${encodeURIComponent(id)}/delete`, { method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body), signal }), conversationDeleteResponseSchema, '删除对话记录失败', '该记录没有可删除的对话内容')
 }

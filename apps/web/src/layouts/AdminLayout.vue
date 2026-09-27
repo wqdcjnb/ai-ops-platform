@@ -1,78 +1,21 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { onMounted, ref } from 'vue'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
   IconCommand,
+  IconLogout2,
   IconMenu2,
-  IconSearch,
   IconX,
 } from '@tabler/icons-vue'
-import { fetchPlatformStatus, type PlatformService, type PlatformStatus } from '../home-api'
-import { fetchCurrentUser, type AuthUser } from '../auth-api'
-import { fetchGlobalSearch, GlobalSearchApiError, type GlobalSearchResponse } from '../search-api'
-import { useDebouncedSearch } from '../composables/useDebouncedSearch'
+import { fetchCurrentUser, logout, type AuthUser } from '../auth-api'
 import { adminNavSections } from './admin-nav'
 
 const mobileNavOpen = ref(false)
 const route = useRoute()
+const router = useRouter()
 const currentUser = ref<AuthUser | null>(null)
-const bffState = ref<'checking' | 'online' | 'offline'>('checking')
-const platform = ref<PlatformStatus | null>(null)
-const statusController = new AbortController()
-const globalSearchInput = ref<HTMLInputElement | null>(null)
-const globalSearch = ref('')
-const globalSearchOpen = ref(false)
-const globalSearchLoading = ref(false)
-const globalSearchError = ref('')
-const globalSearchResults = ref<GlobalSearchResponse | null>(null)
-let globalSearchController: AbortController | null = null
-
-const service = (id: PlatformService['id']) => computed(() => platform.value?.services.find((item) => item.id === id))
-const newApi = service('new-api')
-const cpa = service('cpa')
-const stateLabel = (value: PlatformService | undefined, name: string) => {
-  if (!value) return `${name} 检查中`
-  if (value.state === 'healthy') return `${name} 已认证`
-  if (value.state === 'reachable') return `${name} 可达`
-  if (value.state === 'auth_required') return `${name} 认证异常`
-  return `${name} 离线`
-}
-const newApiLabel = computed(() => stateLabel(newApi.value, 'New API'))
-const cpaLabel = computed(() => stateLabel(cpa.value, 'CPA'))
-const dockerMatrix = computed(() => platform.value?.dockerServices ?? [])
-const dockerHealthyCount = computed(() => dockerMatrix.value.filter((service) => service.state === 'healthy').length)
-const dockerStatusLabel = computed(() => {
-  if (bffState.value === 'checking') return '检查服务'
-  if (bffState.value === 'offline') return 'BFF 离线'
-  if (dockerMatrix.value.length) return `${dockerHealthyCount.value}/${dockerMatrix.value.length} 服务正常`
-  return 'BFF 在线'
-})
-const dockerStatusTitle = computed(() => dockerMatrix.value.length
-  ? `Docker 编排：${dockerHealthyCount.value}/${dockerMatrix.value.length} 服务正常`
-  : `BFF ${bffState.value === 'checking' ? '检查中' : bffState.value === 'online' ? '在线' : '离线'}；${newApiLabel.value}；${cpaLabel.value}`)
-const degraded = computed(() => dockerMatrix.value.length
-  ? dockerHealthyCount.value !== dockerMatrix.value.length
-  : bffState.value !== 'online' || newApi.value?.state !== 'healthy' || cpa.value?.state === 'offline')
-
-async function loadServiceStatus() {
-  try {
-    platform.value = await fetchPlatformStatus(statusController.signal)
-    bffState.value = 'online'
-  } catch {
-    bffState.value = 'offline'
-  }
-}
-
-onMounted(() => {
-  void loadServiceStatus()
-  window.addEventListener('keydown', focusGlobalSearch)
-})
-onBeforeUnmount(() => {
-  statusController.abort()
-  globalSearchController?.abort()
-  cancelGlobalSearch()
-  window.removeEventListener('keydown', focusGlobalSearch)
-})
+const isLoggingOut = ref(false)
+const logoutError = ref('')
 
 async function loadCurrentUser() {
   currentUser.value = (await fetchCurrentUser().catch(() => null))?.user ?? null
@@ -80,57 +23,19 @@ async function loadCurrentUser() {
 
 onMounted(() => void loadCurrentUser())
 
-async function runGlobalSearch() {
-  const query = globalSearch.value.trim()
-  globalSearchController?.abort()
-  globalSearchController = null
-  globalSearchError.value = ''
-  if (!query) {
-    globalSearchOpen.value = false
-    globalSearchLoading.value = false
-    globalSearchResults.value = null
-    return
-  }
-
-  const controller = new AbortController()
-  globalSearchController = controller
-  globalSearchOpen.value = true
-  globalSearchLoading.value = true
+async function handleLogout() {
+  if (isLoggingOut.value) return
+  isLoggingOut.value = true
+  logoutError.value = ''
   try {
-    const result = await fetchGlobalSearch(query, controller.signal)
-    if (globalSearchController !== controller) return
-    globalSearchResults.value = result
+    await logout()
+    currentUser.value = null
+    await router.replace('/login')
   } catch (error) {
-    if (controller.signal.aborted || globalSearchController !== controller) return
-    globalSearchError.value = error instanceof GlobalSearchApiError ? error.message : '全局搜索暂时无法加载'
-    globalSearchResults.value = null
+    logoutError.value = error instanceof Error ? error.message : '退出登录失败，请稍后重试。'
   } finally {
-    if (globalSearchController === controller) globalSearchLoading.value = false
+    isLoggingOut.value = false
   }
-}
-
-const { cancel: cancelGlobalSearch } = useDebouncedSearch(globalSearch, () => void runGlobalSearch())
-
-function clearGlobalSearch() {
-  cancelGlobalSearch()
-  globalSearchController?.abort()
-  globalSearchController = null
-  globalSearch.value = ''
-  globalSearchOpen.value = false
-  globalSearchLoading.value = false
-  globalSearchError.value = ''
-  globalSearchResults.value = null
-}
-
-function focusGlobalSearch(event: KeyboardEvent) {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-    event.preventDefault()
-    globalSearchInput.value?.focus()
-  }
-}
-
-function handleGlobalSearchFocus() {
-  if (globalSearch.value.trim()) globalSearchOpen.value = true
 }
 </script>
 
@@ -169,7 +74,7 @@ function handleGlobalSearchFocus() {
       <div class="sidebar-footer">
         <div class="operator-card">
           <div class="avatar avatar-sm">{{ currentUser?.displayName.slice(0, 1) ?? '—' }}</div>
-          <div><strong>{{ currentUser?.displayName ?? '当前身份' }}</strong><small>{{ currentUser?.roleLabel ?? '会话加载中' }} · 本机单管理员</small></div>
+          <div><strong>{{ currentUser?.displayName ?? '当前身份' }}</strong></div>
         </div>
       </div>
     </aside>
@@ -177,43 +82,12 @@ function handleGlobalSearchFocus() {
     <main class="app-main">
       <header class="topbar">
         <button class="icon-button mobile-menu" aria-label="打开导航" @click="mobileNavOpen = true"><IconMenu2 :size="22" /></button>
-        <div class="global-search-wrap">
-          <label class="global-search" :class="{ 'is-active': globalSearchOpen || globalSearchLoading }">
-            <IconSearch :size="18" />
-            <input
-              ref="globalSearchInput"
-              v-model="globalSearch"
-              type="search"
-              aria-label="全局搜索人员、Key 掩码或请求 ID"
-              placeholder="搜索人员、Key 掩码或请求 ID"
-              autocomplete="off"
-              @focus="handleGlobalSearchFocus"
-              @keydown.esc.prevent="clearGlobalSearch"
-            />
-            <kbd>⌘ K</kbd>
-          </label>
-          <div v-if="globalSearchOpen" class="global-search-popover" role="status" aria-live="polite">
-            <div v-if="globalSearchLoading" class="global-search-state">正在搜索…</div>
-            <div v-else-if="globalSearchError" class="global-search-state is-error" role="alert">{{ globalSearchError }}</div>
-            <template v-else-if="globalSearchResults?.total">
-              <div class="global-search-notice">{{ globalSearchResults.meta.notice }}</div>
-              <section v-for="group in globalSearchResults.groups" :key="group.id" class="global-search-group">
-                <div class="global-search-group-label">{{ group.label }}</div>
-                <RouterLink v-for="item in group.items" :key="item.id" :to="item.href" class="global-search-result" @click="clearGlobalSearch">
-                  <span>{{ item.title }}</span>
-                  <small>{{ item.detail }}</small>
-                </RouterLink>
-              </section>
-            </template>
-            <div v-else class="global-search-state">没有匹配内容</div>
-          </div>
-        </div>
         <div class="topbar-actions">
-          <div class="service-status" :class="{ degraded }" :title="dockerStatusTitle">
-            <span /> {{ dockerStatusLabel }}
-            <small v-if="dockerMatrix.length">· 容器引擎</small><small v-else>· {{ newApiLabel }} · {{ cpaLabel }}</small>
-          </div>
-          <div class="avatar-button" role="status" aria-label="当前管理员">{{ currentUser?.displayName.slice(0, 1) ?? '—' }}</div>
+          <span v-if="logoutError" class="topbar-logout-error" role="alert">{{ logoutError }}</span>
+          <button class="logout-button" type="button" :disabled="isLoggingOut" :aria-label="isLoggingOut ? '正在退出登录' : '退出登录'" :title="logoutError || '退出登录'" @click="handleLogout">
+            <IconLogout2 :size="16" />
+            <span>{{ isLoggingOut ? '正在退出…' : '退出登录' }}</span>
+          </button>
         </div>
       </header>
 

@@ -32,8 +32,8 @@ function rawMarkdown() {
   }
 }
 export default defineConfig({
-  title: 'AI 运营文档中心',
-  description: '电商团队 AI 接入、额度管理与成本治理的项目知识库',
+  title: 'AI OPS 多模型网关文档',
+  description: '多中转站聚合、统一员工 Key、多模态调用与客户端一键接入的最终方案',
   lang: 'zh-CN',
   srcDir: 'content',
   srcExclude: ['public/**'],
@@ -56,7 +56,7 @@ export default defineConfig({
   vite: { plugins: [rawMarkdown()], server: { fs: { strict: true, allow: [resolve(root, '..')] } } },
   themeConfig: {
     siteTitle: 'AI 运营 / 文档中心',
-    nav: [{ text: '需求', link: '/requirements/core' }, { text: '方案', link: '/technical/architecture' }, { text: '后台入口 ↗', link: '/portal' }],
+    nav: [{ text: '最终方案', link: '/product/requirements' }, { text: '技术设计', link: '/technical/architecture' }, { text: '交付验收', link: '/delivery/acceptance' }],
     sidebar: groups.map(g => ({ text: g.text, items: g.items.map(([path, text]) => ({ text, link: path === 'index' ? '/' : '/' + path })) })),
     outline: { level: [2, 3], label: '本页目录' },
     docFooter: { prev: '上一篇', next: '下一篇' },
@@ -65,6 +65,6 @@ export default defineConfig({
       miniSearch: { options: { tokenize: text => Array.from(new Intl.Segmenter('zh-CN', { granularity: 'word' }).segment(text), s => s.segment).filter(t => /[\p{L}\p{N}]/u.test(t)) } },
       translations: { button: { buttonText: '搜索文档', buttonAriaLabel: '搜索文档' }, modal: { noResultsText: '未找到相关结果', resetButtonTitle: '清空搜索', footer: { selectText: '选择', navigateText: '切换', closeText: '关闭' } } }
     } },
-    footer: { message: 'Markdown 是维护主版本 · 本机文档站 · 功能状态以验收记录为准' }
+    footer: { message: '最终产品基线 · Markdown 是维护主版本 · 功能状态以验收记录为准' }
   }
 })

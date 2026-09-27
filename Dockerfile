@@ -25,6 +25,7 @@ RUN npm prune --omit=dev
 FROM node:22-bookworm-slim AS server
 
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=4175 \

@@ -1,11 +1,13 @@
-# Project-managed services
+# 部署说明
 
-The root Compose file starts four application services together:
+最终容器拓扑只有 AI OPS `server` 与 `web`。所有第三方中转站都作为管理员在运行后的“第三方账号”页面中配置的受控上游，不作为本仓库的 Compose 服务、挂载目录或环境变量凭据。
 
-- `cpa`: CLIProxyAPI, with `config.yaml`, `.env`, `auths/`, logs, plugins and static assets mounted from `deploy/cpa/`.
-- `new-api`: New API in the existing SQLite mode, with its database and logs mounted from `deploy/new-api/`.
-- `server` and `web`: AI OPS.
+部署前：
 
-The current machine's CPA config/auths and New API SQLite database are migrated here locally. These runtime files are ignored by Git. CPA client and management credentials are read by the AI OPS server from the mounted project config files; they are not copied into the source code or Docker image.
+1. 将根目录 `docker-compose.env.example` 复制为被 Git 忽略的 `.env`。
+2. 设置强管理员密码、`AI_OPS_KEY_ENCRYPTION_SECRET` 与 `AI_OPS_AUDIT_ENCRYPTION_SECRET`。
+3. 设置员工设备可访问的 `AI_OPS_PUBLIC_GATEWAY_BASE_URL`。
+4. 默认可在管理台接入公共 HTTPS 第三方服务；如需限制可接入范围，再在 `AI_OPS_EXTERNAL_PROVIDER_ALLOWED_HOSTS` 填写精确主机名白名单。
+5. 运行 `docker compose up --build`，随后从 `http://127.0.0.1:4174` 登录。
 
-For a fresh installation, copy the two example files to `config.yaml` and `.env`, replace their placeholders, and put CPA authentication JSON files under `auths/`. The New API request/management token, if AI OPS is required to read protected New API catalog endpoints, belongs only in the ignored root `.env` as `NEW_API_ACCESS_TOKEN` or `AI_OPS_GATEWAY_NEW_API_API_KEY`.
+持久卷 `platform-data` 保存员工、Key 摘要、审计数据和加密后的第三方账号注册表。备份该卷前先保护加密密钥；没有相同密钥无法恢复受保护内容。

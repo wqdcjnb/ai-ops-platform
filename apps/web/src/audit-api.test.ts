@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { auditDetailResponseSchema, auditFiltersSchema, auditResponseSchema } from './audit-api'
 
 const event = { id: 'audit-test', occurredAt: '2026-09-15T10:00:00.000Z', actor: { id: 'admin-1', name: '管理员', role: 'admin' }, action: 'rotate', actionLabel: '轮换 Key', resource: { type: 'key', id: 'key-1', name: 'sk-ops••••••1234' }, result: { status: 'success', code: 'KEY_ROTATED' }, source: { type: 'api', label: '管理接口', ipMasked: '127.0.0.*', client: 'Codex Desktop' }, requestId: 'req-audit-test', summary: '仅记录变化摘要', changes: [{ field: 'secret', label: '密钥内容', before: '已变化', after: '已变化', sensitive: true }], contentAvailable: false, credentialValueAvailable: false }
-const meta = { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', period: '7d', notice: '演示' }
-const demoIntegrity = { deletionAllowed: false, appendOnlyVerified: false, verified: false, hashChainVerified: false, checkpointVerified: false, algorithm: 'not_configured', checkedAt: null, checkpointUpdatedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '待验证' }
+const meta = { source: 'database', generatedAt: '2026-09-15T10:00:00.000Z', period: '7d', notice: '本地审计' }
+const localIntegrity = { deletionAllowed: false, appendOnlyVerified: false, verified: false, hashChainVerified: false, checkpointVerified: false, algorithm: 'not_configured', checkedAt: null, checkpointUpdatedAt: null, eventCount: 0, firstInvalidEventId: null, notice: '待验证' }
 
 describe('audit API contracts', () => {
   it('validates filters and metadata-only audit events', () => {
@@ -12,9 +12,9 @@ describe('audit API contracts', () => {
     expect(auditFiltersSchema.safeParse({ period: '7d', search: '', actor: 'all', action: 'view', resource: 'conversation', result: 'success', source: 'web', page: 1, pageSize: 10 }).success).toBe(true)
     expect(auditFiltersSchema.safeParse({ period: '90d', search: '', actor: 'all', action: 'delete', resource: 'key', result: 'success', source: 'api', page: 0, pageSize: 10 }).success).toBe(false)
     expect(auditFiltersSchema.safeParse({ period: '7d', search: '', eventId: 'alert-not-an-audit-event', actor: 'all', action: 'rotate', resource: 'key', result: 'success', source: 'api', page: 1, pageSize: 10 }).success).toBe(false)
-    const response = { meta, summary: { total: 1, success: 1, failed: 0, denied: 0, sensitiveChanges: 1 }, options: { actors: [] }, items: [event], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 }, retention: { mode: 'demo', deletionAllowed: false, appendOnlyVerified: false, notice: '待验证' }, integrity: demoIntegrity }
+    const response = { meta, summary: { total: 1, success: 1, failed: 0, denied: 0, sensitiveChanges: 1 }, options: { actors: [] }, items: [event], pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 }, retention: { mode: 'database', deletionAllowed: false, appendOnlyVerified: false, notice: '待验证' }, integrity: localIntegrity }
     expect(auditResponseSchema.safeParse(response).success).toBe(true)
-    expect(auditResponseSchema.safeParse({ ...response, meta: { ...response.meta, source: 'database' }, retention: { ...response.retention, mode: 'database' } }).success).toBe(true)
+    expect(auditResponseSchema.safeParse({ ...response, meta: { ...response.meta, source: 'other' } }).success).toBe(false)
     expect(auditResponseSchema.safeParse({ ...response, retention: { ...response.retention, deletionAllowed: true } }).success).toBe(false)
   })
 
@@ -35,9 +35,9 @@ describe('audit API contracts', () => {
   })
 
   it('requires safe detail boundaries and unverified integrity states', () => {
-    const detail = { meta: { source: 'demo', generatedAt: '2026-09-15T10:00:00.000Z', notice: '演示' }, event, request: { requestId: 'req-audit-test', traceState: 'demo_unverified', responseCode: 200, durationMs: 80 }, integrity: demoIntegrity, relatedAuditIds: [] }
+    const detail = { meta: { source: 'database', generatedAt: '2026-09-15T10:00:00.000Z', notice: '本地审计' }, event, request: { requestId: 'req-audit-test', traceState: 'database_unverified', responseCode: 200, durationMs: 80 }, integrity: localIntegrity, relatedAuditIds: [] }
     expect(auditDetailResponseSchema.safeParse(detail).success).toBe(true)
-    expect(auditDetailResponseSchema.safeParse({ ...detail, meta: { ...detail.meta, source: 'database' }, request: { ...detail.request, traceState: 'database_unverified' } }).success).toBe(true)
+    expect(auditDetailResponseSchema.safeParse({ ...detail, request: { ...detail.request, traceState: 'other' } }).success).toBe(false)
     expect(auditDetailResponseSchema.safeParse({ ...detail, event: { ...event, contentAvailable: true } }).success).toBe(false)
     expect(auditDetailResponseSchema.safeParse({ ...detail, integrity: { ...detail.integrity, verified: true, hashChainVerified: true, checkpointVerified: true, algorithm: 'sha256', checkedAt: '2026-09-15T10:00:00.000Z', checkpointUpdatedAt: '2026-09-15T10:00:00.000Z', eventCount: 1 } }).success).toBe(true)
   })

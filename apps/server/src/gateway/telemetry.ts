@@ -1,12 +1,18 @@
 import type { PlatformAuditEventSeed, PlatformDatabase, PlatformGatewayKey, PlatformUsageRequestSeed } from '../platform-db.js'
 import type { GatewayMode } from '../gateway-config.js'
 import type { OpenAiChatRequest } from './openai-compatible.js'
+import type { GatewayContextMetrics } from './context-optimizer.js'
 
 export interface GatewayUsageMeasurement {
   response?: unknown
   usage?: { inputTokens?: number; outputTokens?: number }
   outputTextLength?: number
   firstTokenMs?: number | null
+  upstreamFirstTokenMs?: number | null
+  upstreamTotalMs?: number
+  aiOpsAuthMs?: number
+  contextCompactionMs?: number
+  context?: GatewayContextMetrics
 }
 
 export interface GatewayUsageContext {
@@ -45,7 +51,15 @@ export function recordGatewayUsage(context: GatewayUsageContext) {
     streamed: context.streamed,
     tokens: { input: usage.inputTokens, output: usage.outputTokens },
     points,
-    latency: { firstTokenMs: context.measurement.firstTokenMs ?? null, totalMs: Math.max(0, Date.now() - context.startedAt) },
+    latency: {
+      firstTokenMs: context.measurement.firstTokenMs ?? null,
+      totalMs: Math.max(0, Date.now() - context.startedAt),
+      aiOpsAuthMs: Math.max(0, context.measurement.aiOpsAuthMs ?? 0),
+      contextCompactionMs: Math.max(0, context.measurement.contextCompactionMs ?? 0),
+      upstreamFirstTokenMs: context.measurement.upstreamFirstTokenMs ?? null,
+      upstreamTotalMs: Math.max(0, context.measurement.upstreamTotalMs ?? 0),
+    },
+    context: context.measurement.context,
     cost: { type: 'platform_estimate', amountUsd: Number((totalTokens * 0.000001).toFixed(6)) },
     status: context.status,
     error: safeError,
@@ -77,9 +91,8 @@ export function recordGatewayUsage(context: GatewayUsageContext) {
 }
 
 function connectorChannel(mode: GatewayMode): PlatformUsageRequestSeed['channel'] {
-  if (mode === 'new_api') return { id: 'gateway-new-api', name: 'New API 连接器', type: 'official_api' }
-  if (mode === 'cpa') return { id: 'gateway-cpa', name: 'CPA Codex OAuth', type: 'cpa_oauth' }
-  return { id: 'gateway-standalone', name: 'AI OPS 独立网关', type: 'official_api' }
+  void mode
+  return { id: 'gateway-relay', name: '中转站统一模型网关', type: 'official_api' }
 }
 
 export function usageFromPayload(payload: unknown) {

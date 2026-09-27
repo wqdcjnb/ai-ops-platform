@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { loadGatewayConfig } from '../gateway-config.js'
+import type { GatewayConfig } from '../gateway-config.js'
 import { GatewayUpstreamError, OpenAiCompatibleAdapter } from './openai-compatible.js'
 
 afterEach(() => vi.restoreAllMocks())
 
-function config(overrides: Record<string, string> = {}) {
-  return loadGatewayConfig({
-    AI_OPS_GATEWAY_UPSTREAM_BASE_URL: 'http://127.0.0.1:9000/v1',
-    AI_OPS_GATEWAY_UPSTREAM_API_KEY: 'server-only-secret',
+function config(overrides: Partial<GatewayConfig> = {}): GatewayConfig {
+  return {
+    mode: 'relay',
+    provider: 'openai_compatible',
+    baseUrl: 'http://127.0.0.1:9000/v1',
+    upstreamApiKey: 'server-only-secret',
+    timeoutMs: 5_000,
+    defaultStreaming: false,
+    context: { enabled: false, maxInputChars: 4_000, maxMessages: 1 },
+    upstreamConfigured: true,
     ...overrides,
-  })
+  }
 }
 
 describe('OpenAI-compatible gateway adapter', () => {
@@ -24,10 +31,22 @@ describe('OpenAI-compatible gateway adapter', () => {
     expect(headers.get('authorization')).toBe('Bearer server-only-secret')
   })
 
-  it('forces non-streaming chat requests and maps upstream rate limits', async () => {
+  it('accepts the common alternate model catalog envelopes and distinguishes a missing endpoint', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { results: [{ model_id: 'gpt-4o-mini' }] } }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'not found' } }), { status: 404, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const adapter = new OpenAiCompatibleAdapter(config())
+
+    await expect(adapter.listModels()).resolves.toEqual([{ id: 'gpt-4o-mini', object: 'model', created: 0, owned_by: 'upstream' }])
+    await expect(adapter.listModels()).rejects.toMatchObject({ code: 'GATEWAY_UPSTREAM_NOT_FOUND' })
+  })
+
+  it('forces non-streaming chat requests and maps upstream rate limits and exhausted credit', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'chatcmpl-test', object: 'chat.completion', created: 7, model: 'gpt-4o-mini', choices: [] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'slow down' } }), { status: 429 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 30001, message: 'balance insufficient' }), { status: 402 }))
     vi.stubGlobal('fetch', fetchMock)
     const adapter = new OpenAiCompatibleAdapter(config())
 
@@ -36,6 +55,7 @@ describe('OpenAI-compatible gateway adapter', () => {
     expect(body.stream).toBe(false)
 
     await expect(adapter.listModels()).rejects.toMatchObject({ code: 'GATEWAY_UPSTREAM_RATE_LIMITED', statusCode: 429 })
+    await expect(adapter.listModels()).rejects.toMatchObject({ code: 'GATEWAY_UPSTREAM_CREDIT_EXHAUSTED', message: expect.stringContaining('余额') })
   })
 
   it('preserves native Responses payloads and event names', async () => {

@@ -1,15 +1,13 @@
 import { createRouter, createWebHistory, type RouterHistory } from 'vue-router'
 import AdminLayout from './layouts/AdminLayout.vue'
-import HomeView from './views/HomeView.vue'
 import PeopleView from './views/PeopleView.vue'
-import KeysView from './views/KeysView.vue'
-import LimitsView from './views/LimitsView.vue'
-import RoutesView from './views/RoutesView.vue'
 import ModelsView from './views/ModelsView.vue'
-import UpstreamsView from './views/UpstreamsView.vue'
+import ExternalProvidersView from './views/ExternalProvidersView.vue'
 import UsageView from './views/UsageView.vue'
 import AuditView from './views/AuditView.vue'
 import ConversationAuditView from './views/ConversationAuditView.vue'
+import AuthView from './views/AuthView.vue'
+import EmployeePortalView from './views/EmployeePortalView.vue'
 import type { AppRole } from './auth-api'
 
 declare module 'vue-router' {
@@ -34,67 +32,58 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
     history: options.history ?? createWebHistory(),
     routes: [
       {
+        path: '/login',
+        name: 'login',
+        component: AuthView,
+        meta: { title: '登录', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'], public: true },
+      },
+      {
+        path: '/register',
+        name: 'register',
+        component: AuthView,
+        meta: { title: '员工注册', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'], public: true },
+      },
+      {
+        path: '/employee',
+        name: 'employee-portal',
+        component: EmployeePortalView,
+        meta: { title: '我的账户', roles: ['employee'] },
+      },
+      {
         path: '/',
         component: AdminLayout,
-        meta: { title: '管理控制台', roles: ['super_admin', 'admin', 'department_lead', 'finance'] },
+        meta: { title: '管理控制台', roles: ['super_admin'] },
         children: [
-          {
-            path: '',
-            name: 'home',
-            component: HomeView,
-            meta: { title: '统一入口', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P0' },
-          },
-          // Keep old bookmarks working while removing the obsolete page.
-          { path: 'overview', redirect: '/', meta: { title: '统一入口', roles: ['super_admin', 'admin', 'department_lead', 'finance'] } },
-          // Keep old bookmarks working while removing the obsolete settings page.
-          { path: 'settings', redirect: '/', meta: { title: '统一入口', roles: ['super_admin', 'admin', 'department_lead', 'finance'] } },
+          { path: '', redirect: () => role === 'employee' ? '/employee' : '/people', meta: { title: '人员信息管理', roles: ['super_admin'] } },
           {
             path: 'people',
             name: 'people',
             component: PeopleView,
-            meta: { title: '人员与部门', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P1' },
-          },
-          {
-            path: 'keys',
-            name: 'keys',
-            component: KeysView,
-            meta: { title: 'Key 管理', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P1' },
-          },
-          {
-            path: 'limits',
-            name: 'limits',
-            component: LimitsView,
-            meta: { title: '额度与限流', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P3' },
-          },
-          {
-            path: 'routes',
-            name: 'routes',
-            component: RoutesView,
-            meta: { title: '用途与路由', roles: ['super_admin', 'admin'], stage: 'P2' },
+            meta: { title: '人员信息管理', roles: ['super_admin'], stage: 'P1' },
           },
           {
             path: 'models',
             name: 'models',
             component: ModelsView,
-            meta: { title: '模型目录', roles: ['super_admin', 'admin', 'department_lead'], stage: 'P2' },
+            meta: { title: '模型目录', roles: ['super_admin'], stage: 'P2' },
           },
           {
-            path: 'upstreams',
-            name: 'upstreams',
-            component: UpstreamsView,
-            meta: { title: '上游账号', roles: ['super_admin', 'admin'], stage: 'P2' },
+            path: 'external-providers',
+            name: 'external-providers',
+            component: ExternalProvidersView,
+            meta: { title: '第三方账号', roles: ['super_admin'], stage: 'E1' },
           },
           {
             path: 'usage',
             name: 'usage',
             component: UsageView,
-            meta: { title: '模型调用分析', roles: ['super_admin', 'admin', 'department_lead', 'finance'], stage: 'P1' },
+            meta: { title: '模型调用分析', roles: ['super_admin'], stage: 'P2' },
           },
           {
             path: 'audit',
             name: 'audit',
             component: AuditView,
-            meta: { title: '审计日志', roles: ['super_admin', 'admin'], stage: 'P2' },
+            meta: { title: '审计日志', roles: ['super_admin'], stage: 'P2' },
           },
           {
             path: 'conversation-audit',
@@ -106,7 +95,7 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
       },
       {
         path: '/:pathMatch(.*)*',
-        redirect: '/',
+        redirect: () => authenticated && role === 'employee' ? '/employee' : authenticated && role === 'super_admin' ? '/people' : '/login',
         meta: { title: '页面未找到', roles: ['super_admin', 'admin', 'department_lead', 'finance', 'employee'] },
       },
     ],
@@ -114,9 +103,9 @@ export function createAppRouter(options: CreateRouterOptions = {}) {
 
   router.beforeEach((to) => {
     if (to.meta.public) return true
-    if (!authenticated) return to.path === '/' ? true : '/'
+    if (!authenticated) return '/login'
     if (to.meta.roles.includes(role)) return true
-    return to.path === '/' ? true : '/'
+    return role === 'employee' ? '/employee' : role === 'super_admin' ? '/people' : '/login'
   })
 
   router.afterEach((to) => {

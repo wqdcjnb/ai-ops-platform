@@ -1,159 +1,136 @@
 import { z } from 'zod'
-import type { NewApiStatus } from './new-api-status.js'
-import type { PlatformDatabase } from './platform-db.js'
+import type { ExternalProviderPublic } from './external-providers.js'
 
+/**
+ * The administration catalog is a relay-inventory view. It intentionally
+ * never guesses whether a discovered upstream ID supports text, image, video
+ * or audio; one employee-facing virtual model owns that routing decision.
+ */
 export const modelsQuerySchema = z.object({
-  source: z.enum(['demo', 'new_api', 'cpa']).default('demo'),
+  source: z.literal('owned').default('owned'),
   search: z.string().trim().max(60).default(''),
-  capability: z.enum(['all', 'text', 'reasoning', 'translation', 'vision', 'batch']).default('all'),
-  environment: z.enum(['all', 'production', 'experiment', 'unassigned']).default('all'),
-  status: z.enum(['all', 'available', 'degraded', 'unavailable', 'unverified']).default('all'),
+  capability: z.literal('all').default('all'),
+  environment: z.enum(['all', 'production']).default('all'),
+  status: z.enum(['all', 'available', 'unavailable']).default('all'),
+  cacheMode: z.enum(['default', 'refresh']).default('default'),
 })
 
-export const channelsQuerySchema = z.object({
-  source: z.enum(['demo', 'new_api', 'cpa']).default('demo'),
-  environment: z.enum(['all', 'production', 'experiment', 'unassigned']).default('all'),
-  status: z.enum(['all', 'healthy', 'degraded', 'offline', 'unverified']).default('all'),
+const relayChannelSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  provider: z.string().optional(),
+  source: z.literal('external_provider').optional(),
 })
 
 export const modelItemSchema = z.object({
   id: z.string(),
   displayName: z.string(),
-  provider: z.string(),
+  provider: z.literal('中转站聚合'),
   actualModel: z.string(),
   aliases: z.array(z.string()),
-  capabilities: z.array(z.enum(['text', 'reasoning', 'translation', 'vision', 'batch'])),
-  contextWindow: z.number().int().positive().nullable(),
-  region: z.string(),
-  environment: z.enum(['production', 'experiment', 'unassigned']),
-  status: z.enum(['available', 'degraded', 'unavailable', 'unverified']),
-  pricing: z.object({ inputPerMillion: z.number().nonnegative(), outputPerMillion: z.number().nonnegative(), currency: z.literal('USD'), basis: z.enum(['official', 'estimated']), updatedAt: z.string().datetime() }).nullable(),
-  purposes: z.array(z.object({ name: z.string(), alias: z.string(), role: z.enum(['primary', 'fallback']) })),
+  capabilities: z.array(z.never()),
+  contextWindow: z.null(),
+  region: z.literal('第三方中转站'),
+  environment: z.literal('production'),
+  status: z.enum(['available', 'unavailable']),
+  pricing: z.null(),
+  purposes: z.array(z.never()),
   channelIds: z.array(z.string()),
-  // Optional live provenance fields. Legacy/demo adapters may omit them.
-  channels: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-    provider: z.string().optional(),
-    source: z.enum(['cpa_auth_file', 'new_api']).optional(),
-  })).optional(),
-  testResult: z.object({
-    status: z.enum(['passed', 'failed', 'not_tested', 'unavailable']),
-    latencyMs: z.number().int().nonnegative().nullable(),
-    testedAt: z.string().datetime().nullable(),
-    channelId: z.string().nullable(),
-    message: z.string().nullable(),
-    testPath: z.string().nullable(),
-  }).optional(),
-})
-
-export const channelItemSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  provider: z.string(),
-  type: z.enum(['official_api', 'cpa_oauth', 'unknown']),
-  environment: z.enum(['production', 'experiment', 'unassigned']),
-  status: z.enum(['healthy', 'degraded', 'offline', 'unverified']),
-  modelIds: z.array(z.string()),
-  latencyMs: z.number().int().nonnegative().nullable(),
-  successRate: z.number().min(0).max(100).nullable(),
-  balanceState: z.enum(['sufficient', 'low', 'unknown']),
-  rateLimits: z.object({ rpm: z.number().int().positive().nullable(), tpm: z.number().int().positive().nullable() }),
-  recentError: z.object({ category: z.enum(['rate_limit', 'timeout', 'authentication', 'server']), summary: z.string(), occurredAt: z.string().datetime() }).nullable(),
-  checkedAt: z.string().datetime().nullable(),
-  credentialConfigured: z.boolean().nullable(),
+  channels: z.array(relayChannelSchema),
 })
 
 export const modelsResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'new_api', 'cpa']), generatedAt: z.string().datetime(), notice: z.string() }),
-  summary: z.object({ total: z.number().int().nonnegative(), available: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), production: z.number().int().nonnegative(), experiment: z.number().int().nonnegative() }),
-  options: z.object({ capabilities: z.array(z.object({ id: z.enum(['text', 'reasoning', 'translation', 'vision', 'batch']), label: z.string() })) }),
+  meta: z.object({ source: z.literal('owned'), generatedAt: z.string().datetime(), notice: z.string() }),
+  summary: z.object({
+    total: z.number().int().nonnegative(),
+    available: z.number().int().nonnegative(),
+    degraded: z.literal(0),
+    production: z.number().int().nonnegative(),
+    experiment: z.literal(0),
+  }),
+  options: z.object({ capabilities: z.array(z.never()) }),
   items: z.array(modelItemSchema),
   total: z.number().int().nonnegative(),
 })
 
-export const channelsResponseSchema = z.object({
-  meta: z.object({ source: z.enum(['demo', 'new_api', 'cpa']), generatedAt: z.string().datetime(), notice: z.string(), healthCacheSeconds: z.number().int().nonnegative() }),
-  summary: z.object({ total: z.number().int().nonnegative(), healthy: z.number().int().nonnegative(), degraded: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }),
-  items: z.array(channelItemSchema),
-  total: z.number().int().nonnegative(),
-})
-
-export const channelIdParamsSchema = z.object({
-  id: z.string().regex(/^channel-[a-z0-9-]+$/),
-})
-
-export const channelCheckBodySchema = z.object({
-  idempotencyKey: z.string().regex(/^channel-check-[a-z0-9-]{8,96}$/),
-  reason: z.string().trim().min(8).max(200),
-  acknowledgeSynthetic: z.literal(true),
-})
-
-export const channelCheckResponseSchema = z.object({
-  meta: z.object({ source: z.literal('database'), completedAt: z.string().datetime(), notice: z.string() }),
-  channel: channelItemSchema,
-  operation: z.object({ idempotencyKey: z.string(), idempotent: z.boolean(), auditEventId: z.string() }),
-})
-
 export type ModelsQuery = z.infer<typeof modelsQuerySchema>
-export type ChannelsQuery = z.infer<typeof channelsQuerySchema>
 export type ModelsResponse = z.infer<typeof modelsResponseSchema>
-export type ChannelsResponse = z.infer<typeof channelsResponseSchema>
-export type ModelItem = z.infer<typeof modelItemSchema>
-export type ChannelItem = z.infer<typeof channelItemSchema>
-export type ChannelCheckBody = z.infer<typeof channelCheckBodySchema>
-export type ChannelCheckResponse = z.infer<typeof channelCheckResponseSchema>
 
-const pricedAt = '2026-09-15T00:00:00.000Z'
-const demoModels: ModelItem[] = [
-  { id: 'model-mini', displayName: '通用轻量模型', provider: 'OpenAI Compatible', actualModel: 'gpt-5.1-mini', aliases: ['ecommerce-copy', 'ecommerce-service', 'ecommerce-general'], capabilities: ['text', 'translation', 'batch'], contextWindow: 128_000, region: '中国区', environment: 'production', status: 'available', pricing: { inputPerMillion: 0.25, outputPerMillion: 2, currency: 'USD', basis: 'official', updatedAt: pricedAt }, purposes: [{ name: '商品文案', alias: 'ecommerce-copy', role: 'primary' }, { name: '客服回复', alias: 'ecommerce-service', role: 'primary' }, { name: '策略分析', alias: 'ecommerce-analysis', role: 'fallback' }], channelIds: ['channel-official-cn-1', 'channel-official-cn-2'] },
-  { id: 'model-general', displayName: '通用高能力模型', provider: 'OpenAI Compatible', actualModel: 'gpt-5.1', aliases: ['ecommerce-analysis', 'ecommerce-translate'], capabilities: ['text', 'reasoning', 'translation'], contextWindow: 256_000, region: '全球区', environment: 'production', status: 'degraded', pricing: { inputPerMillion: 1.25, outputPerMillion: 10, currency: 'USD', basis: 'official', updatedAt: pricedAt }, purposes: [{ name: '策略分析', alias: 'ecommerce-analysis', role: 'primary' }, { name: '多语翻译', alias: 'ecommerce-translate', role: 'primary' }], channelIds: ['channel-official-global-1'] },
-  { id: 'model-vision', displayName: '视觉检查模型', provider: 'OpenAI Compatible', actualModel: 'gpt-5.1-vision', aliases: ['ecommerce-image-check'], capabilities: ['text', 'vision'], contextWindow: 128_000, region: '中国区', environment: 'production', status: 'available', pricing: { inputPerMillion: 1.5, outputPerMillion: 8, currency: 'USD', basis: 'official', updatedAt: pricedAt }, purposes: [{ name: '图片检查', alias: 'ecommerce-image-check', role: 'primary' }], channelIds: ['channel-official-vision-1'] },
-  { id: 'model-lab', displayName: 'CPA 高能力实验', provider: 'CLIProxyAPI', actualModel: 'pro-oauth-lab', aliases: ['ecommerce-pro-lab'], capabilities: ['text', 'reasoning'], contextWindow: 200_000, region: '隔离实验区', environment: 'experiment', status: 'available', pricing: { inputPerMillion: 0, outputPerMillion: 0, currency: 'USD', basis: 'estimated', updatedAt: pricedAt }, purposes: [{ name: '高能力实验', alias: 'ecommerce-pro-lab', role: 'primary' }], channelIds: ['channel-cpa-lab-1'] },
-]
+function catalogItems(providers: readonly ExternalProviderPublic[]) {
+  type Aggregate = {
+    displayName: string
+    available: boolean
+    channels: Array<{ id: string; name: string; provider: string; source: 'external_provider' }>
+  }
 
-function atMinutesAgo(now: Date, minutes: number) { return new Date(now.getTime() - minutes * 60_000).toISOString() }
-function createChannels(now: Date): ChannelItem[] {
-  return [
-    { id: 'channel-official-cn-1', name: 'Official CN · 01', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'healthy', modelIds: ['model-mini'], latencyMs: 1_420, successRate: 99.6, balanceState: 'sufficient', rateLimits: { rpm: 500, tpm: 1_000_000 }, recentError: null, checkedAt: atMinutesAgo(now, 1), credentialConfigured: true },
-    { id: 'channel-official-cn-2', name: 'Official CN · 02', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'healthy', modelIds: ['model-mini'], latencyMs: 1_680, successRate: 99.2, balanceState: 'sufficient', rateLimits: { rpm: 400, tpm: 800_000 }, recentError: { category: 'rate_limit', summary: '一次短时 429，已按退避策略恢复', occurredAt: atMinutesAgo(now, 74) }, checkedAt: atMinutesAgo(now, 1), credentialConfigured: true },
-    { id: 'channel-official-global-1', name: 'Official Global · 01', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'degraded', modelIds: ['model-general'], latencyMs: 3_960, successRate: 96.8, balanceState: 'low', rateLimits: { rpm: 180, tpm: 360_000 }, recentError: { category: 'timeout', summary: 'P95 延迟升高，策略分析已允许组内降级', occurredAt: atMinutesAgo(now, 18) }, checkedAt: atMinutesAgo(now, 1), credentialConfigured: true },
-    { id: 'channel-official-vision-1', name: 'Official Vision · 01', provider: 'OpenAI Compatible', type: 'official_api', environment: 'production', status: 'healthy', modelIds: ['model-vision'], latencyMs: 3_240, successRate: 98.4, balanceState: 'sufficient', rateLimits: { rpm: 80, tpm: 240_000 }, recentError: null, checkedAt: atMinutesAgo(now, 2), credentialConfigured: true },
-    { id: 'channel-cpa-lab-1', name: 'CPA Lab · 01', provider: 'CLIProxyAPI', type: 'cpa_oauth', environment: 'experiment', status: 'healthy', modelIds: ['model-lab'], latencyMs: 5_820, successRate: 94.5, balanceState: 'unknown', rateLimits: { rpm: 30, tpm: 100_000 }, recentError: { category: 'server', summary: '实验渠道曾返回 5xx，未影响正式业务', occurredAt: atMinutesAgo(now, 230) }, checkedAt: atMinutesAgo(now, 3), credentialConfigured: true },
-  ]
+  const records = new Map<string, Aggregate>()
+  for (const provider of providers) {
+    const available = provider.enabled && provider.credentialConfigured
+    for (const model of provider.models) {
+      const upstreamId = model.upstreamId.trim()
+      if (!upstreamId) continue
+      const key = upstreamId.toLocaleLowerCase('en-US')
+      const aggregate = records.get(key) ?? { displayName: upstreamId, available: false, channels: [] }
+      aggregate.available ||= available
+      if (!aggregate.channels.some((channel) => channel.id === 'external-provider-' + provider.id)) {
+        aggregate.channels.push({
+          id: 'external-provider-' + provider.id,
+          name: provider.name,
+          provider: provider.name,
+          source: 'external_provider',
+        })
+      }
+      records.set(key, aggregate)
+    }
+  }
+
+  return [...records.values()]
+    .map((item) => ({
+      id: 'relay-model-' + encodeURIComponent(item.displayName.toLocaleLowerCase('en-US')),
+      displayName: item.displayName,
+      provider: '中转站聚合' as const,
+      actualModel: item.displayName,
+      aliases: [],
+      capabilities: [],
+      contextWindow: null,
+      region: '第三方中转站' as const,
+      environment: 'production' as const,
+      status: item.available ? 'available' as const : 'unavailable' as const,
+      pricing: null,
+      purposes: [],
+      channelIds: item.channels.map((channel) => channel.id),
+      channels: item.channels.sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')),
+    }))
+    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN'))
 }
 
-function noticeFor(newApi: NewApiStatus, subject: string) {
-  if (newApi.state === 'ready') return `当前为模拟数据，供开发与演示使用；可切换到 New API 查看已配置的${subject}。`
-  if (newApi.state === 'reachable') return `New API 服务可达但尚未配置管理认证；${subject}为演示数据`
-  if (newApi.state === 'auth_required') return `New API 管理认证未通过；${subject}为演示数据`
-  return `New API 当前离线；${subject}为演示数据`
-}
-
-export function createDemoModels(query: ModelsQuery, newApi: NewApiStatus, now = new Date()): ModelsResponse {
+export function createOwnedModels(query: ModelsQuery, providers: readonly ExternalProviderPublic[], now = new Date()): ModelsResponse {
+  const all = catalogItems(providers)
   const search = query.search.toLocaleLowerCase('zh-CN')
-  const items = demoModels.filter((item) => {
-    const matchesSearch = !search || [item.displayName, item.provider, item.actualModel, item.region, ...item.aliases, ...item.purposes.flatMap((purpose) => [purpose.name, purpose.alias])].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
-    return matchesSearch && (query.capability === 'all' || item.capabilities.includes(query.capability)) && (query.environment === 'all' || item.environment === query.environment) && (query.status === 'all' || item.status === query.status)
+  const items = all.filter((item) => {
+    const match = !search || [item.displayName, item.actualModel, item.provider].some((value) => value.toLocaleLowerCase('zh-CN').includes(search))
+    return match
+      && (query.environment === 'all' || item.environment === query.environment)
+      && (query.status === 'all' || item.status === query.status)
   })
-  return { meta: { source: 'demo', generatedAt: now.toISOString(), notice: noticeFor(newApi, '模型目录') }, summary: { total: demoModels.length, available: demoModels.filter((item) => item.status === 'available').length, degraded: demoModels.filter((item) => item.status === 'degraded').length, production: demoModels.filter((item) => item.environment === 'production').length, experiment: demoModels.filter((item) => item.environment === 'experiment').length }, options: { capabilities: [{ id: 'text', label: '文本' }, { id: 'reasoning', label: '推理' }, { id: 'translation', label: '翻译' }, { id: 'vision', label: '视觉' }, { id: 'batch', label: '批处理' }] }, items, total: items.length }
-}
-
-export function createDemoChannels(query: ChannelsQuery, newApi: NewApiStatus, now = new Date()): ChannelsResponse {
-  return createChannelsResponse(query, newApi, createChannels(now), now, 0)
-}
-
-export function createDatabaseDemoChannels(database: PlatformDatabase, query: ChannelsQuery, newApi: NewApiStatus, now = new Date()): ChannelsResponse {
-  const snapshots = new Map(database.listSyntheticChannelChecks().map((item) => [item.channelId, item]))
-  const all = createChannels(now).map((item) => {
-    const snapshot = snapshots.get(item.id)
-    return snapshot ? { ...item, status: snapshot.status, latencyMs: snapshot.latencyMs, successRate: snapshot.successRate, checkedAt: snapshot.checkedAt } : item
-  })
-  return createChannelsResponse(query, newApi, all, now, snapshots.size)
-}
-
-function createChannelsResponse(query: ChannelsQuery, newApi: NewApiStatus, all: ChannelItem[], now: Date, localSnapshotCount: number): ChannelsResponse {
-  const items = all.filter((item) => (query.environment === 'all' || item.environment === query.environment) && (query.status === 'all' || item.status === query.status))
-  const localNotice = localSnapshotCount > 0 ? `；其中 ${localSnapshotCount} 条为 SQLite 本地模拟复检快照。` : ''
-  return { meta: { source: 'demo', generatedAt: now.toISOString(), notice: `${noticeFor(newApi, '渠道健康')}${localNotice}`, healthCacheSeconds: 30 }, summary: { total: all.length, healthy: all.filter((item) => item.status === 'healthy').length, degraded: all.filter((item) => item.status === 'degraded').length, offline: all.filter((item) => item.status === 'offline').length }, items, total: items.length }
+  const routable = providers.filter((provider) => provider.enabled && provider.credentialConfigured).length
+  return {
+    meta: {
+      source: 'owned',
+      generatedAt: now.toISOString(),
+      notice: all.length
+        ? '已登记 ' + providers.length + ' 个第三方账号，其中 ' + routable + ' 个可路由；同名模型已合并全部来源。员工 Key 只调用 AI OPS。'
+        : '暂未同步任何中转站模型；请先在“第三方账号”接入账号并同步全部模型。',
+    },
+    summary: {
+      total: all.length,
+      available: all.filter((item) => item.status === 'available').length,
+      degraded: 0,
+      production: all.length,
+      experiment: 0,
+    },
+    options: { capabilities: [] },
+    items,
+    total: items.length,
+  }
 }

@@ -5,6 +5,10 @@ export interface OpenAiModel {
   object: 'model'
   created: number
   owned_by: string
+  /** Some compatible catalogs expose a non-standard modality/capability
+   * field. Keep it internal so the relay router can make a safer choice
+   * without promising those hints in the public model catalog. */
+  capabilityHints?: string[]
 }
 
 export interface OpenAiChatRequest {
@@ -23,9 +27,23 @@ export interface OpenAiResponsesEvent {
   data: Record<string, unknown>
 }
 
-/** Per-request credential forwarding context. Kept in memory only. */
+/** JSON-shaped OpenAI-compatible media requests, including image generation,
+ * video jobs and speech synthesis. File-upload endpoints deliberately stay
+ * outside this transport because they require multipart streaming. */
+export interface OpenAiMediaRequest {
+  model: string
+  [key: string]: unknown
+}
+
+/** Per-request credential forwarding and telemetry context. Kept in memory only. */
 export interface GatewayRequestContext {
   authorization?: string
+  /**
+   * Internal-only route telemetry. The relay invokes this with the model it
+   * selected (and, when available, the model reported by the upstream) while
+   * continuing to expose only the public AI OPS model to the client.
+   */
+  onActualModel?: (modelId: string) => void
 }
 
 export interface GatewayUpstream {
@@ -35,6 +53,9 @@ export interface GatewayUpstream {
   /** Native Responses support is optional so test and legacy adapters can stay chat-only. */
   responses?(request: OpenAiResponsesRequest, signal?: AbortSignal, context?: GatewayRequestContext): Promise<Record<string, unknown>>
   responsesStream?(request: OpenAiResponsesRequest, onEvent: (event: OpenAiResponsesEvent) => void, signal?: AbortSignal, requestId?: string, context?: GatewayRequestContext): Promise<void>
+  /** Forward a JSON OpenAI-compatible media request without exposing the
+   * selected relay or its credential to the client. */
+  media?(path: '/images/generations' | '/videos' | '/audio/speech', request: OpenAiMediaRequest, signal?: AbortSignal, context?: GatewayRequestContext): Promise<Record<string, unknown>>
   cancel(requestId: string, signal?: AbortSignal): Promise<void>
 }
 
@@ -43,7 +64,9 @@ export type GatewayUpstreamErrorCode =
   | 'GATEWAY_UPSTREAM_TIMEOUT'
   | 'GATEWAY_UPSTREAM_UNAVAILABLE'
   | 'GATEWAY_UPSTREAM_RATE_LIMITED'
+  | 'GATEWAY_UPSTREAM_CREDIT_EXHAUSTED'
   | 'GATEWAY_UPSTREAM_AUTH_FAILED'
+  | 'GATEWAY_UPSTREAM_NOT_FOUND'
   | 'GATEWAY_UPSTREAM_INVALID_RESPONSE'
   | 'GATEWAY_UPSTREAM_CANCELLED'
   | 'GATEWAY_UPSTREAM_ERROR'
@@ -74,8 +97,9 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
 
   async listModels(signal?: AbortSignal, context?: GatewayRequestContext) {
     const payload = await this.requestJson('/models', { method: 'GET' }, signal, context)
-    if (!isRecord(payload) || !Array.isArray(payload.data)) throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游模型列表格式无效')
-    return payload.data.flatMap((item) => parseModel(item))
+    const entries = modelEntries(payload)
+    if (!entries) throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游模型列表格式无效')
+    return entries.flatMap((item) => parseModel(item))
   }
 
   async chatCompletion(request: OpenAiChatRequest, signal?: AbortSignal, context?: GatewayRequestContext) {
@@ -95,6 +119,15 @@ export class OpenAiCompatibleAdapter implements GatewayUpstream {
       body: JSON.stringify({ ...request, stream: false }),
     }, signal, context)
     if (!isRecord(payload)) throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游 Responses 响应格式无效')
+    return payload
+  }
+
+  async media(path: '/images/generations' | '/videos' | '/audio/speech', request: OpenAiMediaRequest, signal?: AbortSignal, context?: GatewayRequestContext) {
+    const payload = await this.requestJson(path, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }, signal, context)
+    if (!isRecord(payload)) throw new GatewayUpstreamError('GATEWAY_UPSTREAM_INVALID_RESPONSE', 502, '上游多模态响应格式无效')
     return payload
   }
 
@@ -304,19 +337,77 @@ function parseJson(text: string): unknown {
 
 function mapUpstreamStatus(status: number) {
   if (status === 401 || status === 403) return new GatewayUpstreamError('GATEWAY_UPSTREAM_AUTH_FAILED', 502, '上游认证失败')
+  if (status === 402) return new GatewayUpstreamError('GATEWAY_UPSTREAM_CREDIT_EXHAUSTED', 502, '上游账户余额或配额不足')
+  if (status === 404) return new GatewayUpstreamError('GATEWAY_UPSTREAM_NOT_FOUND', 502, '上游未提供所请求的接口')
   if (status === 429) return new GatewayUpstreamError('GATEWAY_UPSTREAM_RATE_LIMITED', 429, '上游请求频率受限')
   if (status >= 500) return new GatewayUpstreamError('GATEWAY_UPSTREAM_ERROR', 502, '上游服务异常')
   return new GatewayUpstreamError('GATEWAY_UPSTREAM_ERROR', 502, '上游拒绝了请求')
 }
 
+/** A few compatible services return a direct array or `models` rather than
+ * OpenAI's canonical `{ data: [...] }`. Supporting those safe shapes keeps
+ * model discovery interoperable without accepting an arbitrary response. */
+function modelEntries(payload: unknown, depth = 0): unknown[] | null {
+  if (depth > 3) return null
+  if (Array.isArray(payload)) return payload
+  if (!isRecord(payload)) return null
+  for (const key of ['data', 'models', 'items', 'results', 'model_list', 'modelList']) {
+    const value = payload[key]
+    if (Array.isArray(value)) return value
+    if (isRecord(value)) {
+      const nested = modelEntries(value, depth + 1)
+      if (nested) return nested
+    }
+  }
+  return null
+}
+
 function parseModel(value: unknown): OpenAiModel[] {
-  if (!isRecord(value) || typeof value.id !== 'string') return []
+  if (typeof value === 'string' && value.trim()) {
+    return [{ id: value.trim(), object: 'model', created: 0, owned_by: 'upstream' }]
+  }
+  if (!isRecord(value)) return []
+  const id = [value.id, value.model, value.model_id, value.modelId, value.name]
+    .find((candidate): candidate is string => typeof candidate === 'string' && Boolean(candidate.trim()))
+  if (!id) return []
+  const capabilityHints = modelCapabilityHints(value)
   return [{
-    id: value.id,
+    id: id.trim(),
     object: 'model',
     created: typeof value.created === 'number' ? value.created : 0,
     owned_by: typeof value.owned_by === 'string' ? value.owned_by : 'upstream',
+    ...(capabilityHints.length ? { capabilityHints } : {}),
   }]
+}
+
+/** Model list responses are not standardized outside OpenAI's core fields.
+ * Read only the common metadata keys, flatten simple strings/arrays/boolean
+ * flags, and leave the rest untouched. This is deliberately a hint, never a
+ * claim made to employees or a substitute for a provider-specific adapter. */
+function modelCapabilityHints(model: Record<string, unknown>) {
+  const hints = new Set<string>()
+  const collect = (value: unknown, depth = 0): void => {
+    if (depth > 2 || value === null || value === undefined) return
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (normalized) hints.add(normalized)
+      return
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry) => collect(entry, depth + 1))
+      return
+    }
+    if (!isRecord(value)) return
+    for (const [key, nested] of Object.entries(value)) {
+      if (nested === true) hints.add(key.toLowerCase())
+      else if (typeof nested === 'string' || Array.isArray(nested)) collect(nested, depth + 1)
+    }
+  }
+
+  for (const key of ['capabilities', 'modalities', 'input_modalities', 'output_modalities', 'inputModalities', 'outputModalities', 'type', 'category', 'task', 'tasks']) {
+    collect(model[key])
+  }
+  return [...hints].slice(0, 24)
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

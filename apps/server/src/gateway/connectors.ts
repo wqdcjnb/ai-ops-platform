@@ -1,77 +1,28 @@
-import type { GatewayConfig, GatewayMode } from '../gateway-config.js'
-import { OpenAiCompatibleAdapter, type GatewayRequestContext, type GatewayUpstream } from './openai-compatible.js'
+import type { GatewayConfig } from '../gateway-config.js'
+import { OpenAiCompatibleAdapter, type GatewayUpstream } from './openai-compatible.js'
 
 export interface GatewayConnectorDescriptor {
-  id: GatewayMode
+  id: 'relay'
   label: string
-  environment: 'production' | 'experiment'
+  environment: 'production'
   configured: boolean
 }
 
-const connectorMetadata: Record<GatewayMode, Omit<GatewayConnectorDescriptor, 'configured'>> = {
-  standalone: { id: 'standalone', label: '独立网关', environment: 'production' },
-  new_api: { id: 'new_api', label: 'New API 连接器', environment: 'production' },
-  cpa: { id: 'cpa', label: 'CPA Codex OAuth', environment: 'production' },
-}
-
+/** The only connector exposed by this product is the managed relay gateway. */
 export function describeGatewayConnector(config: GatewayConfig): GatewayConnectorDescriptor {
-  return { ...connectorMetadata[config.mode], configured: config.upstreamConfigured }
+  return {
+    id: 'relay',
+    label: '中转站统一模型网关',
+    environment: 'production',
+    configured: config.upstreamConfigured,
+  }
 }
 
 /**
- * Every mode gets its own adapter instance. The adapters currently share the
- * OpenAI-compatible transport, but the mode remains explicit so a future
- * connector cannot silently become a fallback for another connector.
+ * Used only when a caller supplies a short-lived relay-specific config. The
+ * application normally wraps it with ExternalProviderGatewayUpstream, which
+ * obtains the URL and credential from the encrypted registry.
  */
 export function createGatewayConnector(config: GatewayConfig): GatewayUpstream {
-  return new ModeBoundOpenAiAdapter(config, config.mode)
-}
-
-class ModeBoundOpenAiAdapter implements GatewayUpstream {
-  private readonly adapter: OpenAiCompatibleAdapter
-
-  constructor(private readonly config: GatewayConfig, private readonly mode: GatewayMode) {
-    this.adapter = new OpenAiCompatibleAdapter(config)
-  }
-
-  listModels(signal?: AbortSignal, context?: GatewayRequestContext) {
-    return this.adapter.listModels(signal, context)
-  }
-
-  chatCompletion(request: Parameters<GatewayUpstream['chatCompletion']>[0], signal?: AbortSignal, context?: GatewayRequestContext) {
-    return this.adapter.chatCompletion(request, signal, context)
-  }
-
-  chatCompletionStream(
-    request: Parameters<GatewayUpstream['chatCompletionStream']>[0],
-    onChunk: Parameters<GatewayUpstream['chatCompletionStream']>[1],
-    signal?: AbortSignal,
-    requestId?: string,
-    context?: GatewayRequestContext,
-  ) {
-    return this.adapter.chatCompletionStream(request, onChunk, signal, requestId, context)
-  }
-
-  responses(request: Parameters<NonNullable<GatewayUpstream['responses']>>[0], signal?: AbortSignal, context?: GatewayRequestContext) {
-    return this.adapter.responses!(request, signal, context)
-  }
-
-  responsesStream(
-    request: Parameters<NonNullable<GatewayUpstream['responsesStream']>>[0],
-    onEvent: Parameters<NonNullable<GatewayUpstream['responsesStream']>>[1],
-    signal?: AbortSignal,
-    requestId?: string,
-    context?: GatewayRequestContext,
-  ) {
-    return this.adapter.responsesStream!(request, onEvent, signal, requestId, context)
-  }
-
-  cancel(requestId: string, signal?: AbortSignal) {
-    // The mode is intentionally captured by the adapter boundary. This keeps
-    // cancellation scoped to the active connector and prevents cross-connector
-    // request cancellation when multiple gateway instances are hosted together.
-    void this.mode
-    void this.config
-    return this.adapter.cancel(requestId, signal)
-  }
+  return new OpenAiCompatibleAdapter(config)
 }

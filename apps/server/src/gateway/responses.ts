@@ -11,13 +11,13 @@ export const responsesRequestSchema = z.object({
   model: z.string().trim().min(1).max(128),
   input: z.union([z.string(), z.array(responseInputItemSchema).min(1).max(100)]),
   instructions: z.string().trim().max(20_000).optional(),
-  stream: z.boolean().optional().default(false),
+  stream: z.boolean().optional(),
   max_output_tokens: z.number().int().positive().max(1_000_000).optional(),
   temperature: z.number().finite().min(0).max(2).optional(),
   top_p: z.number().finite().min(0).max(1).optional(),
 }).passthrough()
 
-// CPA may return additional Responses fields (or omit the SDK-only
+// OpenAI-compatible relays may return additional Responses fields (or omit the SDK-only
 // `output_text` convenience field). Keep the gateway response transparent so
 // Codex clients receive the native payload unchanged.
 export const responsesResponseSchema = z.record(z.string(), z.unknown())

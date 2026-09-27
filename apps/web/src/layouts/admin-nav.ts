@@ -2,9 +2,7 @@ import type { Component } from 'vue'
 import {
   IconBrain,
   IconBuildingCommunity,
-  IconFileAnalytics,
-  IconKey,
-  IconLayoutDashboard,
+  IconChartBar,
   IconServer2,
   IconShieldCheck,
   IconUsers,
@@ -24,29 +22,22 @@ export interface AdminNavSection {
 
 export const adminNavSections: AdminNavSection[] = [
   {
-    label: '工作台',
-    items: [
-      { label: '统一入口', icon: IconLayoutDashboard, to: '/' },
-    ],
-  },
-  {
     label: '人员与访问',
     items: [
-      { label: '人员与部门', icon: IconUsers, to: '/people' },
-      { label: 'Key 管理', icon: IconKey, to: '/keys' },
+      { label: '人员信息管理', icon: IconUsers, to: '/people' },
     ],
   },
   {
     label: '模型治理',
     items: [
       { label: '模型目录', icon: IconBrain, to: '/models' },
-      { label: '上游账号', icon: IconServer2, to: '/upstreams' },
+      { label: '第三方账号', icon: IconServer2, to: '/external-providers' },
     ],
   },
   {
     label: '运营监控',
     items: [
-      { label: '模型调用分析', icon: IconFileAnalytics, to: '/usage' },
+      { label: '模型调用分析', icon: IconChartBar, to: '/usage' },
     ],
   },
   {

@@ -3,15 +3,18 @@ import { loadGatewayConfig } from '../gateway-config.js'
 import { createGatewayConnector, describeGatewayConnector } from './connectors.js'
 import { GatewayUpstreamError } from './openai-compatible.js'
 
-describe('gateway connector boundaries', () => {
-  it('describes each connector with an explicit environment', () => {
-    expect(describeGatewayConnector(loadGatewayConfig({}))).toMatchObject({ id: 'cpa', label: 'CPA Codex OAuth', environment: 'production', configured: false })
-    expect(describeGatewayConnector(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'new_api' }))).toMatchObject({ id: 'new_api', label: 'New API 连接器', environment: 'production' })
-    expect(describeGatewayConnector(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'cpa' }))).toMatchObject({ id: 'cpa', label: 'CPA Codex OAuth', environment: 'production' })
+describe('managed relay connector boundary', () => {
+  it('describes only the managed relay gateway', () => {
+    expect(describeGatewayConnector(loadGatewayConfig({}))).toEqual({
+      id: 'relay',
+      label: '中转站统一模型网关',
+      environment: 'production',
+      configured: false,
+    })
   })
 
-  it('keeps an unconfigured connector unavailable instead of falling through to another mode', async () => {
-    const connector = createGatewayConnector(loadGatewayConfig({ AI_OPS_GATEWAY_MODE: 'new_api' }))
+  it('does not provide a process-wide upstream fallback', async () => {
+    const connector = createGatewayConnector(loadGatewayConfig({}))
     await expect(connector.listModels()).rejects.toMatchObject({ code: 'GATEWAY_UPSTREAM_NOT_CONFIGURED' } satisfies Partial<GatewayUpstreamError>)
   })
 })
