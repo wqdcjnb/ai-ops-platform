@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
   [switch]$NoBrowser,
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  [switch]$PrepareOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,13 +20,15 @@ function Write-AiOpsEnvironmentFile {
 
 function New-AiOpsSecret {
   $bytes = [byte[]]::new(32)
-  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-  return [Convert]::ToHexString($bytes).ToLowerInvariant()
+  $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
+  return [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
 }
 
 function New-AiOpsPassword {
   $bytes = [byte[]]::new(18)
-  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
   return ([Convert]::ToBase64String($bytes).Replace('+', '-').Replace('/', '_').TrimEnd('='))
 }
 
@@ -113,8 +116,9 @@ function Initialize-AiOpsEnvironment {
   if ($created) {
     # A missing .env cannot safely be recreated over a known data volume: the
     # encryption secrets and bootstrap password must match the original file.
-    & cmd.exe /d /c 'docker volume inspect ai-ops-platform_platform-data >NUL 2>NUL'
-    if ($LASTEXITCODE -eq 0) {
+    $existingVolumes = @(& docker volume ls --format '{{.Name}}')
+    if ($LASTEXITCODE -ne 0) { throw '无法检查已有数据卷，已停止初始化。' }
+    if (@($existingVolumes | Where-Object { $_ -in @('ai-ops-platform_platform-data', 'ai-ops-platform_postgres-v2-data', 'ai-ops-platform_redis-v2-data') }).Count -gt 0) {
       throw '检测到已有 AI OPS 数据卷，但 .env 已缺失。请从部署备份恢复原 .env；不要生成新密钥，否则已保存的第三方账号凭据将无法读取。'
     }
     Write-Host ''
@@ -176,8 +180,33 @@ function Initialize-AiOpsEnvironment {
 
   foreach ($secretName in @('AI_OPS_KEY_ENCRYPTION_SECRET', 'AI_OPS_AUDIT_ENCRYPTION_SECRET')) {
     if (Test-AiOpsPlaceholder (Get-AiOpsEnvironmentValue -Name $secretName)) {
+      $projectName = Get-AiOpsEnvironmentValue -Name 'COMPOSE_PROJECT_NAME'
+      $existingVolumes = @(& docker volume ls --format '{{.Name}}')
+      if ($LASTEXITCODE -ne 0) { throw '无法检查已有数据卷，已停止生成密钥。' }
+      if ($existingVolumes -contains "${projectName}_platform-data" -or $existingVolumes -contains "${projectName}_postgres-v2-data") {
+        throw "$secretName 缺失，但已有平台数据。请从备份恢复原加密密钥，不能为旧数据生成新密钥。"
+      }
       Set-AiOpsEnvironmentValue -Name $secretName -Value (New-AiOpsSecret)
       Write-Host "$secretName 已生成新的本机密钥。" -ForegroundColor Cyan
+    }
+  }
+
+  # Add database credentials without changing any existing application key,
+  # employee Key, administrator password or encryption secret.
+  foreach ($storage in @(
+    @{ Name = 'POSTGRES_PASSWORD'; Volume = 'postgres-v2-data' },
+    @{ Name = 'REDIS_PASSWORD'; Volume = 'redis-v2-data' }
+  )) {
+    $value = Get-AiOpsEnvironmentValue -Name $storage.Name
+    if (Test-AiOpsPlaceholder $value) {
+      $projectName = Get-AiOpsEnvironmentValue -Name 'COMPOSE_PROJECT_NAME'
+      $volumeName = "${projectName}_$($storage.Volume)"
+      $foundVolumes = & docker volume ls --format '{{.Name}}'
+      if ($foundVolumes -contains $volumeName) { throw "$($storage.Name) 缺失，但已有数据库数据卷。请恢复原 .env，不要重新生成数据库密码。" }
+      Set-AiOpsEnvironmentValue -Name $storage.Name -Value (New-AiOpsSecret)
+      Write-Host "$($storage.Name) 已生成并保存在本机 .env。" -ForegroundColor Cyan
+    } elseif ($value -notmatch '^[A-Za-z0-9._-]{16,200}$') {
+      throw "$($storage.Name) 应使用至少 16 位英文、数字、点、下划线或连字符，以安全构造容器连接地址。"
     }
   }
 
@@ -228,6 +257,7 @@ Push-Location $projectDirectory
 try {
   $script:composeCommand = Select-AiOpsComposeCommand
   $firstCredentials = Initialize-AiOpsEnvironment
+  if ($PrepareOnly) { Write-Host '环境配置已准备，未重启服务。'; return }
   $upArguments = @('-f', $composePath, 'up', '-d', '--remove-orphans')
   if (-not $SkipBuild) { $upArguments += '--build' }
   Write-Host '正在启动 AI OPS Docker 服务…' -ForegroundColor Cyan

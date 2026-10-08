@@ -1,6 +1,7 @@
 import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
+import { RuntimeCoordinator } from './runtime-coordinator.js'
 import Fastify, { LogController } from 'fastify'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { serializerCompiler, validatorCompiler, type ZodTypeProvider } from 'fastify-type-provider-zod'
@@ -46,7 +47,7 @@ import {
   listExternalProviderPresets,
   type ExternalProviderRegistry,
 } from './external-providers.js'
-import { createLocalModelAnalytics, modelAnalyticsQuerySchema } from './model-analytics.js'
+import { createDatabaseModelAnalytics, modelAnalyticsQuerySchema } from './model-analytics.js'
 
 const SYSTEM_AUDIT_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 
@@ -65,7 +66,7 @@ const externalProviderDiscoveryInputSchema = z.object({
   apiKey: z.string().trim().min(1).max(2048),
 })
 const externalProviderModelTestInputSchema = externalProviderDiscoveryInputSchema.extend({
-  modelIds: z.array(externalProviderModelIdSchema).min(1).max(500),
+  modelIds: z.array(externalProviderModelIdSchema).min(1).max(10_000),
 })
 const externalProviderEnabledInputSchema = z.object({ enabled: z.boolean() })
 const employeePortalKeyOperationSchema = z.object({
@@ -105,7 +106,7 @@ export interface BuildAppOptions {
 function publicGatewayBaseUrlForCodex() {
   try {
     const url = new URL(process.env.AI_OPS_PUBLIC_GATEWAY_BASE_URL?.trim() || 'http://127.0.0.1:4175')
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('unsupported gateway protocol')
+    if(url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('unsupported gateway protocol')
     url.username = ''
     url.password = ''
     url.search = ''
@@ -136,21 +137,21 @@ function errorPayload(code: string, message: string, requestId: string) {
 }
 
 function deviceSetupFailureMessage(failureCode: string | null) {
-  if (failureCode === 'WORKBUDDY_INVALID_JSON') return 'WorkBuddy 的 models.json 不是有效 JSON，未修改原文件。请修复该文件后重新导入。'
-  if (failureCode === 'WORKBUDDY_UNSUPPORTED_ROOT') return 'WorkBuddy 的 models.json 顶层不是模型数组，且无法安全迁移；原文件已保留。'
-  if (failureCode === 'WORKBUDDY_MODEL_ID_CONFLICT') return 'WorkBuddy 已有其他自定义模型使用了保留 ID “ai-ops”。为避免覆盖原模型，本次未作修改；请先修改该模型 ID 后重新导入。'
-  if (failureCode === 'KEY_UNAVAILABLE' || failureCode === 'SECRET_UNAVAILABLE') return '当前平台 Key 不可用，请刷新员工门户后重新申请或导入。'
+  if(failureCode === 'WORKBUDDY_INVALID_JSON') return 'WorkBuddy 的 models.json 不是有效 JSON，未修改原文件。请修复该文件后重新导入。'
+  if(failureCode === 'WORKBUDDY_UNSUPPORTED_ROOT') return 'WorkBuddy 的 models.json 顶层不是模型数组，且无法安全迁移；原文件已保留。'
+  if(failureCode === 'WORKBUDDY_MODEL_ID_CONFLICT') return 'WorkBuddy 已有其他自定义模型使用了保留 ID “ai-ops”。为避免覆盖原模型，本次未作修改；请先修改该模型 ID 后重新导入。'
+  if(failureCode === 'KEY_UNAVAILABLE' || failureCode === 'SECRET_UNAVAILABLE') return '当前平台 Key 不可用，请刷新员工门户后重新申请或导入。'
   return '本机助手未能写入客户端配置。请重新导入；如仍失败，请联系管理员。'
 }
 
 function parseInput(schema: z.ZodTypeAny, input: unknown, requestId: string, reply: any): any {
   const parsed = schema.safeParse(input)
-  if (parsed.success) return parsed.data
+  if(parsed.success) return parsed.data
   reply.status(400).send(errorPayload('VALIDATION_ERROR', '请求参数不符合接口约定。', requestId))
   return null
 }
 
-export function buildApp(options: BuildAppOptions = {}) {
+export async function buildApp(options: BuildAppOptions = {}) {
   const app = Fastify({
     logger: options.logger ?? false,
     genReqId: () => 'req-' + randomUUID(),
@@ -164,34 +165,51 @@ export function buildApp(options: BuildAppOptions = {}) {
     origin: ['http://127.0.0.1:4174', 'http://localhost:4174'],
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   })
-  app.register(rateLimit, { max: 120, timeWindow: '1 minute' })
+  const runtime = new RuntimeCoordinator()
+  await runtime.initialize()
+  app.register(rateLimit, {
+    redis: runtime.redis,
+    nameSpace: 'ai-ops:ip-limit:',
+    max: 120, timeWindow: '1 minute',
+    // Authenticated portal and model requests have identity-scoped limits.
+    allowList: (request) => !['/api/auth/login', '/api/auth/register', '/api/auth/bootstrap'].includes(request.url.split('?')[0] ?? ''),
+  })
 
   const authMode = options.authMode ?? (process.env.AUTH_MODE === 'disabled' ? 'disabled' : 'required')
-  const database = options.database ?? createPlatformDatabase({
+  const database = options.database ?? (await createPlatformDatabase({
     filename: options.databasePath ?? process.env.PLATFORM_DB_PATH ?? (authMode === 'disabled' ? ':memory:' : undefined),
-  })
-  database.cleanupAuditEvents('startup')
-  const auditCleanupTimer = setInterval(() => {
+  }))
+  await database.cleanupAuditEvents('startup')
+  let cleanupRunning = false
+  const auditCleanupTimer = setInterval(async () => {
+    if(cleanupRunning) return
+    cleanupRunning = true
     try {
-      database.cleanupAuditEvents('scheduled')
-      database.cleanupDeviceSetupTickets('scheduled')
-    } catch (error) {
-      app.log.error({ err: error }, 'system retention cleanup failed')
-    }
+      await database.cleanupAuditEvents('scheduled')
+      await database.cleanupDeviceSetupTickets('scheduled')
+      await database.cleanupConversationAuditMetadata('scheduled')
+    } catch(error) {
+      app.log.error('system retention cleanup failed')
+    } finally { cleanupRunning = false }
   }, SYSTEM_AUDIT_CLEANUP_INTERVAL_MS)
   auditCleanupTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(auditCleanupTimer)
-    if (!options.database) database.close()
+    await runtime.close()
+    if(!options.database) await database.close()
   })
-  ensureBootstrapSuperAdmin(database)
+  await ensureBootstrapSuperAdmin(database)
   const auth = options.authService ?? createAuthService({ database })
   const gatewayConfig = options.gatewayConfig ?? loadGatewayConfig()
-  const externalProviderRegistry = options.externalProviderRegistry ?? createExternalProviderRegistry()
+  const externalProviderRegistry = options.externalProviderRegistry ?? await createExternalProviderRegistry({ database: database.db })
+  app.addHook('preHandler', async (request) => {
+    if(request.url.startsWith('/v1/') || request.url.startsWith('/api/external-providers') || request.url.startsWith('/api/models') || request.url.startsWith('/gateway/')) await externalProviderRegistry.refresh()
+  })
   const primaryGateway = options.gatewayUpstream ?? createGatewayConnector(gatewayConfig)
-  const gatewayUpstream = new ExternalProviderGatewayUpstream(primaryGateway, externalProviderRegistry, gatewayConfig)
+  const gatewayUpstream = new ExternalProviderGatewayUpstream(primaryGateway, externalProviderRegistry, gatewayConfig, runtime)
+  app.addHook('onClose', async () => gatewayUpstream.close())
 
-  const recordAuthenticationAudit = (input: {
+  const recordAuthenticationAudit = async (input: {
     actorUserId?: string | null
     action: 'login' | 'logout' | 'access'
     result: 'success' | 'failed' | 'denied'
@@ -199,9 +217,9 @@ export function buildApp(options: BuildAppOptions = {}) {
     code: string
     message: string
   }) => {
-    database.appendAuditEvent({
+    await database.appendAuditEvent({
       id: 'audit-auth-' + randomUUID(),
-      actorUserId: input.actorUserId && database.userExists(input.actorUserId) ? input.actorUserId : null,
+      actorUserId: input.actorUserId && (await database.userExists(input.actorUserId)) ? input.actorUserId : null,
       action: input.action,
       resourceType: input.action === 'access' ? 'authorization' : 'session',
       resourceId: input.action === 'access' ? 'authorization-check' : 'local-session',
@@ -220,7 +238,7 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.addHook('preHandler', async (request, reply) => {
     const path = request.url.split('?')[0] ?? '/'
     const isLocalAssistantCallback = /^\/api\/device-setup-tickets\/[A-Za-z0-9_-]{40,128}\/(?:claim|complete)$/u.test(path)
-    if (
+    if(
       path === '/health'
       || path.startsWith('/gateway/')
       || path.startsWith('/v1/')
@@ -230,11 +248,11 @@ export function buildApp(options: BuildAppOptions = {}) {
       || isLocalAssistantCallback
     ) return
 
-    if (authMode === 'disabled') return
+    if(authMode === 'disabled') return
 
-    const user = auth.authenticate(request)
-    if (!user) {
-      recordAuthenticationAudit({
+    const user = (await auth.authenticate(request))
+    if(!user) {
+      await recordAuthenticationAudit({
         action: 'access',
         result: 'denied',
         requestId: request.id,
@@ -244,12 +262,13 @@ export function buildApp(options: BuildAppOptions = {}) {
       return reply.status(401).send(errorPayload('AUTH_REQUIRED', '请先登录后再访问该资源', request.id))
     }
     request.authUser = user
+    if(!await runtime.rateLimit('portal:' + user.id, 600)) return reply.status(429).send(errorPayload('RATE_LIMITED', '操作过于频繁，请稍后重试。', request.id))
 
     let roles: readonly AppRole[] = ['super_admin']
-    if (path.startsWith('/api/me')) roles = ['employee']
-    else if (path.startsWith('/api/auth/')) roles = ['super_admin', 'employee']
-    if (!isRoleAllowed(user, roles)) {
-      recordAuthenticationAudit({
+    if(path.startsWith('/api/me')) roles = ['employee']
+    else if(path.startsWith('/api/auth/')) roles = ['super_admin', 'employee']
+    if(!isRoleAllowed(user, roles)) {
+      await recordAuthenticationAudit({
         actorUserId: user.id,
         action: 'access',
         result: 'denied',
@@ -260,8 +279,8 @@ export function buildApp(options: BuildAppOptions = {}) {
       return reply.status(403).send(errorPayload('AUTH_FORBIDDEN', '当前身份没有访问该资源的权限', request.id))
     }
 
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !auth.verifyCsrf(request)) {
-      recordAuthenticationAudit({
+    if(!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !(await auth.verifyCsrf(request))) {
+      await recordAuthenticationAudit({
         actorUserId: user.id,
         action: 'access',
         result: 'denied',
@@ -274,24 +293,40 @@ export function buildApp(options: BuildAppOptions = {}) {
   })
 
   app.get('/health', {
-    schema: { response: { 200: z.object({ status: z.literal('ok'), service: z.literal('ai-ops-bff') }) } },
-  }, async () => ({ status: 'ok' as const, service: 'ai-ops-bff' as const }))
+    schema: { response: { 200: z.object({ status: z.literal('ok'), service: z.literal('ai-ops-bff') }), 503: z.object({ status: z.literal('unavailable'), service: z.literal('ai-ops-bff') }) } },
+  }, async (_request, reply) => {
+    try { await Promise.all([database.db.health(), runtime.health()]) }
+    catch { return reply.status(503).send({ status: 'unavailable', service: 'ai-ops-bff' }) }
+    return { status: 'ok' as const, service: 'ai-ops-bff' as const }
+  })
 
   registerGatewayRoutes(app, gatewayConfig, {
     upstream: gatewayUpstream,
     database,
+    runtime,
     hasExternalModels: () => externalProviderRegistry.hasEnabledModels(),
     supportsNativeResponses: (model) => isPublicModelId(model) && externalProviderRegistry.hasEnabledModels(),
   })
 
+  // Administrator-only diagnostics. Never expose connection strings or Keys.
+  app.get('/api/system/status', async () => {
+    const checks = await Promise.allSettled([database.db.health(), runtime.health()])
+    return {
+      ready: checks.every((result) => result.status === 'fulfilled'),
+      storage: { engine: 'PostgreSQL', available: checks[0]!.status === 'fulfilled', connections: database.db.pool.totalCount, idle: database.db.pool.idleCount, waiting: database.db.pool.waitingCount },
+      coordination: { engine: 'Redis', available: checks[1]!.status === 'fulfilled', ...runtime.status() },
+      process: { uptimeSeconds: Math.round(process.uptime()), memoryRssBytes: process.memoryUsage().rss },
+    }
+  })
+
   const sendExternalProviderError = (error: unknown, requestId: string, reply: any) => {
-    if (error instanceof ExternalProviderError) {
+    if(error instanceof ExternalProviderError) {
       return reply.status(error.statusCode).send(errorPayload(error.code, error.message, requestId))
     }
     return reply.status(502).send(errorPayload('EXTERNAL_PROVIDER_UNAVAILABLE', '第三方账号暂时不可用；本次配置未保存。', requestId))
   }
 
-  const recordExternalProviderAudit = (
+  const recordExternalProviderAudit = async (
     action: 'create' | 'update' | 'sync' | 'verify' | 'delete',
     provider: { id: string; name: string; models: unknown[] },
     requestId: string,
@@ -304,7 +339,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       verify: 'RELAY_ACCOUNT_HEALTH_CHECKED',
       delete: 'RELAY_ACCOUNT_DELETED',
     }
-    database.appendAuditEvent({
+    await database.appendAuditEvent({
       id: 'audit-external-provider-' + action + '-' + randomUUID(),
       actorUserId,
       action,
@@ -347,22 +382,22 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.post('/api/external-providers/discover', async (request, reply) => {
     const body = parseInput(externalProviderDiscoveryInputSchema, request.body, request.id, reply)
-    if (!body) return
+    if(!body) return
     try {
       const discovered = await externalProviderRegistry.discover(body)
       return { ...discovered, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
 
   app.post('/api/external-providers/test', async (request, reply) => {
     const body = parseInput(externalProviderModelTestInputSchema, request.body, request.id, reply)
-    if (!body) return
+    if(!body) return
     try {
       const report = await externalProviderRegistry.testModels(body)
       const availableCount = report.results.filter((item) => item.status === 'available').length
-      database.appendAuditEvent({
+      await database.appendAuditEvent({
         id: 'audit-external-provider-model-test-' + randomUUID(),
         actorUserId: request.authUser?.id ?? null,
         action: 'verify',
@@ -378,14 +413,14 @@ export function buildApp(options: BuildAppOptions = {}) {
         },
       })
       return { ...report, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
 
   app.post('/api/external-providers', async (request, reply) => {
     const body = parseInput(externalProviderCreateInputSchema, request.body, request.id, reply)
-    if (!body) return
+    if(!body) return
     try {
       const input = {
         name: body.name,
@@ -398,9 +433,9 @@ export function buildApp(options: BuildAppOptions = {}) {
       const provider = body.id
         ? await externalProviderRegistry.upsertVerified(body.id, input)
         : await externalProviderRegistry.createVerified(input)
-      recordExternalProviderAudit(existing ? 'update' : 'create', provider, request.id, request.authUser?.id ?? null)
+      await recordExternalProviderAudit(existing ? 'update' : 'create', provider, request.id, request.authUser?.id ?? null)
       return { provider, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
@@ -408,12 +443,12 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.patch('/api/external-providers/:id', async (request, reply) => {
     const params = parseInput(externalProviderParamsSchema, request.params, request.id, reply)
     const body = parseInput(externalProviderInputSchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
       const provider = await externalProviderRegistry.upsertVerified(params.id, body)
-      recordExternalProviderAudit('update', provider, request.id, request.authUser?.id ?? null)
+      await recordExternalProviderAudit('update', provider, request.id, request.authUser?.id ?? null)
       return { provider, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
@@ -421,58 +456,58 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.patch('/api/external-providers/:id/enabled', async (request, reply) => {
     const params = parseInput(externalProviderParamsSchema, request.params, request.id, reply)
     const body = parseInput(externalProviderEnabledInputSchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
-      const provider = externalProviderRegistry.setEnabled(params.id, body.enabled)
-      recordExternalProviderAudit('update', provider, request.id, request.authUser?.id ?? null)
+      const provider = await externalProviderRegistry.setEnabled(params.id, body.enabled)
+      await recordExternalProviderAudit('update', provider, request.id, request.authUser?.id ?? null)
       return { provider, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
 
   app.post('/api/external-providers/:id/sync', async (request, reply) => {
     const params = parseInput(externalProviderParamsSchema, request.params, request.id, reply)
-    if (!params) return
+    if(!params) return
     try {
       const provider = await externalProviderRegistry.syncModels(params.id)
-      recordExternalProviderAudit('sync', provider, request.id, request.authUser?.id ?? null)
+      await recordExternalProviderAudit('sync', provider, request.id, request.authUser?.id ?? null)
       return { provider, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
 
   app.post('/api/external-providers/:id/health', async (request, reply) => {
     const params = parseInput(externalProviderParamsSchema, request.params, request.id, reply)
-    if (!params) return
+    if(!params) return
     try {
       const provider = await externalProviderRegistry.checkHealth(params.id)
-      recordExternalProviderAudit('verify', provider, request.id, request.authUser?.id ?? null)
+      await recordExternalProviderAudit('verify', provider, request.id, request.authUser?.id ?? null)
       return { provider, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
 
   app.delete('/api/external-providers/:id', async (request, reply) => {
     const params = parseInput(externalProviderParamsSchema, request.params, request.id, reply)
-    if (!params) return
+    if(!params) return
     try {
-      const provider = externalProviderRegistry.remove(params.id)
-      recordExternalProviderAudit('delete', provider, request.id, request.authUser?.id ?? null)
+      const provider = await externalProviderRegistry.remove(params.id)
+      await recordExternalProviderAudit('delete', provider, request.id, request.authUser?.id ?? null)
       return { status: 'ok' as const, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       return sendExternalProviderError(error, request.id, reply)
     }
   })
 
   app.post('/api/auth/login', async (request, reply) => {
     const body = parseInput(loginBodySchema, request.body, request.id, reply)
-    if (!body) return
-    const session = auth.login(body.email, body.password)
-    if (!session) {
-      recordAuthenticationAudit({
+    if(!body) return
+    const session = (await auth.login(body.email, body.password))
+    if(!session) {
+      await recordAuthenticationAudit({
         action: 'login',
         result: 'failed',
         requestId: request.id,
@@ -482,7 +517,7 @@ export function buildApp(options: BuildAppOptions = {}) {
       return reply.status(401).send(errorPayload('AUTH_INVALID', '邮箱或密码不正确', request.id))
     }
     auth.setSessionCookie(reply, session.token, session.csrfToken, session.expiresAt)
-    recordAuthenticationAudit({
+    await recordAuthenticationAudit({
       actorUserId: session.user.id,
       action: 'login',
       result: 'success',
@@ -495,10 +530,10 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.post('/api/auth/register', async (request, reply) => {
     const body = parseInput(registrationBodySchema, request.body, request.id, reply)
-    if (!body) return
+    if(!body) return
     const id = 'person-' + randomUUID().replaceAll('-', '').slice(0, 16)
     try {
-      database.createPerson({
+      await database.createPerson({
         id,
         username: body.email,
         displayName: body.realName,
@@ -517,28 +552,28 @@ export function buildApp(options: BuildAppOptions = {}) {
           resourceName: body.realName,
         },
       })
-    } catch (error) {
-      if (error instanceof Error && /unique|duplicate/i.test(error.message)) {
+    } catch(error) {
+      if(error instanceof Error && /unique|duplicate/i.test(error.message)) {
         return reply.status(409).send(errorPayload('EMAIL_CONFLICT', '该邮箱已注册，请直接登录。', request.id))
       }
       throw error
     }
-    const session = auth.login(body.email, body.password)
-    if (!session) return reply.status(400).send(errorPayload('REGISTER_SESSION_FAILED', '账号已创建，但登录会话未能建立，请直接登录。', request.id))
+    const session = (await auth.login(body.email, body.password))
+    if(!session) return reply.status(400).send(errorPayload('REGISTER_SESSION_FAILED', '账号已创建，但登录会话未能建立，请直接登录。', request.id))
     auth.setSessionCookie(reply, session.token, session.csrfToken, session.expiresAt)
     return reply.status(201).send({ authenticated: true as const, user: session.user, expiresAt: session.expiresAt })
   })
 
   app.get('/api/auth/me', async (request, reply) => {
-    const session = auth.getSession(request)
-    if (!session) return reply.status(401).send(errorPayload('AUTH_REQUIRED', '当前会话已失效，请重新登录', request.id))
+    const session = (await auth.getSession(request))
+    if(!session) return reply.status(401).send(errorPayload('AUTH_REQUIRED', '当前会话已失效，请重新登录', request.id))
     return { authenticated: true as const, user: session.user, expiresAt: session.expiresAt }
   })
 
   app.post('/api/auth/logout', async (request, reply) => {
-    auth.revoke(request)
+    await auth.revoke(request)
     auth.clearSessionCookie(reply)
-    recordAuthenticationAudit({
+    await recordAuthenticationAudit({
       actorUserId: request.authUser?.id ?? null,
       action: 'logout',
       result: 'success',
@@ -551,8 +586,8 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/people', async (request, reply) => {
     const query = parseInput(peopleQuerySchema, request.query, request.id, reply)
-    if (!query) return
-    return createDatabasePeople(database, query, new Date())
+    if(!query) return
+    return (await createDatabasePeople(database, query, new Date()))
   })
 
   app.post('/api/people', async (request, reply) => {
@@ -560,8 +595,8 @@ export function buildApp(options: BuildAppOptions = {}) {
   })
 
   const personActionError = (error: unknown, requestId: string, reply: any) => {
-    if (error instanceof ManagedKeyError) return reply.status(error.statusCode).send(errorPayload(error.code, error.message, requestId))
-    if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') {
+    if(error instanceof ManagedKeyError) return reply.status(error.statusCode).send(errorPayload(error.code, error.message, requestId))
+    if(error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') {
       return reply.status(409).send(errorPayload('IDEMPOTENCY_KEY_REUSED', '该幂等编号已用于其他人员或操作。', requestId))
     }
     throw error
@@ -581,21 +616,21 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.post('/api/people/:id/disable', async (request, reply) => {
     const params = parseInput(personIdParamsSchema, request.params, request.id, reply)
     const body = parseInput(personDisableBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
-      const result = database.disablePerson(params.id, personAudit(body.idempotencyKey, 'disable', params.id, request, {
+      const result = (await database.disablePerson(params.id, personAudit(body.idempotencyKey, 'disable', params.id, request, {
         code: 'PERSON_DISABLED',
         message: '已停用员工并立即回收其 AI OPS 平台 Key。',
-      }))
-      if (!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
-      if (result.state === 'already_disabled') return reply.status(409).send(errorPayload('PERSON_ALREADY_DISABLED', '该人员已停用', request.id))
+      })))
+      if(!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
+      if(result.state === 'already_disabled') return reply.status(409).send(errorPayload('PERSON_ALREADY_DISABLED', '该人员已停用', request.id))
       return {
         meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次停用结果。' : '员工已停用，旧平台 Key 已立即失效。' },
         person: { id: result.person.id, name: result.person.displayName, status: 'disabled' as const },
         keysDisabled: result.keysDisabled,
         operation: { idempotencyKey: body.idempotencyKey, idempotent: result.idempotent, auditEventId: 'audit-' + body.idempotencyKey },
       }
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
@@ -603,21 +638,21 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.post('/api/people/:id/enable', async (request, reply) => {
     const params = parseInput(personIdParamsSchema, request.params, request.id, reply)
     const body = parseInput(personEnableBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
-      const result = database.enablePerson(params.id, personAudit(body.idempotencyKey, 'enable', params.id, request, {
+      const result = (await database.enablePerson(params.id, personAudit(body.idempotencyKey, 'enable', params.id, request, {
         code: 'PERSON_ENABLED',
         message: '已启用员工；此前因停用而回收的 Key 按原状态恢复。',
-      }))
-      if (!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
-      if (result.state === 'already_enabled') return reply.status(409).send(errorPayload('PERSON_ALREADY_ENABLED', '该人员已启用', request.id))
+      })))
+      if(!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
+      if(result.state === 'already_enabled') return reply.status(409).send(errorPayload('PERSON_ALREADY_ENABLED', '该人员已启用', request.id))
       return {
         meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次启用结果。' : '员工已启用。' },
         person: { id: result.person.id, name: result.person.displayName, status: 'active' as const },
         keysEnabled: result.keysEnabled,
         operation: { idempotencyKey: body.idempotencyKey, idempotent: result.idempotent, auditEventId: 'audit-' + body.idempotencyKey },
       }
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
@@ -625,28 +660,28 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.post('/api/people/:id/reset-password', async (request, reply) => {
     const params = parseInput(personIdParamsSchema, request.params, request.id, reply)
     const body = parseInput(personPasswordResetBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
-      const result = database.resetPersonPassword(params.id, personAudit(body.idempotencyKey, 'reset', params.id, request, {
+      const result = (await database.resetPersonPassword(params.id, personAudit(body.idempotencyKey, 'reset', params.id, request, {
         code: 'PERSON_PASSWORD_RESET',
         message: '管理员已将员工登录密码重置为固定临时值；审计不保存该值。',
-      }))
-      if (!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
+      })))
+      if(!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
       return {
         meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次密码重置结果。' : '登录密码已重置为 123456。' },
         person: { id: result.person.id, name: result.person.displayName },
         operation: { idempotencyKey: body.idempotencyKey, idempotent: result.idempotent, auditEventId: 'audit-' + body.idempotencyKey },
       }
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
 
-  const currentPlatformKey = (ownerUserId: string) => database.listApiKeysForOwner(ownerUserId)
+  const currentPlatformKey = async (ownerUserId: string) => (await database.listApiKeysForOwner(ownerUserId))
     .find((key) => key.status !== 'revoked') ?? null
 
-  const employeePortalKeyResponse = (ownerUserId: string, requestId: string) => {
-    const key = currentPlatformKey(ownerUserId)
+  const employeePortalKeyResponse = async (ownerUserId: string, requestId: string) => {
+    const key = (await currentPlatformKey(ownerUserId))
     return {
       key: key ? {
         id: key.id,
@@ -659,35 +694,38 @@ export function buildApp(options: BuildAppOptions = {}) {
       // encrypted copy exists specifically so the owner can configure another
       // device or copy the same Key after a later login. Admin routes never
       // call this helper or receive this field.
-      secret: key ? database.readApiKeySecret(key.id) : null,
+      secret: key ? (await database.readApiKeySecret(key.id)) : null,
       model: { id: PUBLIC_MODEL_ID, name: PUBLIC_MODEL_NAME },
       gateway: { baseUrl: publicGatewayBaseUrlForCodex() },
       requestId,
     }
   }
 
-  const issuePlatformKey = (ownerUserId: string, actorUserId: string | null, requestId: string, idempotencyKey: string, action: 'create' | 'reset') => {
-    const person = database.findPerson(ownerUserId)
-    if (!person || person.status !== 'active') {
+  const issuePlatformKey = async (ownerUserId: string, actorUserId: string | null, requestId: string, idempotencyKey: string, action: 'create' | 'reset') => {
+    return database.db.transaction(async () => {
+    await database.db.lock('person:' + ownerUserId)
+    const person = (await database.findPerson(ownerUserId))
+    if(!person || person.status !== 'active') {
       throw new ManagedKeyError('EMPLOYEE_NOT_ACTIVE', '员工账号不存在或已停用，不能创建 API Key。')
     }
     const auditEventId = 'audit-' + idempotencyKey
-    const existingOperation = database.findApiKeyOperation(idempotencyKey)
-    if (existingOperation) {
-      if (existingOperation.personId !== ownerUserId) {
+    const existingOperation = (await database.findApiKeyOperation(idempotencyKey))
+    if(existingOperation) {
+      if(existingOperation.personId !== ownerUserId) {
         throw new ManagedKeyError('IDEMPOTENCY_KEY_REUSED', '幂等编号已用于其他员工。')
       }
-      const key = database.listApiKeysForOwner(ownerUserId).find((item) => item.id === existingOperation.keyId)
-      const secret = key ? database.readApiKeySecret(key.id) : null
-      if (!key || !secret) throw new ManagedKeyError('KEY_OPERATION_UNAVAILABLE', '已保存的 Key 操作无法读取，请重新发起重置。', 503)
+      const key = (await database.listApiKeysForOwner(ownerUserId)).find((item) => item.id === existingOperation.keyId)
+      const secret = key ? (await database.readApiKeySecret(key.id)) : null
+      if(!key || !secret) throw new ManagedKeyError('KEY_OPERATION_UNAVAILABLE', '已保存的 Key 操作无法读取，请重新发起重置。', 503)
       return { key, secret, auditEventId, idempotent: true }
     }
 
     const secret = createPlatformApiKeySecret()
     const maskedValue = maskPlatformApiKey(secret)
-    const existing = currentPlatformKey(ownerUserId)
-    if (existing) {
-      const result = database.resetApiKey(existing.id, {
+    const existing = (await currentPlatformKey(ownerUserId))
+    if(existing) {
+      if (action === 'create') throw new ManagedKeyError('KEY_ALREADY_CREATED', '你已经创建过平台 Key；如需更换，请使用“重置 Key”。', 409)
+      const result = (await database.resetApiKey(existing.id, {
         maskedValue,
         secretHash: hashPlatformApiKey(secret),
         secretValue: secret,
@@ -705,13 +743,13 @@ export function buildApp(options: BuildAppOptions = {}) {
           resourceName: person.displayName,
           idempotencyFingerprint: createHash('sha256').update(ownerUserId + ':' + action).digest('hex'),
         },
-      })
-      if (!result || !result.secret) throw new ManagedKeyError('KEY_RESET_FAILED', 'AI OPS 平台 Key 重置未完成，请稍后重试。')
+      }))
+      if(!result || !result.secret) throw new ManagedKeyError('KEY_RESET_FAILED', 'AI OPS 平台 Key 重置未完成，请稍后重试。')
       return { key: result.key, secret: result.secret, auditEventId, idempotent: result.idempotent }
     }
 
     const keyId = 'key-aiops-' + randomUUID().replaceAll('-', '').slice(0, 16)
-    const created = database.createApiKey({
+    const created = (await database.createApiKey({
       id: keyId,
       ownerUserId,
       maskedValue,
@@ -735,19 +773,20 @@ export function buildApp(options: BuildAppOptions = {}) {
         resourceName: person.displayName,
         idempotencyFingerprint: createHash('sha256').update(ownerUserId + ':' + action).digest('hex'),
       },
-    })
-    if (!created) throw new ManagedKeyError('KEY_CREATE_FAILED', 'AI OPS 平台 Key 创建未完成，请稍后重试。')
+    }))
+    if(!created) throw new ManagedKeyError('KEY_CREATE_FAILED', 'AI OPS 平台 Key 创建未完成，请稍后重试。')
     return { key: created, secret, auditEventId, idempotent: false }
+    })
   }
 
   app.post('/api/people/:id/reset-key', async (request, reply) => {
     const params = parseInput(personIdParamsSchema, request.params, request.id, reply)
     const body = parseInput(personKeyResetBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
-      const issued = issuePlatformKey(params.id, request.authUser?.id ?? null, request.id, body.idempotencyKey, 'reset')
-      const person = database.findPerson(params.id)
-      if (!person) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
+      const issued = (await issuePlatformKey(params.id, request.authUser?.id ?? null, request.id, body.idempotencyKey, 'reset'))
+      const person = (await database.findPerson(params.id))
+      if(!person) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
       return {
         meta: {
           source: 'database' as const,
@@ -757,7 +796,7 @@ export function buildApp(options: BuildAppOptions = {}) {
         person: { id: person.id, name: person.displayName, apiKeyMasked: issued.key.maskedValue },
         operation: { idempotencyKey: body.idempotencyKey, idempotent: issued.idempotent, auditEventId: issued.auditEventId },
       }
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
@@ -765,69 +804,61 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.post('/api/people/:id/delete', async (request, reply) => {
     const params = parseInput(personIdParamsSchema, request.params, request.id, reply)
     const body = parseInput(personDeleteBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     try {
-      const result = database.deletePerson(params.id, personAudit(body.idempotencyKey, 'delete', params.id, request, {
+      const result = (await database.deletePerson(params.id, personAudit(body.idempotencyKey, 'delete', params.id, request, {
         code: 'PERSON_DELETED',
         message: '已从人员目录删除员工；历史审计与用量记录保留。',
-      }))
-      if (!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
-      if (result.state === 'not_disabled') return reply.status(409).send(errorPayload('PERSON_MUST_BE_DISABLED', '只有已停用员工才可删除。', request.id))
+      })))
+      if(!result) return reply.status(404).send(errorPayload('PERSON_NOT_FOUND', '未找到指定人员', request.id))
+      if(result.state === 'not_disabled') return reply.status(409).send(errorPayload('PERSON_MUST_BE_DISABLED', '只有已停用员工才可删除。', request.id))
       return {
         meta: { source: 'database' as const, completedAt: new Date().toISOString(), notice: result.idempotent ? '已返回上次删除结果。' : '员工已从人员目录删除，历史审计与用量记录保留。' },
         person: { id: result.person.id, name: result.person.displayName, status: 'deleted' as const },
         operation: { idempotencyKey: body.idempotencyKey, idempotent: result.idempotent, auditEventId: 'audit-' + body.idempotencyKey },
       }
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
 
   app.get('/api/models', async (request, reply) => {
     const query = parseInput(modelsQuerySchema, request.query, request.id, reply)
-    if (!query) return
+    if(!query) return
     return createOwnedModels(query, externalProviderRegistry.list(), new Date())
   })
 
   app.get('/api/usage', async (request, reply) => {
     const query = parseInput(usageQuerySchema, request.query, request.id, reply)
-    if (!query) return
-    return createDatabaseUsage(database, query, new Date())
+    if(!query) return
+    return (await createDatabaseUsage(database, query, new Date()))
   })
 
   app.get('/api/usage/model-analytics', async (request, reply) => {
     const query = parseInput(modelAnalyticsQuerySchema, request.query, request.id, reply)
-    if (!query) return
-    return createLocalModelAnalytics(database.listUsageRequests().map((record) => ({
-      requestId: record.requestId,
-      occurredAt: record.occurredAt,
-      personId: record.personId,
-      personName: record.personName,
-      modelId: record.actualModel || record.modelDisplayName,
-      inputTokens: record.inputTokens,
-      outputTokens: record.outputTokens,
-    })), query, new Date())
+    if(!query) return
+    return createDatabaseModelAnalytics(database, query, new Date())
   })
 
   app.get('/api/usage/:requestId', async (request, reply) => {
     const params = parseInput(usageRequestParamsSchema, request.params, request.id, reply)
-    if (!params) return
-    const result = createDatabaseUsageDetail(database, params.requestId, new Date(), true)
-    if (!result) return reply.status(404).send(errorPayload('USAGE_NOT_FOUND', '未找到指定调用记录', request.id))
+    if(!params) return
+    const result = (await createDatabaseUsageDetail(database, params.requestId, new Date(), true))
+    if(!result) return reply.status(404).send(errorPayload('USAGE_NOT_FOUND', '未找到指定调用记录', request.id))
     return result
   })
 
   app.get('/api/audit-events', async (request, reply) => {
     const query = parseInput(auditQuerySchema, request.query, request.id, reply)
-    if (!query) return
-    return createDatabaseAudit(database, query)
+    if(!query) return
+    return (await createDatabaseAudit(database, query))
   })
 
   app.post('/api/audit-events/export', async (request, reply) => {
     const body = parseInput(auditExportQuerySchema, request.body, request.id, reply)
-    if (!body) return
-    const result = createDatabaseAudit(database, { ...body, page: 1, pageSize: 500 })
-    database.appendAuditEvent({
+    if(!body) return
+    const result = (await createDatabaseAudit(database, { ...body, page: 1, pageSize: 500 }))
+    await database.appendAuditEvent({
       id: 'audit-export-' + randomUUID(),
       actorUserId: request.authUser?.id ?? null,
       action: 'export',
@@ -850,42 +881,42 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/audit-events/:id', async (request, reply) => {
     const params = parseInput(auditParamsSchema, request.params, request.id, reply)
-    if (!params) return
-    const result = createDatabaseAuditDetail(database, params.id)
-    if (!result) return reply.status(404).send(errorPayload('AUDIT_EVENT_NOT_FOUND', '未找到指定审计事件', request.id))
+    if(!params) return
+    const result = (await createDatabaseAuditDetail(database, params.id))
+    if(!result) return reply.status(404).send(errorPayload('AUDIT_EVENT_NOT_FOUND', '未找到指定审计事件', request.id))
     return result
   })
 
   app.get('/api/conversation-audits', async (request, reply) => {
     const query = parseInput(conversationAuditQuerySchema, request.query, request.id, reply)
-    if (!query) return
-    return createDatabaseConversationAudits(database, query, new Date(), request.authUser?.role ?? 'super_admin')
+    if(!query) return
+    return (await createDatabaseConversationAudits(database, query, new Date(), request.authUser?.role ?? 'super_admin'))
   })
 
   app.get('/api/keys/:keyId/audits', async (request, reply) => {
     const keyParams = parseInput(z.object({ keyId: z.string().min(1).max(128) }), request.params, request.id, reply)
     const query = parseInput(conversationAuditQuerySchema, request.query, request.id, reply)
-    if (!keyParams || !query) return
-    return createDatabaseConversationAudits(database, { ...query, key: keyParams.keyId }, new Date(), request.authUser?.role ?? 'super_admin')
+    if(!keyParams || !query) return
+    return (await createDatabaseConversationAudits(database, { ...query, key: keyParams.keyId }, new Date(), request.authUser?.role ?? 'super_admin'))
   })
 
   app.get('/api/conversation-audits/:id/access-events', async (request, reply) => {
     const params = parseInput(conversationAuditParamsSchema, request.params, request.id, reply)
-    if (!params) return
-    const result = createDatabaseConversationAccessHistory(database, params.id)
-    if (!result) return reply.status(404).send(errorPayload('CONVERSATION_AUDIT_NOT_FOUND', '未找到指定对话审计记录', request.id))
+    if(!params) return
+    const result = (await createDatabaseConversationAccessHistory(database, params.id))
+    if(!result) return reply.status(404).send(errorPayload('CONVERSATION_AUDIT_NOT_FOUND', '未找到指定对话审计记录', request.id))
     return result
   })
 
   const accessConversationAudit = async (request: any, reply: any) => {
     const params = parseInput(conversationAuditParamsSchema, request.params, request.id, reply)
     const body = parseInput(conversationAccessBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
-    const record = getDatabaseConversationAuditRecord(database, params.id)
-    if (!record || !record.contentAccess.available) {
+    if(!params || !body) return
+    const record = (await getDatabaseConversationAuditRecord(database, params.id))
+    if(!record || !record.contentAccess.available) {
       return reply.status(404).send(errorPayload('CONVERSATION_CONTENT_UNAVAILABLE', '该记录没有可访问的对话内容', request.id))
     }
-    const accessEvent = database.recordConversationAccess({
+    const accessEvent = (await database.recordConversationAccess({
       id: 'access-' + randomUUID(),
       actorUserId: request.authUser?.id ?? 'user-super-admin',
       recordId: record.id,
@@ -907,13 +938,13 @@ export function buildApp(options: BuildAppOptions = {}) {
         message: '超级管理员查看了对话审计内容；访问动作已记录。',
         resourceName: record.person.name,
       },
-    })
-    const result = createDatabaseConversationAccess(database, record, body, new Date(), {
+    }))
+    const result = (await createDatabaseConversationAccess(database, record, body, new Date(), {
       id: accessEvent.id,
       persisted: true,
       auditEventId: 'audit-conversation-' + randomUUID(),
-    })
-    if (!result) return reply.status(404).send(errorPayload('CONVERSATION_CONTENT_UNAVAILABLE', '该记录没有可访问的对话内容', request.id))
+    }))
+    if(!result) return reply.status(404).send(errorPayload('CONVERSATION_CONTENT_UNAVAILABLE', '该记录没有可访问的对话内容', request.id))
     return result
   }
 
@@ -921,9 +952,9 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   const conversationDetail = async (request: any, reply: any) => {
     const params = parseInput(conversationAuditParamsSchema, request.params, request.id, reply)
-    if (!params) return
-    const record = getDatabaseConversationAuditRecord(database, params.id)
-    if (!record) return reply.status(404).send(errorPayload('CONVERSATION_AUDIT_NOT_FOUND', '未找到指定对话审计记录', request.id))
+    if(!params) return
+    const record = (await getDatabaseConversationAuditRecord(database, params.id))
+    if(!record) return reply.status(404).send(errorPayload('CONVERSATION_AUDIT_NOT_FOUND', '未找到指定对话审计记录', request.id))
     return {
       meta: { source: 'database' as const, generatedAt: new Date().toISOString(), notice: '详情默认只返回元数据；打开正文会写入访问审计。' },
       record,
@@ -939,18 +970,18 @@ export function buildApp(options: BuildAppOptions = {}) {
   const operateConversationAudit = async (request: any, reply: any, action: 'copy' | 'export') => {
     const params = parseInput(conversationAuditParamsSchema, request.params, request.id, reply)
     const body = parseInput(conversationAccessBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
-    const record = getDatabaseConversationAuditRecord(database, params.id)
-    if (!record || (!record.promptAvailable && !record.responseAvailable)) {
+    if(!params || !body) return
+    const record = (await getDatabaseConversationAuditRecord(database, params.id))
+    if(!record || (!record.promptAvailable && !record.responseAvailable)) {
       return reply.status(404).send(errorPayload('CONVERSATION_CONTENT_UNAVAILABLE', '该记录没有可访问的正文', request.id))
     }
-    const content = database.getConversationAuditContent(record.id)
-    if (!content || (!content.promptAvailable && !content.responseAvailable)) {
+    const content = (await database.getConversationAuditContent(record.id))
+    if(!content || (!content.promptAvailable && !content.responseAvailable)) {
       return reply.status(404).send(errorPayload('CONVERSATION_CONTENT_UNAVAILABLE', '该记录的正文已到期或采集失败', request.id))
     }
     const operationId = action + '-' + randomUUID()
     const auditEventId = 'audit-conversation-' + action + '-' + randomUUID()
-    database.recordConversationAuditOperation({
+    await database.recordConversationAuditOperation({
       id: operationId,
       actorUserId: request.authUser?.id ?? 'user-super-admin',
       recordId: record.id,
@@ -975,9 +1006,9 @@ export function buildApp(options: BuildAppOptions = {}) {
         resourceName: record.person.name,
       },
     })
-    if (action === 'copy') return { status: 'ok' as const, operationId, auditEventId, requestId: request.id }
-    database.incrementConversationAuditExportCount(record.id)
-    const normalized = createDatabaseConversationAccess(database, record, body, new Date())
+    if(action === 'copy') return { status: 'ok' as const, operationId, auditEventId, requestId: request.id }
+    await database.incrementConversationAuditExportCount(record.id)
+    const normalized = (await createDatabaseConversationAccess(database, record, body, new Date()))
     const payload = JSON.stringify({
       exportedAt: new Date().toISOString(),
       record,
@@ -989,18 +1020,18 @@ export function buildApp(options: BuildAppOptions = {}) {
       .send(payload)
   }
 
-  app.post('/api/conversation-audits/:id/copy', async (request, reply) => operateConversationAudit(request, reply, 'copy'))
-  app.post('/api/audits/:id/copy', async (request, reply) => operateConversationAudit(request, reply, 'copy'))
-  app.post('/api/conversation-audits/:id/export', async (request, reply) => operateConversationAudit(request, reply, 'export'))
-  app.post('/api/audits/:id/export', async (request, reply) => operateConversationAudit(request, reply, 'export'))
+  app.post('/api/conversation-audits/:id/copy', async (request, reply) => (await operateConversationAudit(request, reply, 'copy')))
+  app.post('/api/audits/:id/copy', async (request, reply) => (await operateConversationAudit(request, reply, 'copy')))
+  app.post('/api/conversation-audits/:id/export', async (request, reply) => (await operateConversationAudit(request, reply, 'export')))
+  app.post('/api/audits/:id/export', async (request, reply) => (await operateConversationAudit(request, reply, 'export')))
 
   app.post('/api/conversation-audits/:id/delete', async (request, reply) => {
     const params = parseInput(conversationAuditParamsSchema, request.params, request.id, reply)
     const body = parseInput(conversationDeleteBodySchema, request.body, request.id, reply)
-    if (!params || !body) return
+    if(!params || !body) return
     const auditEventId = `audit-conversation-delete-${body.idempotencyKey}`
     try {
-      const result = database.deleteConversationAuditRecord(params.id, {
+      const result = (await database.deleteConversationAuditRecord(params.id, {
         id: auditEventId,
         actorUserId: request.authUser?.id ?? 'user-super-admin',
         action: 'delete',
@@ -1013,8 +1044,8 @@ export function buildApp(options: BuildAppOptions = {}) {
           message: '超级管理员删除了本地对话审计记录；仅保留不含正文的删除证明。',
           idempotencyKey: body.idempotencyKey,
         },
-      })
-      if (!result) {
+      }))
+      if(!result) {
         return reply.status(404).send(errorPayload(
           'CONVERSATION_CONTENT_UNAVAILABLE',
           '该记录没有可删除的对话审计内容。',
@@ -1036,8 +1067,8 @@ export function buildApp(options: BuildAppOptions = {}) {
           auditEventId: result.auditEventId,
         },
       }
-    } catch (error) {
-      if (error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') {
+    } catch(error) {
+      if(error instanceof Error && error.message === 'IDEMPOTENCY_KEY_REUSED') {
         return reply.status(409).send(errorPayload(
           'IDEMPOTENCY_KEY_REUSED',
           '该幂等编号已用于其他记录或操作。',
@@ -1048,18 +1079,18 @@ export function buildApp(options: BuildAppOptions = {}) {
     }
   })
 
-  app.get('/api/me/key', async (request) => employeePortalKeyResponse(request.authUser!.id, request.id))
+  app.get('/api/me/key', async (request) => (await employeePortalKeyResponse(request.authUser!.id, request.id)))
 
   app.post('/api/me/key', async (request, reply) => {
     const body = parseInput(employeePortalKeyOperationSchema, request.body, request.id, reply)
-    if (!body) return
-    if (currentPlatformKey(request.authUser!.id)) {
+    if(!body) return
+    if((await currentPlatformKey(request.authUser!.id))) {
       return reply.status(409).send(errorPayload('KEY_ALREADY_CREATED', '你已经创建过平台 Key；如需更换，请使用“重置 Key”。', request.id))
     }
     try {
-      const issued = issuePlatformKey(request.authUser!.id, request.authUser!.id, request.id, body.idempotencyKey, 'create')
+      const issued = (await issuePlatformKey(request.authUser!.id, request.authUser!.id, request.id, body.idempotencyKey, 'create'))
       return reply.status(201).send({
-        ...employeePortalKeyResponse(request.authUser!.id, request.id),
+        ...(await employeePortalKeyResponse(request.authUser!.id, request.id)),
         key: {
           id: issued.key.id,
           masked: issued.key.maskedValue,
@@ -1069,18 +1100,18 @@ export function buildApp(options: BuildAppOptions = {}) {
         },
         secret: issued.secret,
       })
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
 
   app.post('/api/me/key/reset', async (request, reply) => {
     const body = parseInput(employeePortalKeyOperationSchema, request.body, request.id, reply)
-    if (!body) return
+    if(!body) return
     try {
-      const issued = issuePlatformKey(request.authUser!.id, request.authUser!.id, request.id, body.idempotencyKey, 'reset')
+      const issued = (await issuePlatformKey(request.authUser!.id, request.authUser!.id, request.id, body.idempotencyKey, 'reset'))
       return {
-        ...employeePortalKeyResponse(request.authUser!.id, request.id),
+        ...(await employeePortalKeyResponse(request.authUser!.id, request.id)),
         key: {
           id: issued.key.id,
           masked: issued.key.maskedValue,
@@ -1090,29 +1121,29 @@ export function buildApp(options: BuildAppOptions = {}) {
         },
         secret: issued.secret,
       }
-    } catch (error) {
+    } catch(error) {
       return personActionError(error, request.id, reply)
     }
   })
 
   app.post('/api/me/device-setup-tickets', async (request, reply) => {
     const body = parseInput(deviceSetupTicketCreateSchema, request.body, request.id, reply)
-    if (!body) return
-    const key = currentPlatformKey(request.authUser!.id)
-    if (!key || key.status !== 'active' || !database.readApiKeySecret(key.id)) {
+    if(!body) return
+    const key = (await currentPlatformKey(request.authUser!.id))
+    if(!key || key.status !== 'active' || !(await database.readApiKeySecret(key.id))) {
       return reply.status(409).send(errorPayload('KEY_NOT_CREATED', '请先申请可用的平台 Key，再导入客户端。', request.id))
     }
 
     const ticket = randomBytes(32).toString('base64url')
-    const setup = database.createDeviceSetupTicket({
+    const setup = (await database.createDeviceSetupTicket({
       id: 'setup-' + randomUUID().replaceAll('-', '').slice(0, 24),
       tokenHash: createHash('sha256').update('ai-ops-device-setup:' + ticket).digest('hex'),
       ownerUserId: request.authUser!.id,
       apiKeyId: key.id,
       target: body.target,
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-    })
-    if (!setup) return reply.status(500).send(errorPayload('SETUP_TICKET_CREATE_FAILED', '无法创建本机配置请求，请稍后重试。', request.id))
+    }))
+    if(!setup) return reply.status(500).send(errorPayload('SETUP_TICKET_CREATE_FAILED', '无法创建本机配置请求，请稍后重试。', request.id))
     const assistantServerUrl = publicAssistantServerUrl()
     const launchUrl = `aiops://configure?ticket=${encodeURIComponent(ticket)}&server=${encodeURIComponent(assistantServerUrl)}`
     return reply.status(201).send({
@@ -1129,9 +1160,9 @@ export function buildApp(options: BuildAppOptions = {}) {
 
   app.get('/api/me/device-setup-tickets/:id', async (request, reply) => {
     const params = parseInput(deviceSetupTicketIdSchema, request.params, request.id, reply)
-    if (!params) return
-    const ticket = database.findDeviceSetupTicketForOwner(params.id, request.authUser!.id)
-    if (!ticket) return reply.status(404).send(errorPayload('SETUP_TICKET_NOT_FOUND', '未找到本机配置请求。', request.id))
+    if(!params) return
+    const ticket = (await database.findDeviceSetupTicketForOwner(params.id, request.authUser!.id))
+    if(!ticket) return reply.status(404).send(errorPayload('SETUP_TICKET_NOT_FOUND', '未找到本机配置请求。', request.id))
     return {
       ticket: {
         id: ticket.id,
@@ -1148,18 +1179,18 @@ export function buildApp(options: BuildAppOptions = {}) {
   // These two endpoints are intentionally unauthenticated: a browser cannot
   // safely give a local desktop helper its HttpOnly session. The opaque,
   // single-use, five-minute ticket is the only credential accepted here and
-  // its plaintext is never stored in SQLite or placed in an API Key field.
+  // its plaintext is never stored in PostgreSQL or placed in an API Key field.
   app.post('/api/device-setup-tickets/:ticket/claim', async (request, reply) => {
     const params = parseInput(deviceSetupTicketTokenSchema, request.params, request.id, reply)
-    if (!params) return
-    const claimed = database.claimDeviceSetupTicket(createHash('sha256').update('ai-ops-device-setup:' + params.ticket).digest('hex'))
-    if (claimed.state === 'not_found' || claimed.state === 'expired') {
+    if(!params) return
+    const claimed = (await database.claimDeviceSetupTicket(createHash('sha256').update('ai-ops-device-setup:' + params.ticket).digest('hex')))
+    if(claimed.state === 'not_found' || claimed.state === 'expired') {
       return reply.status(404).send(errorPayload('SETUP_TICKET_EXPIRED', '本机配置请求已过期，请回到员工门户重新点击导入。', request.id))
     }
-    if (claimed.state === 'already_claimed') {
+    if(claimed.state === 'already_claimed') {
       return reply.status(409).send(errorPayload('SETUP_TICKET_ALREADY_CLAIMED', '本机配置请求已在处理中，请稍候查看结果。', request.id))
     }
-    if (claimed.state !== 'claimed' || !claimed.ticket || !claimed.secret) {
+    if(claimed.state !== 'claimed' || !claimed.ticket || !claimed.secret) {
       return reply.status(409).send(errorPayload('SETUP_KEY_UNAVAILABLE', '当前平台 Key 不可用，请回到员工门户刷新后重试。', request.id))
     }
     return {
@@ -1175,22 +1206,27 @@ export function buildApp(options: BuildAppOptions = {}) {
   app.post('/api/device-setup-tickets/:ticket/complete', async (request, reply) => {
     const params = parseInput(deviceSetupTicketTokenSchema, request.params, request.id, reply)
     const body = parseInput(deviceSetupTicketCompletionSchema, request.body, request.id, reply)
-    if (!params || !body) return
-    const completed = database.completeDeviceSetupTicket(
+    if(!params || !body) return
+    const completed = (await database.completeDeviceSetupTicket(
       createHash('sha256').update('ai-ops-device-setup:' + params.ticket).digest('hex'),
       body.succeeded,
       undefined,
       body.succeeded ? undefined : (body.failureCode ?? 'LOCAL_CONFIG_WRITE_FAILED'),
-    )
-    if (!completed) return reply.status(404).send(errorPayload('SETUP_TICKET_EXPIRED', '本机配置请求已过期，请回到员工门户重新点击导入。', request.id))
+    ))
+    if(!completed) return reply.status(404).send(errorPayload('SETUP_TICKET_EXPIRED', '本机配置请求已过期，请回到员工门户重新点击导入。', request.id))
     return { ticket: { id: completed.id, target: completed.target, state: completed.state }, requestId: request.id }
   })
 
   app.setErrorHandler((error, request, reply) => {
-    if (error instanceof z.ZodError) {
+    if(error instanceof z.ZodError) {
       return reply.status(400).send(errorPayload('VALIDATION_ERROR', '请求参数不符合接口约定。', request.id))
     }
-    app.log.error({ err: error, requestId: request.id }, 'Unhandled API error')
+    const status = (error as { statusCode?: number }).statusCode
+    if (status === 400) return reply.status(400).send(errorPayload('VALIDATION_ERROR', '请求参数不符合接口约定。', request.id))
+    if(status === 429) return reply.status(429).send(errorPayload('RATE_LIMITED', '请求过于频繁，请稍后重试。', request.id))
+    // PostgreSQL errors may contain values from unique/FK constraints. Never
+    // serialize the original error, query parameters or connection strings.
+    app.log.error({ code: (error as { code?: string }).code, requestId: request.id }, 'Unhandled API error')
     return reply.status(500).send(errorPayload('INTERNAL_ERROR', '服务暂时不可用，请稍后重试。', request.id))
   })
 

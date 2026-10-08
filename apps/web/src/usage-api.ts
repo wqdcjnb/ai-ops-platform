@@ -33,6 +33,7 @@ export const modelAnalyticsResponseSchema = z.object({
   meta: z.object({ source: z.literal('ai_ops_local'), generatedAt: z.string().datetime(), startAt: z.string().datetime(), endAt: z.string().datetime(), timeGranularity: z.enum(['hour', 'day', 'week']), person: z.string(), notice: z.string() }),
   summary: z.object({ totalCount: z.number().int().nonnegative(), totalTokens: z.number().int().nonnegative(), averageRpm: z.number().nonnegative(), averageTpm: z.number().nonnegative() }),
   options: z.object({ people: z.array(optionSchema) }),
+  people: z.array(z.object({ personId: z.string(), personName: z.string(), count: z.number().int().nonnegative(), inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), tokens: z.number().int().nonnegative() })),
   models: z.array(z.object({ modelName: z.string(), count: z.number().int().nonnegative(), tokens: z.number().int().nonnegative() })),
   series: z.array(z.object({ bucket: z.string().datetime(), modelName: z.string(), count: z.number().int().nonnegative(), tokens: z.number().int().nonnegative() })),
 })

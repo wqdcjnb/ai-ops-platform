@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
+import { once } from 'node:events'
 import { gatewayModeSchema, gatewayProviderSchema, type GatewayConfig } from '../gateway-config.js'
 import type { PlatformConversationAuditCompletion, PlatformDatabase, PlatformGatewayKey } from '../platform-db.js'
 import { GatewayUpstreamError, type GatewayRequestContext, type GatewayUpstream, type OpenAiMediaRequest, type OpenAiResponsesEvent, type OpenAiResponsesRequest } from './openai-compatible.js'
@@ -139,6 +140,7 @@ const capabilities = (externalModelsAvailable = false) => ({
 })
 
 interface GatewayRouteOptions {
+  runtime?: import('../runtime-coordinator.js').RuntimeCoordinator
   upstream?: GatewayUpstream
   database?: PlatformDatabase
   /** True when the secure third-party provider registry has routable models. */
@@ -152,6 +154,11 @@ interface GatewayAuditHandle {
   requestId: string
   recordId: string
   startedAt: number
+  chunks: unknown[]
+  chunkBytes: number
+  truncated: boolean
+  checkpoint: Promise<void> | null
+  lastCheckpoint: number
 }
 
 type GatewayAuthorization = { key: PlatformGatewayKey | null; upstreamContext?: GatewayRequestContext }
@@ -162,15 +169,15 @@ type GatewayAuthorization = { key: PlatformGatewayKey | null; upstreamContext?: 
  * conversation turn, so it must not create a row in the conversation audit.
  */
 function isInternalTopicTitleRequest(body: unknown) {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return false
+  if(!body || typeof body !== 'object' || Array.isArray(body)) return false
   const request = body as Record<string, unknown>
   const metadata = request.metadata && typeof request.metadata === 'object' && !Array.isArray(request.metadata)
     ? request.metadata as Record<string, unknown>
     : null
   const isNewTopic = request.isNewTopic === true || metadata?.isNewTopic === true
   const hasTitle = typeof request.title === 'string' || typeof metadata?.title === 'string'
-  if (isNewTopic && hasTitle) return true
-  if (isCodexThreadTitleRequest(request.client_metadata)) return true
+  if(isNewTopic && hasTitle) return true
+  if(isCodexThreadTitleRequest(request.client_metadata)) return true
 
   // Some desktop clients generate a local conversation title through an
   // ordinary model call. They put the protocol in a system/developer prompt
@@ -187,15 +194,15 @@ function isInternalTopicTitleRequest(body: unknown) {
 }
 
 function isCodexThreadTitleRequest(value: unknown) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if(!value || typeof value !== 'object' || Array.isArray(value)) return false
   const metadata = value as Record<string, unknown>
   const turnMetadata = parseJsonRecord(metadata['x-codex-turn-metadata'])
   return turnMetadata?.turn_trigger === 'thread_title' || turnMetadata?.thread_source === 'thread_title'
 }
 
 function parseJsonRecord(value: unknown): Record<string, unknown> | null {
-  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
-  if (typeof value !== 'string') return null
+  if(value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  if(typeof value !== 'string') return null
   try {
     const parsed: unknown = JSON.parse(value)
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null
@@ -205,20 +212,20 @@ function parseJsonRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function protocolMessages(value: unknown) {
-  if (!Array.isArray(value)) return []
+  if(!Array.isArray(value)) return []
   return value.flatMap((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    if(!item || typeof item !== 'object' || Array.isArray(item)) return []
     const message = item as Record<string, unknown>
-    if (message.role !== 'system' && message.role !== 'developer') return []
+    if(message.role !== 'system' && message.role !== 'developer') return []
     return [messageText(message.content)]
   })
 }
 
 function messageText(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (!Array.isArray(value)) return ''
+  if(typeof value === 'string') return value
+  if(!Array.isArray(value)) return ''
   return value.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return ''
+    if(!item || typeof item !== 'object' || Array.isArray(item)) return ''
     const part = item as Record<string, unknown>
     return typeof part.text === 'string'
       ? part.text
@@ -231,11 +238,11 @@ function messageText(value: unknown): string {
 }
 
 function isTopicTitleProtocol(value: unknown) {
-  if (typeof value !== 'string') return false
+  if(typeof value !== 'string') return false
   return /\bisNewTopic\b/u.test(value) && /\btitle\b/iu.test(value) && /\bjson\b/iu.test(value)
 }
 
-function beginGatewayAudit(database: PlatformDatabase | undefined, key: PlatformGatewayKey | null, input: {
+async function beginGatewayAudit(database: PlatformDatabase | undefined, key: PlatformGatewayKey | null, input: {
   requestId: string
   model: string
   endpoint: string
@@ -244,13 +251,13 @@ function beginGatewayAudit(database: PlatformDatabase | undefined, key: Platform
   streamed: boolean
   startedAt: number
   httpStatus?: number | null
-}, log: { warn: (bindings: Record<string, unknown>, message: string) => void }): GatewayAuditHandle | null {
-  if (!database || !key) return null
-  if (isInternalTopicTitleRequest(input.originalBody ?? input.body)) return null
+}, log: { warn: (bindings: Record<string, unknown>, message: string) => void }): Promise<GatewayAuditHandle | null> {
+  if(!database || !key) return null
+  if(isInternalTopicTitleRequest(input.originalBody ?? input.body)) return null
   try {
     const requestedRecordId = `conv-audit-${input.requestId.replace(/^req-/u, '').replace(/[^a-z0-9-]/giu, '-').toLowerCase()}`
     const grouping = groupingForBody(input.body)
-    const record = database.startConversationAuditCapture({
+    const record = (await database.startConversationAuditCapture({
       id: requestedRecordId,
       requestId: input.requestId,
       keyId: key.id,
@@ -266,35 +273,45 @@ function beginGatewayAudit(database: PlatformDatabase | undefined, key: Platform
       groupingReliable: grouping.type === 'conversation',
       groupingLabel: grouping.label,
       httpStatus: input.httpStatus ?? null,
-    })
-    if (!record) return null
-    return { database, requestId: input.requestId, recordId: record.id, startedAt: input.startedAt }
-  } catch (error) {
+    }))
+    if(!record) return null
+    return { database, requestId: input.requestId, recordId: record.id, startedAt: input.startedAt, chunks: [], chunkBytes: 0, truncated: false, checkpoint: null, lastCheckpoint: Date.now() }
+  } catch(error) {
     log.warn({ requestId: input.requestId, error: error instanceof Error ? error.message : 'unknown' }, 'conversation audit capture start failed')
     return null
   }
 }
 
 function appendGatewayAuditChunk(handle: GatewayAuditHandle | null, chunk: unknown, log?: { warn: (bindings: Record<string, unknown>, message: string) => void }) {
-  if (!handle) return
-  try { handle.database.appendConversationAuditChunk(handle.requestId, chunk) }
-  catch (error) { log?.warn({ requestId: handle.requestId, error: error instanceof Error ? error.message : 'unknown' }, 'conversation audit chunk write failed') }
+  if(!handle) return
+  const bytes = Buffer.byteLength(JSON.stringify(chunk), 'utf8')
+  if(handle.chunkBytes + bytes > 524_288 || handle.chunks.length >= 4_000) { handle.truncated = true; return }
+  handle.chunks.push(chunk)
+  handle.chunkBytes += bytes
+  // At most one checkpoint per second and one pending write per stream.
+  // Backlogged database work cannot create an unbounded per-token queue.
+  if(handle.checkpoint || Date.now() - handle.lastCheckpoint < 1_000) return
+  handle.lastCheckpoint = Date.now()
+  handle.checkpoint = handle.database.checkpointConversationChunks(handle.recordId, handle.chunks.slice())
+    .catch(() => log?.warn({ requestId: handle.requestId }, 'conversation checkpoint failed'))
+    .finally(() => { handle.checkpoint = null })
 }
 
-function completeGatewayAudit(handle: GatewayAuditHandle | null, completion: Omit<PlatformConversationAuditCompletion, 'completedAt'> & { completedAt?: string }, log: { warn: (bindings: Record<string, unknown>, message: string) => void }) {
-  if (!handle) return
+async function completeGatewayAudit(handle: GatewayAuditHandle | null, completion: Omit<PlatformConversationAuditCompletion, 'completedAt'> & { completedAt?: string }, log: { warn: (bindings: Record<string, unknown>, message: string) => void }) {
+  if(!handle) return
   try {
-    handle.database.completeConversationAuditCapture(handle.requestId, { ...completion, completedAt: completion.completedAt ?? new Date().toISOString() })
-  } catch (error) {
+    await handle.checkpoint
+    await handle.database.completeConversationAuditCapture(handle.requestId, { ...completion, responseChunks: handle.chunks, captureError: completion.captureError ?? (handle.truncated ? '流式审计事件达到保存上限；回复摘要仍单独保存。' : null), completedAt: completion.completedAt ?? new Date().toISOString() })
+  } catch(error) {
     log.warn({ requestId: handle.requestId, error: error instanceof Error ? error.message : 'unknown' }, 'conversation audit capture completion failed')
   }
 }
 
 function groupingForBody(body: unknown): { type: 'conversation' | 'independent_call'; label: string } {
-  if (body && typeof body === 'object') {
+  if(body && typeof body === 'object') {
     const value = body as Record<string, unknown>
     const candidate = value.conversation_id ?? value.conversationId ?? (value.metadata && typeof value.metadata === 'object' ? (value.metadata as Record<string, unknown>).conversation_id : undefined)
-    if (typeof candidate === 'string' && candidate.trim()) return { type: 'conversation', label: `会话 ${candidate.trim().slice(0, 120)}` }
+    if(typeof candidate === 'string' && candidate.trim()) return { type: 'conversation', label: `会话 ${candidate.trim().slice(0, 120)}` }
   }
   return { type: 'independent_call', label: '独立调用' }
 }
@@ -323,14 +340,14 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
   app.get('/gateway/upstream-health', {
     schema: { response: { 200: gatewayUpstreamHealthResponseSchema } },
   }, async (request) => {
-    if (!externalModelsAvailable()) {
+    if(!externalModelsAvailable()) {
       return { status: 'unconfigured' as const, mode: config.mode, modelCount: 0, latencyMs: null, requestId: request.id }
     }
     const startedAt = Date.now()
     try {
       const models = await upstream.listModels()
       return { status: models.length > 0 ? 'healthy' as const : 'empty' as const, mode: config.mode, modelCount: models.length, latencyMs: Date.now() - startedAt, requestId: request.id }
-    } catch (error) {
+    } catch(error) {
       const code = error instanceof GatewayUpstreamError ? error.code : 'GATEWAY_UPSTREAM_ERROR'
       const status = code === 'GATEWAY_UPSTREAM_AUTH_FAILED'
         ? 'auth_required' as const
@@ -363,13 +380,13 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
     schema: { response: { 200: gatewayModelsResponseSchema, 401: gatewayErrorSchema, 502: gatewayErrorSchema, 503: gatewayErrorSchema, 504: gatewayErrorSchema } },
   }, async (request, reply) => {
     const auth = await authorizeGatewayClient(request.headers.authorization, options, request.id, reply)
-    if ('error' in auth) return auth.error
+    if('error' in auth) return auth.error
     try {
       const models = await upstream.listModels(undefined, auth.upstreamContext)
       const gatewayKey = auth.key
       const visibleModels = gatewayKey ? models.filter((model) => keyAllowsModel(gatewayKey, model.id)) : models
       return { object: 'list' as const, data: visibleModels }
-    } catch (error) {
+    } catch(error) {
       return sendUpstreamError(error, request.id, reply)
     }
   })
@@ -386,13 +403,13 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
     }, async (request, reply) => {
       const startedAt = Date.now()
       const auth = await authorizeGatewayClient(request.headers.authorization, options, request.id, reply)
-      if ('error' in auth) return auth.error
+      if('error' in auth) return auth.error
       const body = mediaRequestSchema.parse(request.body)
       const requestedModel = body.model
       const model = normalizePublicModelId(requestedModel)
       const modelError = authorizeModel(auth.key, requestedModel, model, request.id, reply)
-      if (modelError) return modelError
-      if (typeof upstream.media !== 'function') return sendGatewayError(reply, 400, 'GATEWAY_UNSUPPORTED', '当前中转站未启用多模态 JSON 接口', request.id)
+      if(modelError) return modelError
+      if(typeof upstream.media !== 'function') return sendGatewayError(reply, 400, 'GATEWAY_UNSUPPORTED', '当前中转站未启用多模态 JSON 接口', request.id)
 
       const timing: GatewayRequestTiming = {
         startedAt,
@@ -402,20 +419,20 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
       }
       // Retain only operation metadata in the conversation audit. Image/audio
       // binary or data URLs must never be duplicated into an audit payload.
-      const audit = beginGatewayAudit(options.database, auth.key, {
+      const audit = (await beginGatewayAudit(options.database, auth.key, {
         requestId: request.id,
         model,
         endpoint: publicPath,
         body: { model, mediaEndpoint: publicPath, content: '[多模态输入未采集]' },
         streamed: false,
         startedAt,
-      }, request.log)
+      }, request.log))
       const usageRequest = mediaUsageRequest(publicPath, model)
       const modelCapture = captureActualModel(auth.upstreamContext, model)
       const upstreamStartedAt = Date.now()
       try {
         const response = await upstream.media(upstreamPath, { ...body, model } as OpenAiMediaRequest, undefined, modelCapture.upstreamContext)
-        if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+        if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
           requestId: request.id,
           connector: config.mode,
           requestedModel,
@@ -432,10 +449,10 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
           status: 'succeeded',
           retryCount: 0,
         }, request.log)
-        completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response: { mediaEndpoint: publicPath, model }, totalTokens: 0, terminationReason: 'completed' }, request.log)
+        await completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response: { mediaEndpoint: publicPath, model }, totalTokens: 0, terminationReason: 'completed' }, request.log)
         return mediaResponseSchema.parse(response)
-      } catch (error) {
-        if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+      } catch(error) {
+        if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
           requestId: request.id,
           connector: config.mode,
           requestedModel,
@@ -451,7 +468,7 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
           retryCount: 0,
         }, request.log)
         const details = gatewayErrorDetails(error)
-        completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
+        await completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
         return sendUpstreamError(error, request.id, reply)
       }
     })
@@ -469,13 +486,13 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
   }, async (request, reply) => {
     const startedAt = Date.now()
     const auth = await authorizeGatewayClient(request.headers.authorization, options, request.id, reply)
-    if ('error' in auth) return auth.error
+    if('error' in auth) return auth.error
     const aiOpsAuthMs = Date.now() - startedAt
     const parsedBody = chatCompletionRequestSchema.parse(request.body)
     const requestedModel = parsedBody.model
     const model = normalizePublicModelId(requestedModel)
     const modelError = authorizeModel(auth.key, requestedModel, model, request.id, reply)
-    if (modelError) return modelError
+    if(modelError) return modelError
     const stream = parsedBody.stream ?? config.defaultStreaming
     const compactionStartedAt = Date.now()
     const compacted = compactChatRequest({ ...parsedBody, stream }, config.context)
@@ -483,17 +500,17 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
     const body = { ...parsedBody, ...compacted.request, stream }
     const timing: GatewayRequestTiming = { startedAt, aiOpsAuthMs, contextCompactionMs, context: compacted.metrics }
     request.log.info({ requestId: request.id, gatewayRoute: '/v1/chat/completions', model: requestedModel }, 'gateway chat completion')
-    const audit = beginGatewayAudit(options.database, auth.key, { requestId: request.id, model, endpoint: '/v1/chat/completions', body: { ...body, model }, originalBody: parsedBody, streamed: Boolean(body.stream), startedAt }, request.log)
+    const audit = (await beginGatewayAudit(options.database, auth.key, { requestId: request.id, model, endpoint: '/v1/chat/completions', body: { ...body, model }, originalBody: parsedBody, streamed: Boolean(body.stream), startedAt }, request.log))
     const modelCapture = captureActualModel(auth.upstreamContext, model)
     let retryCount = 0
     let upstreamStartedAt = 0
-    if (body.stream) return streamChatCompletion(request, reply, upstream, { ...body, model, stream: true }, timing, modelCapture.upstreamContext, async (result) => {
-      if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+    if(body.stream) return streamChatCompletion(request, reply, upstream, { ...body, model, stream: true }, timing, modelCapture.upstreamContext, async (result) => {
+      if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
         requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(), protocol: 'chat_completions', streamed: true,
         request: { ...body, model }, startedAt, headers: request.headers, measurement: result.measurement,
         status: result.status, error: result.error,
       }, request.log)
-      completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, response: result.measurement.response, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'stop' : 'cancelled'), captureError: result.error?.message }, request.log)
+      await completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, response: result.measurement.response, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'stop' : 'cancelled'), captureError: result.error?.message }, request.log)
     }, (chunk) => appendGatewayAuditChunk(audit, chunk, request.log))
     try {
       upstreamStartedAt = Date.now()
@@ -503,21 +520,21 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
         upstreamContext: modelCapture.upstreamContext,
       })
       const response = completion.response
-      if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+      if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
         requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(modelForResponse(response, model)), protocol: 'chat_completions', streamed: false,
         request: { ...body, model }, startedAt, headers: request.headers,
         measurement: nonStreamingMeasurement(response, timing, upstreamStartedAt), status: 'succeeded', retryCount: completion.retryCount,
       }, request.log)
-      completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response, totalTokens: responseUsageTokens(response), terminationReason: responseFinishReason(response) }, request.log)
+      await completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response, totalTokens: responseUsageTokens(response), terminationReason: responseFinishReason(response) }, request.log)
       return chatCompletionResponseSchema.parse(response)
-    } catch (error) {
-      if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+    } catch(error) {
+      if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
         requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(), protocol: 'chat_completions', streamed: false,
         request: { ...body, model }, startedAt, headers: request.headers,
         measurement: nonStreamingMeasurement(undefined, timing, upstreamStartedAt || Date.now()), status: isCancelledError(error) ? 'cancelled' : 'failed', error: gatewayErrorDetails(error), retryCount,
       }, request.log)
       const details = gatewayErrorDetails(error)
-      completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
+      await completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
       return sendUpstreamError(error, request.id, reply)
     }
   })
@@ -530,7 +547,7 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
   }, async (request, reply) => {
     const startedAt = Date.now()
     const auth = await authorizeGatewayClient(request.headers.authorization, options, request.id, reply)
-    if ('error' in auth) return auth.error
+    if('error' in auth) return auth.error
     const aiOpsAuthMs = Date.now() - startedAt
     const parsedBody = responsesRequestSchema.parse(request.body)
     const stream = parsedBody.stream ?? config.defaultStreaming
@@ -543,55 +560,55 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
     const model = normalizePublicModelId(requestedModel)
     const nativeResponses = (options.supportsNativeResponses?.(model) ?? false) && typeof upstream.responses === 'function'
     const unsupported = nativeResponses ? [] : unsupportedResponseFields(body)
-    if (unsupported.length > 0) return sendGatewayError(reply, 400, 'GATEWAY_UNSUPPORTED', `Responses 字段暂不支持：${unsupported.join('、')}`, request.id)
+    if(unsupported.length > 0) return sendGatewayError(reply, 400, 'GATEWAY_UNSUPPORTED', `Responses 字段暂不支持：${unsupported.join('、')}`, request.id)
     const modelError = authorizeModel(auth.key, requestedModel, model, request.id, reply)
-    if (modelError) return modelError
+    if(modelError) return modelError
     request.log.info({ requestId: request.id, gatewayRoute: '/v1/responses', model: requestedModel }, 'gateway response request')
-    const audit = beginGatewayAudit(options.database, auth.key, { requestId: request.id, model, endpoint: '/v1/responses', body: { ...body, model }, originalBody: parsedBody, streamed: Boolean(body.stream), startedAt }, request.log)
+    const audit = (await beginGatewayAudit(options.database, auth.key, { requestId: request.id, model, endpoint: '/v1/responses', body: { ...body, model }, originalBody: parsedBody, streamed: Boolean(body.stream), startedAt }, request.log))
     const modelCapture = captureActualModel(auth.upstreamContext, model)
 
-    if (nativeResponses) {
+    if(nativeResponses) {
       const nativeRequest = { ...body, model } as OpenAiResponsesRequest
       const usageRequest = toChatRequest(body, model)
-      if (body.stream && typeof upstream.responsesStream === 'function') {
+      if(body.stream && typeof upstream.responsesStream === 'function') {
         return streamResponses(request, reply, upstream, nativeRequest, timing, modelCapture.upstreamContext, async (result) => {
-          if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+          if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
             requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(), protocol: 'responses', streamed: true,
             request: usageRequest, startedAt, headers: request.headers, measurement: result.measurement,
             status: result.status, error: result.error,
           }, request.log)
-          completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, response: result.measurement.response, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'completed' : 'cancelled'), captureError: result.error?.message }, request.log)
+          await completeGatewayAudit(audit, { status: result.status, httpStatus: result.status === 'succeeded' ? 200 : result.error ? errorStatusCode(result.error.code) : 499, response: result.measurement.response, terminationReason: result.error?.code ?? (result.status === 'succeeded' ? 'completed' : 'cancelled'), captureError: result.error?.message }, request.log)
         }, (event) => appendGatewayAuditChunk(audit, event, request.log))
       }
-      if (body.stream) {
-        completeGatewayAudit(audit, { status: 'body_unavailable', httpStatus: 502, terminationReason: 'GATEWAY_UPSTREAM_INVALID_RESPONSE', captureError: '当前上游未提供 Responses 流式接口' }, request.log)
+      if(body.stream) {
+        await completeGatewayAudit(audit, { status: 'body_unavailable', httpStatus: 502, terminationReason: 'GATEWAY_UPSTREAM_INVALID_RESPONSE', captureError: '当前上游未提供 Responses 流式接口' }, request.log)
         return sendGatewayError(reply, 502, 'GATEWAY_UPSTREAM_INVALID_RESPONSE', '当前上游未提供 Responses 流式接口', request.id)
       }
       let upstreamStartedAt = 0
       try {
         upstreamStartedAt = Date.now()
         const response = await upstream.responses!(nativeRequest, undefined, modelCapture.upstreamContext)
-        if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+        if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
           requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(modelForResponse(response, model)), protocol: 'responses', streamed: false,
           request: usageRequest, startedAt, headers: request.headers,
           measurement: nonStreamingMeasurement(response, timing, upstreamStartedAt), status: 'succeeded', retryCount: 0,
         }, request.log)
-        completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response, totalTokens: responseUsageTokens(response), terminationReason: responseFinishReason(response) }, request.log)
+        await completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response, totalTokens: responseUsageTokens(response), terminationReason: responseFinishReason(response) }, request.log)
         return responsesResponseSchema.parse(response)
-      } catch (error) {
-        if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+      } catch(error) {
+        if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
           requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(), protocol: 'responses', streamed: false,
           request: usageRequest, startedAt, headers: request.headers,
           measurement: nonStreamingMeasurement(undefined, timing, upstreamStartedAt || Date.now()), status: isCancelledError(error) ? 'cancelled' : 'failed', error: gatewayErrorDetails(error), retryCount: 0,
         }, request.log)
         const details = gatewayErrorDetails(error)
-        completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
+        await completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
         return sendUpstreamError(error, request.id, reply)
       }
     }
 
-    if (body.stream) {
-      completeGatewayAudit(audit, {
+    if(body.stream) {
+      await completeGatewayAudit(audit, {
         status: 'body_unavailable',
         httpStatus: 400,
         terminationReason: 'GATEWAY_UNSUPPORTED',
@@ -609,21 +626,21 @@ export function registerGatewayRoutes(app: FastifyInstance, config: GatewayConfi
         upstreamContext: modelCapture.upstreamContext,
       })
       const response = completion.response
-      if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+      if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
         requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(modelForResponse(response, model)), protocol: 'responses', streamed: false,
         request: toChatRequest(body, model), startedAt, headers: request.headers,
         measurement: nonStreamingMeasurement(response, timing, upstreamStartedAt), status: 'succeeded', retryCount: completion.retryCount,
       }, request.log)
-      completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response: toResponsePayload(response), totalTokens: responseUsageTokens(response), terminationReason: responseFinishReason(response) }, request.log)
+      await completeGatewayAudit(audit, { status: 'succeeded', httpStatus: 200, response: toResponsePayload(response), totalTokens: responseUsageTokens(response), terminationReason: responseFinishReason(response) }, request.log)
       return responsesResponseSchema.parse(toResponsePayload(response))
-    } catch (error) {
-      if (auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
+    } catch(error) {
+      if(auth.key && options.database) await recordGatewayUsageSafely(options.database, auth.key, {
         requestId: request.id, connector: config.mode, requestedModel, actualModel: modelCapture.actualModel(), protocol: 'responses', streamed: false,
         request: toChatRequest(body, model), startedAt, headers: request.headers,
         measurement: nonStreamingMeasurement(undefined, timing, upstreamStartedAt || Date.now()), status: isCancelledError(error) ? 'cancelled' : 'failed', error: gatewayErrorDetails(error), retryCount,
       }, request.log)
       const details = gatewayErrorDetails(error)
-      completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
+      await completeGatewayAudit(audit, { status: isCancelledError(error) ? 'cancelled' : 'failed', httpStatus: details.statusCode, terminationReason: details.code, captureError: details.message }, request.log)
       return sendUpstreamError(error, request.id, reply)
     }
   })
@@ -654,7 +671,7 @@ function captureActualModel(upstreamContext: GatewayRequestContext | undefined, 
       ...upstreamContext,
       onActualModel(modelId: string) {
         const normalized = validActualModel(modelId)
-        if (normalized) selectedModel = normalized
+        if(normalized) selectedModel = normalized
         // An observability listener must never affect the user request.
         try { previousObserver?.(modelId) } catch { /* ignore observer failure */ }
       },
@@ -666,9 +683,9 @@ function captureActualModel(upstreamContext: GatewayRequestContext | undefined, 
 }
 
 function validActualModel(value: unknown) {
-  if (typeof value !== 'string') return null
+  if(typeof value !== 'string') return null
   const normalized = value.trim()
-  if (!normalized || normalized.length > 160 || /[\u0000-\u001f\u007f]/.test(normalized) || isPublicModelId(normalized)) return null
+  if(!normalized || normalized.length > 160 || /[\u0000-\u001f\u007f]/.test(normalized) || isPublicModelId(normalized)) return null
   return normalized
 }
 
@@ -709,14 +726,14 @@ function nonStreamingMeasurement(response: Record<string, unknown> | undefined, 
 const maximumCapturedStreamTextChars = 250_000
 
 function streamText(value: unknown): string {
-  if (!value || typeof value !== 'object') return ''
+  if(!value || typeof value !== 'object') return ''
   const payload = value as Record<string, unknown>
-  if (typeof payload.delta === 'string') return payload.delta
-  if (typeof payload.output_text === 'string') return payload.output_text
-  if (typeof payload.text === 'string') return payload.text
+  if(typeof payload.delta === 'string') return payload.delta
+  if(typeof payload.output_text === 'string') return payload.output_text
+  if(typeof payload.text === 'string') return payload.text
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   return choices.map((choice) => {
-    if (!choice || typeof choice !== 'object') return ''
+    if(!choice || typeof choice !== 'object') return ''
     const item = choice as Record<string, unknown>
     const message = item.delta && typeof item.delta === 'object' ? item.delta : item.message && typeof item.message === 'object' ? item.message : item
     return typeof (message as Record<string, unknown>).content === 'string' ? (message as Record<string, unknown>).content as string : ''
@@ -728,19 +745,19 @@ function appendCapturedStreamText(current: string, value: unknown) {
 }
 
 function appendCapturedText(current: string, next: string) {
-  if (current.length >= maximumCapturedStreamTextChars) return current
-  if (!next) return current
+  if(current.length >= maximumCapturedStreamTextChars) return current
+  if(!next) return current
   return `${current}${next.slice(0, maximumCapturedStreamTextChars - current.length)}`
 }
 
 function responseOutputText(event: OpenAiResponsesEvent, allowDoneFallback = false) {
   const eventType = event.event ?? (typeof event.data.type === 'string' ? event.data.type : '')
-  if (eventType === 'response.output_text.delta') return typeof event.data.delta === 'string' ? event.data.delta : ''
-  if (allowDoneFallback && eventType === 'response.output_text.done') return typeof event.data.text === 'string' ? event.data.text : ''
+  if(eventType === 'response.output_text.delta') return typeof event.data.delta === 'string' ? event.data.delta : ''
+  if(allowDoneFallback && eventType === 'response.output_text.done') return typeof event.data.text === 'string' ? event.data.text : ''
   // A few compatible upstreams omit the SSE `event:` line. Keep their plain
   // delta payloads working, but never treat reasoning summaries or completed
   // response snapshots as visible assistant output.
-  if (!eventType && typeof event.data.delta === 'string') return event.data.delta
+  if(!eventType && typeof event.data.delta === 'string') return event.data.delta
   return ''
 }
 
@@ -748,7 +765,7 @@ async function streamChatCompletion(
   request: FastifyRequest,
   reply: FastifyReply,
   upstream: GatewayUpstream,
-  body: { model: string; messages: Array<{ role: string; content: unknown; [key: string]: unknown }>; [key: string]: unknown },
+  body: { model: string; messages: Array<{ role: string; content: unknown;[key: string]: unknown }>;[key: string]: unknown },
   timing: GatewayRequestTiming,
   upstreamContext?: GatewayRequestContext,
   onComplete?: (result: { status: 'succeeded' | 'failed' | 'cancelled'; error?: { code: string; message: string }; measurement: GatewayUsageMeasurement }) => Promise<void>,
@@ -765,12 +782,12 @@ async function streamChatCompletion(
   let capturedText = ''
   let upstreamStartedAt = 0
   const onClose = () => {
-    if (reply.raw.writableEnded) return
+    if(reply.raw.writableEnded) return
     clientClosed = true
     abortController.abort()
     void upstream.cancel(request.id).catch(() => undefined)
   }
-  request.raw.once('close', onClose)
+  reply.raw.once('close', onClose)
   reply.hijack()
   reply.raw.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -782,40 +799,42 @@ async function streamChatCompletion(
   reply.raw.flushHeaders()
   try {
     upstreamStartedAt = Date.now()
-    await upstream.chatCompletionStream(body, (chunk) => {
+    await upstream.chatCompletionStream(body, async (chunk) => {
       onChunk?.(chunk)
       capturedText = appendCapturedStreamText(capturedText, chunk)
       const textLength = chunkTextLength(chunk)
-      if (firstTokenMs === null && textLength > 0) {
+      if(firstTokenMs === null && textLength > 0) {
         firstTokenMs = Date.now() - timing.startedAt
         upstreamFirstTokenMs = Date.now() - upstreamStartedAt
       }
       usage = usageFromPayload(chunk) ?? usage
       outputLength += textLength
-      if (!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`)
+      if(!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded && !reply.raw.write(`data: ${JSON.stringify(chunk)}\n\n`)) await once(reply.raw, 'drain', { signal: abortController.signal })
     }, abortController.signal, request.id, upstreamContext)
-    if (clientClosed) status = 'cancelled'
-    else if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+    if(clientClosed) status = 'cancelled'
+    else if(!reply.raw.destroyed && !reply.raw.writableEnded) {
       reply.raw.write('data: [DONE]\n\n')
       reply.raw.end()
     }
-  } catch (error) {
+  } catch(error) {
     const details = gatewayErrorDetails(error)
     errorDetails = details
     status = clientClosed || isCancelledError(error) ? 'cancelled' : 'failed'
-    if (!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) {
+    if(!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) {
       reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: { ...details, requestId: request.id } })}\n\n`)
       reply.raw.end()
     }
   } finally {
-    request.raw.removeListener('close', onClose)
-    if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end()
-    if (onComplete) await onComplete({ status, error: errorDetails, measurement: {
-      usage, response: capturedText ? { output_text: capturedText } : undefined, outputTextLength: outputLength, firstTokenMs,
-      upstreamFirstTokenMs,
-      upstreamTotalMs: upstreamStartedAt ? Math.max(0, Date.now() - upstreamStartedAt) : 0,
-      aiOpsAuthMs: timing.aiOpsAuthMs, contextCompactionMs: timing.contextCompactionMs, context: timing.context,
-    } })
+    reply.raw.removeListener('close', onClose)
+    if(!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end()
+    if(onComplete) await onComplete({
+      status, error: errorDetails, measurement: {
+        usage, response: capturedText ? { output_text: capturedText } : undefined, outputTextLength: outputLength, firstTokenMs,
+        upstreamFirstTokenMs,
+        upstreamTotalMs: upstreamStartedAt ? Math.max(0, Date.now() - upstreamStartedAt) : 0,
+        aiOpsAuthMs: timing.aiOpsAuthMs, contextCompactionMs: timing.contextCompactionMs, context: timing.context,
+      }
+    })
   }
 }
 
@@ -841,12 +860,12 @@ async function streamResponses(
   let receivedOutputTextDelta = false
   let upstreamStartedAt = 0
   const onClose = () => {
-    if (reply.raw.writableEnded) return
+    if(reply.raw.writableEnded) return
     clientClosed = true
     abortController.abort()
     void upstream.cancel(request.id).catch(() => undefined)
   }
-  request.raw.once('close', onClose)
+  reply.raw.once('close', onClose)
   reply.hijack()
   reply.raw.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -858,43 +877,45 @@ async function streamResponses(
   reply.raw.flushHeaders()
   try {
     upstreamStartedAt = Date.now()
-    await upstream.responsesStream!(body, (event: OpenAiResponsesEvent) => {
+    await upstream.responsesStream!(body, async (event: OpenAiResponsesEvent) => {
       onEvent?.(event)
       const outputText = responseOutputText(event, !receivedOutputTextDelta)
       const eventType = event.event ?? (typeof event.data.type === 'string' ? event.data.type : '')
-      if (eventType === 'response.output_text.delta') receivedOutputTextDelta = true
+      if(eventType === 'response.output_text.delta') receivedOutputTextDelta = true
       capturedText = appendCapturedText(capturedText, outputText)
       const textLength = outputText.length
-      if (firstTokenMs === null && textLength > 0) {
+      if(firstTokenMs === null && textLength > 0) {
         firstTokenMs = Date.now() - timing.startedAt
         upstreamFirstTokenMs = Date.now() - upstreamStartedAt
       }
       usage = usageFromPayload(event.data) ?? usage
       outputLength += textLength
-      if (!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) {
+      if(!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) {
         const prefix = event.event ? `event: ${event.event}\n` : ''
-        reply.raw.write(`${prefix}data: ${JSON.stringify(event.data)}\n\n`)
+        if(!reply.raw.write(`${prefix}data: ${JSON.stringify(event.data)}\n\n`)) await once(reply.raw, 'drain', { signal: abortController.signal })
       }
     }, abortController.signal, request.id, upstreamContext)
-    if (clientClosed) status = 'cancelled'
-    else if (!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end()
-  } catch (error) {
+    if(clientClosed) status = 'cancelled'
+    else if(!reply.raw.destroyed && !reply.raw.writableEnded) reply.raw.end()
+  } catch(error) {
     const details = gatewayErrorDetails(error)
     errorDetails = details
     status = clientClosed || isCancelledError(error) ? 'cancelled' : 'failed'
-    if (!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) {
+    if(!clientClosed && !reply.raw.destroyed && !reply.raw.writableEnded) {
       reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: { ...details, requestId: request.id } })}\n\n`)
       reply.raw.end()
     }
   } finally {
-    request.raw.removeListener('close', onClose)
-    if (!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end()
-    if (onComplete) await onComplete({ status, error: errorDetails, measurement: {
-      usage, response: capturedText ? { output_text: capturedText } : undefined, outputTextLength: outputLength, firstTokenMs,
-      upstreamFirstTokenMs,
-      upstreamTotalMs: upstreamStartedAt ? Math.max(0, Date.now() - upstreamStartedAt) : 0,
-      aiOpsAuthMs: timing.aiOpsAuthMs, contextCompactionMs: timing.contextCompactionMs, context: timing.context,
-    } })
+    reply.raw.removeListener('close', onClose)
+    if(!reply.raw.writableEnded && !reply.raw.destroyed) reply.raw.end()
+    if(onComplete) await onComplete({
+      status, error: errorDetails, measurement: {
+        usage, response: capturedText ? { output_text: capturedText } : undefined, outputTextLength: outputLength, firstTokenMs,
+        upstreamFirstTokenMs,
+        upstreamTotalMs: upstreamStartedAt ? Math.max(0, Date.now() - upstreamStartedAt) : 0,
+        aiOpsAuthMs: timing.aiOpsAuthMs, contextCompactionMs: timing.contextCompactionMs, context: timing.context,
+      }
+    })
   }
 }
 
@@ -913,20 +934,47 @@ async function recordGatewayUsageSafely(
   log: { warn: (bindings: Record<string, unknown>, message: string) => void },
 ) {
   try {
-    recordGatewayUsage({ ...context, database, key })
-  } catch (error) {
+    await recordGatewayUsage({ ...context, database, key })
+  } catch(error) {
     log.warn({ requestId: context.requestId, error: error instanceof Error ? error.message : 'unknown' }, 'gateway telemetry write failed')
   }
 }
 
 async function authorizeGatewayClient(authorization: string | undefined, options: GatewayRouteOptions, requestId: string, reply: any): Promise<GatewayAuthorization | { error: unknown }> {
   const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim()
-  if (!token) {
+  if(!token) {
     reply.header('www-authenticate', 'Bearer')
     return { error: sendGatewayError(reply, 401, 'GATEWAY_AUTH_REQUIRED', '请提供网关客户端凭据', requestId) }
   }
-  const key = options.database?.findGatewayKey(token)
-  if (key) return { key }
+  const key = (await options.database?.findGatewayKey(token))
+  if(key) {
+    const controller = new AbortController()
+    reply.raw.once('close', () => { if(!reply.raw.writableEnded) controller.abort() })
+    if(options.runtime && reply.request.method === 'POST' && !reply.request.url.includes('/cancel')) {
+      try {
+        const { runtimeLimit } = await import('../runtime-coordinator.js')
+        if(!await options.runtime.rateLimit('gateway:' + key.ownerUserId, runtimeLimit('AI_OPS_EMPLOYEE_RPM', 120))) {
+          reply.header('retry-after', '60')
+          return { error: sendGatewayError(reply, 429, 'GATEWAY_RATE_LIMITED', '当前人员调用过于频繁，请稍后重试', requestId) }
+        }
+        const release = await options.runtime.acquire([
+          { key: 'gateway', limit: runtimeLimit('AI_OPS_GATEWAY_CONCURRENCY', 200) },
+          { key: 'person:' + key.ownerUserId, limit: runtimeLimit('AI_OPS_EMPLOYEE_CONCURRENCY', 4) },
+        ], { signal: controller.signal, waitMs: 1_000 })
+        if(!release) {
+          reply.header('retry-after', '1')
+          return { error: sendGatewayError(reply, 429, 'GATEWAY_RATE_LIMITED', '当前并发较多，请稍后重试', requestId) }
+        }
+        const done = () => { void release().catch(() => undefined) }
+        reply.raw.once('finish', done)
+        reply.raw.once('close', done)
+        if(controller.signal.aborted) { await release(); return { error: sendGatewayError(reply, 503, 'GATEWAY_UNAVAILABLE', '请求已取消', requestId) } }
+      } catch {
+        return { error: sendGatewayError(reply, 503, 'GATEWAY_UNAVAILABLE', '并发控制服务暂时不可用，请稍后重试', requestId) }
+      }
+    }
+    return { key, upstreamContext: { signal: controller.signal } }
+  }
   // Platform Keys are the only accepted client credential. Relay account
   // credentials remain encrypted server-side and are never used for client
   // authentication.
@@ -940,7 +988,7 @@ function keyAllowsModel(key: PlatformGatewayKey, model: string) {
 }
 
 function authorizeModel(key: PlatformGatewayKey | null, requestedModel: string, resolvedModel: string, requestId: string, reply: any) {
-  if (!key || keyAllowsModel(key, requestedModel) || keyAllowsModel(key, resolvedModel)) return null
+  if(!key || keyAllowsModel(key, requestedModel) || keyAllowsModel(key, resolvedModel)) return null
   return sendGatewayError(reply, 403, 'GATEWAY_MODEL_FORBIDDEN', `当前 Key 未获准调用 ${requestedModel}`, requestId)
 }
 
@@ -954,21 +1002,21 @@ function sendGatewayError(reply: any, statusCode: number, code: string, message:
 }
 
 function gatewayErrorDetails(error: unknown) {
-  if (error instanceof GatewayUpstreamError) return { statusCode: error.statusCode, code: error.code, message: error.message }
+  if(error instanceof GatewayUpstreamError) return { statusCode: error.statusCode, code: error.code, message: error.message }
   return { statusCode: 502, code: 'GATEWAY_UPSTREAM_ERROR', message: '上游服务暂时不可用' }
 }
 
 function errorStatusCode(code: string) {
-  if (code.includes('CANCEL')) return 499
-  if (code.includes('RATE_LIMIT')) return 429
-  if (code.includes('TIMEOUT')) return 504
-  if (code.includes('AUTH')) return 502
+  if(code.includes('CANCEL')) return 499
+  if(code.includes('RATE_LIMIT')) return 429
+  if(code.includes('TIMEOUT')) return 504
+  if(code.includes('AUTH')) return 502
   return 502
 }
 
 function responseUsageTokens(response: Record<string, unknown>) {
   const usage = response.usage
-  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return 0
+  if(!usage || typeof usage !== 'object' || Array.isArray(usage)) return 0
   const value = usage as Record<string, unknown>
   const input = Number(value.prompt_tokens ?? value.input_tokens ?? 0)
   const output = Number(value.completion_tokens ?? value.output_tokens ?? 0)
@@ -978,7 +1026,7 @@ function responseUsageTokens(response: Record<string, unknown>) {
 function responseFinishReason(response: Record<string, unknown>) {
   const choices = Array.isArray(response.choices) ? response.choices : []
   const first = choices[0]
-  if (first && typeof first === 'object' && typeof (first as Record<string, unknown>).finish_reason === 'string') return (first as Record<string, unknown>).finish_reason as string
-  if (typeof response.status === 'string') return response.status
+  if(first && typeof first === 'object' && typeof (first as Record<string, unknown>).finish_reason === 'string') return (first as Record<string, unknown>).finish_reason as string
+  if(typeof response.status === 'string') return response.status
   return null
 }

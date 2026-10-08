@@ -88,7 +88,7 @@ export type UsageQuery = z.infer<typeof usageQuerySchema>
 export type UsageResponse = z.infer<typeof usageResponseSchema>
 export type UsageDetailResponse = z.infer<typeof usageDetailResponseSchema>
 type UsageItem = z.infer<typeof usageItemSchema>
-type UsageRecord = ReturnType<PlatformDatabase['listUsageRequests']>[number]
+type UsageRecord = Awaited<ReturnType<PlatformDatabase['listUsageRequests']>>[number]
 const costLabels = { platform_estimate: '平台估算' } as const
 
 function toItem(record: UsageRecord): UsageItem {
@@ -140,8 +140,8 @@ function optionsFor(items: UsageItem[]) {
   }
 }
 
-export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuery, now = new Date()): UsageResponse {
-  const all = database.listUsageRequests().map(toItem)
+export async function createDatabaseUsage(database: PlatformDatabase, query: UsageQuery, now = new Date()): Promise<UsageResponse> {
+  const all = (await database.listUsageRequests()).map(toItem)
   const cutoff = now.getTime() - periodMs(query.period)
   const search = query.search.toLocaleLowerCase('zh-CN')
   const filtered = all.filter((item) => {
@@ -175,10 +175,10 @@ export function createDatabaseUsage(database: PlatformDatabase, query: UsageQuer
   }
 }
 
-export function createDatabaseUsageDetail(database: PlatformDatabase, requestId: string, now = new Date(), canAccessConversationAudit = false): UsageDetailResponse | null {
-  const record = database.listUsageRequests().find((item) => item.requestId === requestId)
-  if (!record) return null
-  const link = canAccessConversationAudit ? database.getUsageConversationLink(record.requestId) : null
+export async function createDatabaseUsageDetail(database: PlatformDatabase, requestId: string, now = new Date(), canAccessConversationAudit = false): Promise<UsageDetailResponse | null> {
+  const record = (await database.listUsageRequests()).find((item) => item.requestId === requestId)
+  if(!record) return null
+  const link = canAccessConversationAudit ? (await database.getUsageConversationLink(record.requestId)) : null
   return {
     meta: { source: 'database', simulated: false, generatedAt: now.toISOString(), notice: '当前读取统一模型网关的脱敏调用元数据。' },
     item: toItem(record),

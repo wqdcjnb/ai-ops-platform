@@ -1,4 +1,4 @@
-param(
+﻿param(
   [int]$WebPort = 4174,
   [int]$ServerPort = 4175,
   [switch]$SkipHealth
@@ -8,7 +8,8 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $serverRoot = Split-Path -Parent $scriptRoot
 $envPath = Join-Path $serverRoot '.env.local'
-$dbPath = Join-Path $serverRoot 'data\platform.sqlite'
+$dockerEnvPath = Join-Path (Split-Path -Parent (Split-Path -Parent $serverRoot)) '.env'
+if (-not (Test-Path -LiteralPath $envPath) -and (Test-Path -LiteralPath $dockerEnvPath)) { $envPath = $dockerEnvPath }
 
 function Read-LocalEnv([string]$Path) {
   $values = @{}
@@ -45,8 +46,8 @@ function Test-Health([int]$Port, [string]$Path) {
     Write-Host "FAIL  $Path responded with HTTP $($response.StatusCode)" -ForegroundColor Red
     return $false
   } catch {
-    Write-Host "WARN  $Path is not reachable yet; start the BFF before browser testing" -ForegroundColor Yellow
-    return $true
+    Write-Host "FAIL  $Path is not healthy; check server, PostgreSQL and Redis" -ForegroundColor Red
+    return $false
   }
 }
 
@@ -68,22 +69,22 @@ if ($values.ContainsKey('AUTH_MODE') -and $values['AUTH_MODE'] -eq 'disabled') {
   Write-Host 'PASS  authentication remains enabled' -ForegroundColor Green
 }
 
-if (Test-Path -LiteralPath $dbPath -PathType Leaf) {
-  Write-Host "PASS  SQLite database exists: $dbPath" -ForegroundColor Green
+if (($values['DATABASE_URL'] -and $values['REDIS_URL']) -or ($values['POSTGRES_PASSWORD'] -and $values['REDIS_PASSWORD'])) {
+  Write-Host 'PASS  PostgreSQL and Redis configuration found (credentials hidden)' -ForegroundColor Green
 } else {
-  Write-Host "FAIL  SQLite database is missing: $dbPath" -ForegroundColor Red
+  Write-Host 'FAIL  PostgreSQL/Redis configuration missing; run start-docker.cmd first' -ForegroundColor Red
   $failures++
 }
 
 [void](Test-Port $WebPort 'web')
 [void](Test-Port $ServerPort 'BFF')
 if (-not $SkipHealth) {
-  [void](Test-Health $ServerPort '/health')
-  [void](Test-Health $ServerPort '/gateway/health')
+  if (-not (Test-Health $ServerPort '/health')) { $failures++ }
+  if (-not (Test-Health $ServerPort '/gateway/health')) { $failures++ }
 }
 
 if ($failures -gt 0) {
   Write-Host "Preflight failed with $failures blocking issue(s)." -ForegroundColor Red
   exit 1
 }
-Write-Host 'Preflight passed. This environment is limited to local administrator testing.' -ForegroundColor Green
+Write-Host 'Preflight passed. This checks readiness, not load capacity or high availability.' -ForegroundColor Green

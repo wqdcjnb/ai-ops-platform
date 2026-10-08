@@ -24,7 +24,7 @@ export const externalProviderInputSchema = z.object({
   name: z.string().trim().min(1).max(80),
   baseUrl: z.string().trim().url().max(512),
   apiKey: z.string().trim().min(1).max(2_048).optional(),
-  modelIds: z.array(z.string().trim().min(1).max(160)).max(500).optional().default([]),
+  modelIds: z.array(z.string().trim().min(1).max(160)).max(10_000).optional().default([]),
   enabled: z.boolean(),
 })
 
@@ -123,7 +123,7 @@ export async function testExternalProviderModels(input: Pick<ExternalProviderInp
   const body = z.object({
     baseUrl: z.string().trim().url().max(512),
     apiKey: z.string().trim().min(1).max(2_048),
-    modelIds: z.array(z.string().trim().min(1).max(160)).min(1).max(500),
+    modelIds: z.array(z.string().trim().min(1).max(160)).min(1).max(10_000),
   }).parse(input)
   const response = await fetch('/api/external-providers/test', {
     method: 'POST', headers: withCsrfHeader({ accept: 'application/json', 'content-type': 'application/json' }), body: JSON.stringify(body),

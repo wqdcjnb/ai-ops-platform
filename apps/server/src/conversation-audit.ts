@@ -168,9 +168,9 @@ function createConversationAuditResponse(all: ConversationAuditRecord[], query: 
   const unique = <T extends { id: string; label: string }>(values: T[]) => [...new Map(values.map((item) => [item.id, item])).values()]
   const expiry = all.filter((item) => item.state === 'captured').map((item) => item.policy.expiresAt).sort()[0] ?? now.toISOString()
   const hasRealCapture = all.some((item) => item.endpoint || item.promptAvailable || item.responseAvailable || item.status === 'streaming')
-  const retentionMode = hasRealCapture ? 'encrypted_sqlite' as const : 'metadata_only' as const
+  const retentionMode = hasRealCapture ? 'encrypted_postgres' as const : 'metadata_only' as const
   return {
-    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: hasRealCapture ? '真实网关请求已在服务端采集；正文以加密引用保存在本地 SQLite，列表不返回正文。' : '当前没有可展示的正文采集记录；未采集的历史请求无法还原正文。' },
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), period: query.period, notice: hasRealCapture ? '真实网关请求已在服务端采集；正文以加密引用保存在 PostgreSQL，列表不返回正文。' : '当前没有可展示的正文采集记录；未采集的历史请求无法还原正文。' },
     accessControl: { currentRole, serverRbacVerified: true as const, contentRequiresReason: false as const, notice: '当前请求已通过服务端超级管理员 RBAC；选择记录后可直接查看正文，查看、复制和导出仍会写入访问审计。' },
     summary: { total: filtered.length, captured: filtered.filter((item) => item.state === 'captured').length, metadataOnly: filtered.filter((item) => item.state === 'metadata_only').length, expiringSoon: filtered.filter((item) => item.state === 'captured' && new Date(item.policy.expiresAt).getTime() - now.getTime() <= 1_440 * 60_000).length, independentCalls: filtered.filter((item) => item.grouping.type === 'independent_call').length },
     scope: {
@@ -194,47 +194,48 @@ function createConversationAuditResponse(all: ConversationAuditRecord[], query: 
   }
 }
 
-export function createDatabaseConversationAudits(database: PlatformDatabase, query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin') {
-  return createConversationAuditResponse(database.listConversationAuditRecords().map((row) => recordFromDatabase(row, now)), query, now, currentRole, true, database.getConversationAuditCleanupStatus())
+export async function createDatabaseConversationAudits(database: PlatformDatabase, query: ConversationAuditQuery, now = new Date(), currentRole: AppRole = 'super_admin') {
+  return createConversationAuditResponse((await database.listConversationAuditRecords()).map((row) => recordFromDatabase(row, now)), query, now, currentRole, true, (await database.getConversationAuditCleanupStatus()))
 }
 
-export function getDatabaseConversationAuditRecord(database: PlatformDatabase, id: string, now = new Date()) {
-  return database.listConversationAuditRecords().map((row) => recordFromDatabase(row, now)).find((item) => item.id === id) ?? null
+export async function getDatabaseConversationAuditRecord(database: PlatformDatabase, id: string, now = new Date()) {
+  const row = await database.getConversationAuditRecordById(id)
+  return row ? recordFromDatabase(row, now) : null
 }
 
-export function createDatabaseConversationAccessHistory(database: PlatformDatabase, id: string, now = new Date()) {
-  const record = getDatabaseConversationAuditRecord(database, id)
-  if (!record) return null
+export async function createDatabaseConversationAccessHistory(database: PlatformDatabase, id: string, now = new Date()) {
+  const record = (await getDatabaseConversationAuditRecord(database, id))
+  if(!record) return null
   return {
-     meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '仅显示最近 5 条正文访问、复制和导出元数据；系统上下文和凭据均不返回。' },
-     record: { id: record.id, requestId: record.requestId },
-     items: [
-       ...database.listConversationAccessEvents(record.id).map((item) => ({
-       id: item.id,
-       actorName: item.actorName,
-       requestId: item.requestId,
-       action: 'view' as const,
-       reasonProvided: item.reasonProvided === 1,
-       reasonLength: item.reasonLength,
-       acknowledgedSensitiveScope: item.acknowledgedSensitiveScope === 1,
-       occurredAt: item.occurredAt,
-       })),
-       ...database.listConversationAuditOperations(record.id).map((item) => ({
-         id: item.id,
-         actorName: item.actorName,
-         requestId: item.requestId,
-         action: item.action,
-         reasonProvided: item.reasonLength > 0,
-         reasonLength: item.reasonLength,
-         acknowledgedSensitiveScope: true,
-         occurredAt: item.occurredAt,
-       })),
-     ].sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)).slice(0, 5),
-   }
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '仅显示最近 5 条正文访问、复制和导出元数据；系统上下文和凭据均不返回。' },
+    record: { id: record.id, requestId: record.requestId },
+    items: [
+      ...(await database.listConversationAccessEvents(record.id)).map((item) => ({
+        id: item.id,
+        actorName: item.actorName,
+        requestId: item.requestId,
+        action: 'view' as const,
+        reasonProvided: item.reasonProvided === 1,
+        reasonLength: item.reasonLength,
+        acknowledgedSensitiveScope: item.acknowledgedSensitiveScope === 1,
+        occurredAt: item.occurredAt,
+      })),
+      ...(await database.listConversationAuditOperations(record.id)).map((item) => ({
+        id: item.id,
+        actorName: item.actorName,
+        requestId: item.requestId,
+        action: item.action,
+        reasonProvided: item.reasonLength > 0,
+        reasonLength: item.reasonLength,
+        acknowledgedSensitiveScope: true,
+        occurredAt: item.occurredAt,
+      })),
+    ].sort((left, right) => right.occurredAt.localeCompare(left.occurredAt)).slice(0, 5),
+  }
 }
 
 function jsonText(value: unknown) {
-  if (typeof value === 'string') return value
+  if(typeof value === 'string') return value
   try { return JSON.stringify(value, null, 2) ?? '' } catch { return String(value ?? '') }
 }
 
@@ -242,20 +243,20 @@ function userQueryBlocks(value: unknown) {
   const text = jsonText(value).replaceAll('&lt;', '<').replaceAll('&gt;', '>')
   const blocks: string[] = []
   const pattern = /<user_query\b[^>]*>([\s\S]*?)<\/user_query>/gi
-  for (const match of text.matchAll(pattern)) {
+  for(const match of text.matchAll(pattern)) {
     const block = match[1]?.trim()
-    if (block && !blocks.includes(block)) blocks.push(block)
+    if(block && !blocks.includes(block)) blocks.push(block)
   }
   return blocks
 }
 
 function textParts(value: unknown): string[] {
-  if (typeof value === 'string') return [value]
-  if (Array.isArray(value)) return value.flatMap((item) => textParts(item))
-  if (!value || typeof value !== 'object') return []
+  if(typeof value === 'string') return [value]
+  if(Array.isArray(value)) return value.flatMap((item) => textParts(item))
+  if(!value || typeof value !== 'object') return []
   const item = value as Record<string, unknown>
-  if (typeof item.text === 'string') return [item.text]
-  if (typeof item.input_text === 'string') return [item.input_text]
+  if(typeof item.text === 'string') return [item.text]
+  if(typeof item.input_text === 'string') return [item.input_text]
   return 'content' in item ? textParts(item.content) : []
 }
 
@@ -275,15 +276,15 @@ function isInternalCodexContext(value: string) {
 const maximumRecoveredStreamTextChars = 250_000
 
 function streamChunkText(value: unknown): string {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  if(!value || typeof value !== 'object' || Array.isArray(value)) return ''
   const payload = value as Record<string, unknown>
-  if (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) return streamChunkText(payload.data)
-  if (typeof payload.delta === 'string') return payload.delta
-  if (typeof payload.output_text === 'string') return payload.output_text
-  if (typeof payload.text === 'string') return payload.text
+  if(payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data)) return streamChunkText(payload.data)
+  if(typeof payload.delta === 'string') return payload.delta
+  if(typeof payload.output_text === 'string') return payload.output_text
+  if(typeof payload.text === 'string') return payload.text
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   return choices.map((choice) => {
-    if (!choice || typeof choice !== 'object' || Array.isArray(choice)) return ''
+    if(!choice || typeof choice !== 'object' || Array.isArray(choice)) return ''
     const item = choice as Record<string, unknown>
     const message = item.delta && typeof item.delta === 'object' ? item.delta : item.message && typeof item.message === 'object' ? item.message : item
     return typeof (message as Record<string, unknown>).content === 'string' ? (message as Record<string, unknown>).content as string : ''
@@ -294,34 +295,34 @@ function nativeResponsesStreamText(chunks: unknown[]): string | null | undefined
   let text = ''
   let receivedOutputTextDelta = false
   let sawNativeResponsesEvent = false
-  for (const chunk of chunks) {
-    if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) continue
+  for(const chunk of chunks) {
+    if(!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) continue
     const event = chunk as Record<string, unknown>
     const data = event.data && typeof event.data === 'object' && !Array.isArray(event.data) ? event.data as Record<string, unknown> : null
     const eventType = typeof event.event === 'string' ? event.event : typeof data?.type === 'string' ? data.type : ''
-    if (!eventType.startsWith('response.')) continue
+    if(!eventType.startsWith('response.')) continue
     sawNativeResponsesEvent = true
     let next = ''
-    if (eventType === 'response.output_text.delta') {
+    if(eventType === 'response.output_text.delta') {
       receivedOutputTextDelta = true
       next = typeof data?.delta === 'string' ? data.delta : ''
-    } else if (!receivedOutputTextDelta && eventType === 'response.output_text.done') {
+    } else if(!receivedOutputTextDelta && eventType === 'response.output_text.done') {
       next = typeof data?.text === 'string' ? data.text : ''
     }
-    if (next && text.length < maximumRecoveredStreamTextChars) text += next.slice(0, maximumRecoveredStreamTextChars - text.length)
+    if(next && text.length < maximumRecoveredStreamTextChars) text += next.slice(0, maximumRecoveredStreamTextChars - text.length)
   }
-  if (!sawNativeResponsesEvent) return undefined
+  if(!sawNativeResponsesEvent) return undefined
   return text
 }
 
 function responseFromStreamChunks(chunks: unknown[]) {
   const nativeResponsesText = nativeResponsesStreamText(chunks)
-  if (nativeResponsesText !== undefined) return nativeResponsesText ? { protocol: 'stream', text: nativeResponsesText } : null
+  if(nativeResponsesText !== undefined) return nativeResponsesText ? { protocol: 'stream', text: nativeResponsesText } : null
   let text = ''
-  for (const chunk of chunks) {
-    if (text.length >= maximumRecoveredStreamTextChars) break
+  for(const chunk of chunks) {
+    if(text.length >= maximumRecoveredStreamTextChars) break
     const next = streamChunkText(chunk)
-    if (next) text += next.slice(0, maximumRecoveredStreamTextChars - text.length)
+    if(next) text += next.slice(0, maximumRecoveredStreamTextChars - text.length)
   }
   return text ? { protocol: 'stream', text } : null
 }
@@ -336,7 +337,7 @@ function realMessages(prompt: unknown, response: unknown, capturedAt: string) {
   }
   const addUniqueUserText = (value: string, id: string, occurredAt = capturedAt) => {
     const text = value.trim()
-    if (!text || seenUserQueries.has(text)) return false
+    if(!text || seenUserQueries.has(text)) return false
     seenUserQueries.add(text)
     add('user', '用户输入', text, id, occurredAt)
     return true
@@ -350,11 +351,11 @@ function realMessages(prompt: unknown, response: unknown, capturedAt: string) {
   }
   const addUserInput = (value: unknown, id: string, occurredAt = capturedAt) => {
     const parts = textParts(value)
-    if (!parts.length) return false
+    if(!parts.length) return false
     parts.forEach((part, index) => {
-      if (addUserQuery(part, `${id}-${index}`, occurredAt)) return
+      if(addUserQuery(part, `${id}-${index}`, occurredAt)) return
       const text = visibleUserText(part)
-      if (!isInternalCodexContext(text)) addUniqueUserText(text, `${id}-${index}`, occurredAt)
+      if(!isInternalCodexContext(text)) addUniqueUserText(text, `${id}-${index}`, occurredAt)
     })
     return true
   }
@@ -364,7 +365,7 @@ function realMessages(prompt: unknown, response: unknown, capturedAt: string) {
     let added = false
     replies.forEach((reply, index) => {
       const text = reply.trim()
-      if (!text || seenAssistantReplies.has(text)) return
+      if(!text || seenAssistantReplies.has(text)) return
       seenAssistantReplies.add(text)
       add('assistant', '模型回复', text, `${id}-${index}`, occurredAt)
       added = true
@@ -373,7 +374,7 @@ function realMessages(prompt: unknown, response: unknown, capturedAt: string) {
   }
   const roleLabel = (role: z.infer<typeof messageSchema>['role']) => role === 'user' ? '用户输入' : role === 'system' ? '系统指令' : role === 'developer' ? '开发者指令' : role === 'tool' ? '工具结果' : '模型消息'
   const roleOf = (value: unknown): z.infer<typeof messageSchema>['role'] => {
-    if (value === 'system' || value === 'developer' || value === 'assistant' || value === 'tool') return value
+    if(value === 'system' || value === 'developer' || value === 'assistant' || value === 'tool') return value
     return 'user'
   }
   const toolDetails = (value: Record<string, unknown>) => {
@@ -382,89 +383,89 @@ function realMessages(prompt: unknown, response: unknown, capturedAt: string) {
     const args = functionValue.arguments ?? value.arguments
     return { name, summary: jsonText(args ?? value.output ?? value.content ?? ''), argumentsAvailable: args !== undefined, outputAvailable: value.output !== undefined || value.content !== undefined, ...(args !== undefined ? { arguments: args } : {}), ...(value.output !== undefined ? { output: value.output } : {}) }
   }
-  if (prompt && typeof prompt === 'object') {
+  if(prompt && typeof prompt === 'object') {
     const body = prompt as Record<string, unknown>
-    if (typeof body.instructions === 'string') addUserQuery(body.instructions, 'prompt-instructions')
-    if (Array.isArray(body.messages)) {
+    if(typeof body.instructions === 'string') addUserQuery(body.instructions, 'prompt-instructions')
+    if(Array.isArray(body.messages)) {
       body.messages.forEach((item, index) => {
-        if (!item || typeof item !== 'object') return
+        if(!item || typeof item !== 'object') return
         const message = item as Record<string, unknown>
         const role = roleOf(message.role)
         const value = message.content ?? message
-        if (role === 'system' || role === 'developer') addUserQuery(value, `prompt-${index}`, capturedAt)
-        else if (role === 'user' && !addUserInput(value, `prompt-${index}`, capturedAt)) add(role, roleLabel(role), value, `prompt-${index}`, capturedAt)
-        else if (role !== 'user') add(role, roleLabel(role), value, `prompt-${index}`, capturedAt, role === 'tool' ? toolDetails(message) : null)
-        if (role !== 'system' && role !== 'developer' && Array.isArray(message.tool_calls)) message.tool_calls.forEach((call, callIndex) => {
-          if (call && typeof call === 'object') add('tool', '工具调用', call, `prompt-${index}-tool-${callIndex}`, capturedAt, toolDetails(call as Record<string, unknown>))
+        if(role === 'system' || role === 'developer') addUserQuery(value, `prompt-${index}`, capturedAt)
+        else if(role === 'user' && !addUserInput(value, `prompt-${index}`, capturedAt)) add(role, roleLabel(role), value, `prompt-${index}`, capturedAt)
+        else if(role !== 'user') add(role, roleLabel(role), value, `prompt-${index}`, capturedAt, role === 'tool' ? toolDetails(message) : null)
+        if(role !== 'system' && role !== 'developer' && Array.isArray(message.tool_calls)) message.tool_calls.forEach((call, callIndex) => {
+          if(call && typeof call === 'object') add('tool', '工具调用', call, `prompt-${index}-tool-${callIndex}`, capturedAt, toolDetails(call as Record<string, unknown>))
         })
       })
-    } else if (typeof body.input === 'string') {
-      if (!addUserInput(body.input, 'prompt-input')) add('user', '用户输入', body.input, 'prompt-input')
+    } else if(typeof body.input === 'string') {
+      if(!addUserInput(body.input, 'prompt-input')) add('user', '用户输入', body.input, 'prompt-input')
     }
-    else if (Array.isArray(body.input)) body.input.forEach((item, index) => {
-      if (item && typeof item === 'object') {
+    else if(Array.isArray(body.input)) body.input.forEach((item, index) => {
+      if(item && typeof item === 'object') {
         const entry = item as Record<string, unknown>
         const role = roleOf(entry.role)
         const value = entry.content ?? entry.input_text ?? entry.text ?? entry
-        if (role === 'system' || role === 'developer') addUserQuery(value, `prompt-input-${index}`)
-        else if (role === 'user' && !addUserInput(value, `prompt-input-${index}`)) add('user', '用户输入', value, `prompt-input-${index}`)
-        else if (role !== 'user') add(role, roleLabel(role), value, `prompt-input-${index}`)
-      } else if (!addUserInput(item, `prompt-input-${index}`)) add('user', '用户输入', item, `prompt-input-${index}`)
+        if(role === 'system' || role === 'developer') addUserQuery(value, `prompt-input-${index}`)
+        else if(role === 'user' && !addUserInput(value, `prompt-input-${index}`)) add('user', '用户输入', value, `prompt-input-${index}`)
+        else if(role !== 'user') add(role, roleLabel(role), value, `prompt-input-${index}`)
+      } else if(!addUserInput(item, `prompt-input-${index}`)) add('user', '用户输入', item, `prompt-input-${index}`)
     })
-  } else if (prompt !== null && prompt !== undefined && !addUserInput(prompt, 'prompt-input')) add('user', '用户输入', prompt, 'prompt-input')
+  } else if(prompt !== null && prompt !== undefined && !addUserInput(prompt, 'prompt-input')) add('user', '用户输入', prompt, 'prompt-input')
 
-  if (response !== null && response !== undefined) {
+  if(response !== null && response !== undefined) {
     let responseContentAdded = false
-    if (typeof response === 'object' && !Array.isArray(response)) {
+    if(typeof response === 'object' && !Array.isArray(response)) {
       const body = response as Record<string, unknown>
-      if (body.protocol === 'stream' && typeof body.text === 'string') responseContentAdded = addAssistantReply(body.text, 'response-stream-text') || responseContentAdded
-      else if (typeof body.output_text === 'string') responseContentAdded = addAssistantReply(body.output_text, 'response-output-text') || responseContentAdded
-      else if (typeof body.text === 'string') responseContentAdded = addAssistantReply(body.text, 'response-text') || responseContentAdded
+      if(body.protocol === 'stream' && typeof body.text === 'string') responseContentAdded = addAssistantReply(body.text, 'response-stream-text') || responseContentAdded
+      else if(typeof body.output_text === 'string') responseContentAdded = addAssistantReply(body.output_text, 'response-output-text') || responseContentAdded
+      else if(typeof body.text === 'string') responseContentAdded = addAssistantReply(body.text, 'response-text') || responseContentAdded
       const choices = Array.isArray(body.choices) ? body.choices : []
       choices.forEach((choice, index) => {
-        if (!choice || typeof choice !== 'object') return
+        if(!choice || typeof choice !== 'object') return
         const item = choice as Record<string, unknown>
         const message = item.message && typeof item.message === 'object' ? item.message as Record<string, unknown> : item.delta && typeof item.delta === 'object' ? item.delta as Record<string, unknown> : item
         const role = message.role === 'tool' ? 'tool' : 'assistant'
-        if (role === 'tool') {
+        if(role === 'tool') {
           add(role, '工具调用', message.content ?? message, `response-choice-${index}`, capturedAt, toolDetails(message))
           responseContentAdded = true
         } else responseContentAdded = addAssistantReply(message.content ?? message.output_text ?? message.text ?? message, `response-choice-${index}`, capturedAt) || responseContentAdded
-        if (Array.isArray(message.tool_calls)) message.tool_calls.forEach((call, callIndex) => {
-          if (call && typeof call === 'object') {
+        if(Array.isArray(message.tool_calls)) message.tool_calls.forEach((call, callIndex) => {
+          if(call && typeof call === 'object') {
             add('tool', '工具调用', call, `response-choice-${index}-tool-${callIndex}`, capturedAt, toolDetails(call as Record<string, unknown>))
             responseContentAdded = true
           }
         })
       })
-      if (Array.isArray(body.output)) body.output.forEach((item, index) => {
-        if (item && typeof item === 'object') {
+      if(Array.isArray(body.output)) body.output.forEach((item, index) => {
+        if(item && typeof item === 'object') {
           const entry = item as Record<string, unknown>
           const role = roleOf(entry.role === 'tool' ? 'tool' : 'assistant')
-          if (role === 'tool') {
+          if(role === 'tool') {
             add(role, roleLabel(role), entry.content ?? entry.output_text ?? entry.text ?? entry, `response-output-${index}`, capturedAt, toolDetails(entry))
             responseContentAdded = true
           } else responseContentAdded = addAssistantReply(entry.content ?? entry.output_text ?? entry.text ?? entry, `response-output-${index}`, capturedAt) || responseContentAdded
         } else responseContentAdded = addAssistantReply(item, `response-output-${index}`, capturedAt) || responseContentAdded
       })
-      if (!responseContentAdded) addAssistantReply(response, 'response-body')
+      if(!responseContentAdded) addAssistantReply(response, 'response-body')
     } else addAssistantReply(response, 'response-body')
   }
   return messages
 }
 
-function createRealConversationAccess(database: PlatformDatabase, record: ConversationAuditRecord, now: Date, accessRecord: { id: string; persisted: boolean; auditEventId?: string | null } | undefined) {
-  const stored = database.getConversationAuditContent(record.id)
-  if (!stored || (!stored.promptAvailable && !stored.responseAvailable && stored.chunks.length === 0)) return null
+async function createRealConversationAccess(database: PlatformDatabase, record: ConversationAuditRecord, now: Date, accessRecord: { id: string; persisted: boolean; auditEventId?: string | null } | undefined) {
+  const stored = (await database.getConversationAuditContent(record.id))
+  if(!stored || (!stored.promptAvailable && !stored.responseAvailable && stored.chunks.length === 0)) return null
   const expired = new Date(record.retentionUntil).getTime() <= now.getTime() || record.state === 'expired'
-  const usageLink = database.getConversationUsageLink(record.id)
+  const usageLink = (await database.getConversationUsageLink(record.id))
   // Prefer the raw stream events for streamed calls. They preserve the actual
   // output-text deltas and let us exclude reasoning summaries and terminal
   // snapshots that some Responses-compatible upstreams also emit.
   const response = (record.streamed ? responseFromStreamChunks(stored.chunks) : null) ?? stored.response ?? responseFromStreamChunks(stored.chunks)
   const messages = realMessages(stored.prompt, response, record.startedAt)
   return {
-    meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '已从本地 SQLite 解密读取真实请求/回复正文；系统上下文已过滤，仅展示 user_query 与模型可见轮次，不包含认证 Header 或完整 Key。' },
+    meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '已从PostgreSQL 解密读取真实请求/回复正文；系统上下文已过滤，仅展示 user_query 与模型可见轮次，不包含认证 Header 或完整 Key。' },
     record,
     access: { accessRecordId: accessRecord?.id ?? `access-${record.id}`, auditEventId: accessRecord?.auditEventId ?? null, reasonAccepted: true as const, persisted: accessRecord?.persisted ?? false, authorizedByServerRbac: true as const, copyAllowed: true, exportAllowed: true, deleteAllowed: true as const },
     // Do not return the raw captured request body. It can contain long client
@@ -478,8 +479,8 @@ function createRealConversationAccess(database: PlatformDatabase, record: Conver
   }
 }
 
-export function createDatabaseConversationAccess(database: PlatformDatabase, record: ConversationAuditRecord, body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean; auditEventId?: string | null }) {
+export async function createDatabaseConversationAccess(database: PlatformDatabase, record: ConversationAuditRecord, body: ConversationAccessBody, now = new Date(), accessRecord?: { id: string; persisted: boolean; auditEventId?: string | null }) {
   void body
-  if (!record.contentAccess.available) return null
-  return createRealConversationAccess(database, record, now, accessRecord)
+  if(!record.contentAccess.available) return null
+  return (await createRealConversationAccess(database, record, now, accessRecord))
 }

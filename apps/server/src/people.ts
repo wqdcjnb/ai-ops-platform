@@ -68,9 +68,12 @@ export type PeopleResponse = z.infer<typeof peopleResponseSchema>
 
 const tones: Array<z.infer<typeof personSchema>['tone']> = ['blue', 'violet', 'green', 'amber', 'coral']
 
-export function createDatabasePeople(database: PlatformDatabase, query: PeopleQuery, now = new Date()): PeopleResponse {
-  const all = database.listPeople().map((row, index) => {
-    const key = database.listApiKeysForOwner(row.id).find((item) => item.status !== 'revoked') ?? null
+export async function createDatabasePeople(database: PlatformDatabase, query: PeopleQuery, now = new Date()): Promise<PeopleResponse> {
+  const [people, keys] = await Promise.all([database.listPeople(), database.listApiKeys()])
+  const keysByOwner = new Map<string, typeof keys[number]>()
+  for(const key of keys) if(key.status !== 'revoked' && !keysByOwner.has(key.ownerUserId)) keysByOwner.set(key.ownerUserId, key)
+  const all = people.map((row, index) => {
+    const key = keysByOwner.get(row.id) ?? null
     return {
       id: row.id,
       name: row.displayName,

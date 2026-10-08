@@ -33,7 +33,7 @@ export interface GatewayUsageContext {
   retryCount?: number
 }
 
-export function recordGatewayUsage(context: GatewayUsageContext) {
+export async function recordGatewayUsage(context: GatewayUsageContext) {
   const usage = usageFor(context.request, context.measurement)
   const occurredAt = new Date(context.startedAt).toISOString()
   const totalTokens = usage.inputTokens + usage.outputTokens
@@ -86,7 +86,7 @@ export function recordGatewayUsage(context: GatewayUsageContext) {
       tokens: totalTokens,
     },
   }
-  const recorded = context.database.recordGatewayUsage(seed, audit, new Date(context.startedAt))
+  const recorded = (await context.database.recordGatewayUsage(seed, audit, new Date(context.startedAt)))
   return recorded
 }
 
@@ -96,21 +96,21 @@ function connectorChannel(mode: GatewayMode): PlatformUsageRequestSeed['channel'
 }
 
 export function usageFromPayload(payload: unknown) {
-  if (!isRecord(payload) || !isRecord(payload.usage)) return null
+  if(!isRecord(payload) || !isRecord(payload.usage)) return null
   const usage = payload.usage
   const inputTokens = numberValue(usage.prompt_tokens ?? usage.input_tokens)
   const outputTokens = numberValue(usage.completion_tokens ?? usage.output_tokens)
-  if (inputTokens === null && outputTokens === null) return null
+  if(inputTokens === null && outputTokens === null) return null
   return { inputTokens: inputTokens ?? 0, outputTokens: outputTokens ?? 0 }
 }
 
 export function outputTextLength(payload: unknown) {
-  if (!isRecord(payload)) return 0
-  if (typeof payload.output_text === 'string') return payload.output_text.length
-  if (typeof payload.delta === 'string') return payload.delta.length
+  if(!isRecord(payload)) return 0
+  if(typeof payload.output_text === 'string') return payload.output_text.length
+  if(typeof payload.delta === 'string') return payload.delta.length
   const choices = Array.isArray(payload.choices) ? payload.choices : []
   return choices.reduce((total, choice) => {
-    if (!isRecord(choice)) return total
+    if(!isRecord(choice)) return total
     const message = isRecord(choice.message) ? choice.message : isRecord(choice.delta) ? choice.delta : null
     return total + (message && typeof message.content === 'string' ? message.content.length : 0)
   }, 0)
@@ -136,10 +136,10 @@ function clientName(headers: Record<string, unknown>): 'Codex Desktop' | 'WorkBu
 }
 
 function errorCategory(code: string): 'rate_limit' | 'timeout' | 'authentication' | 'server' | 'cancelled' {
-  if (code.includes('RATE_LIMIT')) return 'rate_limit'
-  if (code.includes('TIMEOUT')) return 'timeout'
-  if (code.includes('AUTH')) return 'authentication'
-  if (code.includes('CANCEL')) return 'cancelled'
+  if(code.includes('RATE_LIMIT')) return 'rate_limit'
+  if(code.includes('TIMEOUT')) return 'timeout'
+  if(code.includes('AUTH')) return 'authentication'
+  if(code.includes('CANCEL')) return 'cancelled'
   return 'server'
 }
 

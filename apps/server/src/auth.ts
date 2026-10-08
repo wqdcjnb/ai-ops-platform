@@ -71,11 +71,11 @@ interface Session {
 }
 
 export interface AuthService {
-  authenticate(request: FastifyRequest): AuthUser | null
-  getSession(request: FastifyRequest): { user: AuthUser; expiresAt: string } | null
-  verifyCsrf(request: FastifyRequest): boolean
-  login(username: string, password: string): { token: string; csrfToken: string; user: AuthUser; expiresAt: string } | null
-  revoke(request: FastifyRequest): void
+  authenticate(request: FastifyRequest): Promise<AuthUser | null>
+  getSession(request: FastifyRequest): Promise<{ user: AuthUser; expiresAt: string } | null>
+  verifyCsrf(request: FastifyRequest): Promise<boolean>
+  login(username: string, password: string): Promise<{ token: string; csrfToken: string; user: AuthUser; expiresAt: string } | null>
+  revoke(request: FastifyRequest): Promise<void>
   setSessionCookie(reply: FastifyReply, token: string, csrfToken: string, expiresAt: string): void
   clearSessionCookie(reply: FastifyReply): void
 }
@@ -91,7 +91,7 @@ function hashSessionValue(value: string) {
 }
 
 function matchesToken(left: string, right: string) {
-  if (left.length !== right.length) return false
+  if(left.length !== right.length) return false
   return timingSafeEqual(Buffer.from(left), Buffer.from(right))
 }
 
@@ -102,8 +102,8 @@ function csrfHeader(request: FastifyRequest) {
 
 function configuredAdminPassword() {
   const password = process.env.AUTH_ADMIN_PASSWORD
-  if (password) return password
-  if (process.env.NODE_ENV === 'test') return 'test-admin-password'
+  if(password) return password
+  if(process.env.NODE_ENV === 'test') return 'test-admin-password'
   throw new Error('AUTH_ADMIN_PASSWORD is required to create the bootstrap super administrator.')
 }
 
@@ -138,25 +138,28 @@ function toAuthUser(user: PlatformUser): AuthUser {
   }
 }
 
-export function ensureBootstrapSuperAdmin(database: PlatformDatabase) {
-  // Never overwrite or collide with an administrator that already exists in
-  // an upgraded local database. New installs receive the email-shaped
-  // bootstrap identity below; existing deployments can configure their admin
-  // email explicitly before migrating login identifiers.
-  if (database.findUserByRole('super_admin')) return
-  database.seedUser({
-    id: 'user-super-admin',
-    // The rendered sign-in flow is email-only. Keep the bootstrap account on
-    // the same identifier contract instead of asking an operator to remember
-    // a legacy username that employees can never use.
-    username: process.env.AUTH_ADMIN_USERNAME ?? 'admin@aiops.local',
-    password: configuredAdminPassword(),
-    displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
-    role: 'super_admin',
-    roleLabel: roleLabels.super_admin,
+export async function ensureBootstrapSuperAdmin(database: PlatformDatabase) {
+  await database.db.transaction(async () => {
+    await database.db.lock('ai-ops:bootstrap-admin')
+    // Never overwrite or collide with an administrator that already exists in
+    // an upgraded local database. New installs receive the email-shaped
+    // bootstrap identity below; existing deployments can configure their admin
+    // email explicitly before migrating login identifiers.
+    if((await database.findUserByRole('super_admin'))) return
+    await database.seedUser({
+      id: 'user-super-admin',
+      // The rendered sign-in flow is email-only. Keep the bootstrap account on
+      // the same identifier contract instead of asking an operator to remember
+      // a legacy username that employees can never use.
+      username: process.env.AUTH_ADMIN_USERNAME ?? 'admin@aiops.local',
+      password: configuredAdminPassword(),
+      displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
+      role: 'super_admin',
+      roleLabel: roleLabels.super_admin,
+    })
+    // Employees are intentionally never seeded or created by an administrator.
+    // They enter through the public real-name/email/password registration flow.
   })
-  // Employees are intentionally never seeded or created by an administrator.
-  // They enter through the public real-name/email/password registration flow.
 }
 
 export function createAuthService(options: { database?: PlatformDatabase } = {}): AuthService {
@@ -165,39 +168,39 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
 
   function purgeExpired() {
     const now = Date.now()
-    for (const [token, session] of sessions) {
-      if (session.expiresAt <= now) sessions.delete(token)
+    for(const [token, session] of sessions) {
+      if(session.expiresAt <= now) sessions.delete(token)
     }
   }
 
-  function getSession(request: FastifyRequest) {
+  async function getSession(request: FastifyRequest) {
     const token = cookieValue(request, SESSION_COOKIE)
-    if (!token) return null
+    if(!token) return null
     const tokenHash = hashSessionValue(token)
-    if (options.database) {
-      const session = options.database.findAuthSession(tokenHash)
-      if (!session) return null
+    if(options.database) {
+      const session = (await options.database.findAuthSession(tokenHash))
+      if(!session) return null
       return { user: toAuthUser(session.user), expiresAt: session.expiresAt }
     }
     purgeExpired()
     const session = sessions.get(token)
-    if (!session || session.expiresAt <= Date.now()) {
-      if (session) sessions.delete(token)
+    if(!session || session.expiresAt <= Date.now()) {
+      if(session) sessions.delete(token)
       return null
     }
     return { user: session.user, expiresAt: new Date(session.expiresAt).toISOString() }
   }
 
-  function createSession(user: AuthUser) {
-    if (options.database) options.database.cleanupAuthSessions('login')
+  async function createSession(user: AuthUser) {
+    if(options.database) await options.database.cleanupAuthSessions('login')
     const token = randomBytes(32).toString('base64url')
     const csrfToken = randomBytes(32).toString('base64url')
     const expiresAt = Date.now() + SESSION_TTL_MS
     const expiresAtIso = new Date(expiresAt).toISOString()
     const tokenHash = hashSessionValue(token)
     const csrfTokenHash = hashSessionValue(csrfToken)
-    if (options.database) {
-      options.database.createAuthSession({
+    if(options.database) {
+      await options.database.createAuthSession({
         id: `session-${randomBytes(16).toString('hex')}`,
         userId: user.id,
         tokenHash,
@@ -211,38 +214,38 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
   }
 
   return {
-    authenticate(request) {
-      return getSession(request)?.user ?? null
+    async authenticate(request) {
+      return (await getSession(request))?.user ?? null
     },
     getSession,
-    verifyCsrf(request) {
+    async verifyCsrf(request) {
       const token = cookieValue(request, SESSION_COOKIE)
       const csrfCookie = cookieValue(request, CSRF_COOKIE)
       const csrf = csrfHeader(request)
-      if (!token || !csrfCookie || !csrf || !matchesToken(csrfCookie, csrf)) return false
+      if(!token || !csrfCookie || !csrf || !matchesToken(csrfCookie, csrf)) return false
       const tokenHash = hashSessionValue(token)
       const csrfTokenHash = hashSessionValue(csrf)
-      if (options.database) return options.database.isAuthSessionCsrfValid(tokenHash, csrfTokenHash)
+      if(options.database) return (await options.database.isAuthSessionCsrfValid(tokenHash, csrfTokenHash))
       purgeExpired()
       const session = sessions.get(token)
       return Boolean(session && session.expiresAt > Date.now() && matchesToken(session.csrfTokenHash, csrfTokenHash))
     },
-    login(username, password) {
-      const databaseUser = options.database?.passwordMatches(username, password)
-        ? options.database.findUserByUsername(username)
+    async login(username, password) {
+      const databaseUser = options.database && (await options.database.passwordMatches(username, password))
+        ? (await options.database.findUserByUsername(username))
         : null
       const account = databaseUser
         ? { user: toAuthUser(databaseUser), password: '' }
         : options.database
           ? null
           : fallbackAccount?.user.username === username && fallbackAccount.password === password ? fallbackAccount : null
-      if (!account) return null
-      return createSession(account.user)
+      if(!account) return null
+      return (await createSession(account.user))
     },
-    revoke(request) {
+    async revoke(request) {
       const token = cookieValue(request, SESSION_COOKIE)
-      if (!token) return
-      if (options.database) options.database.revokeAuthSession(hashSessionValue(token))
+      if(!token) return
+      if(options.database) await options.database.revokeAuthSession(hashSessionValue(token))
       else sessions.delete(token)
     },
     setSessionCookie(reply, token, csrfToken, expiresAt) {

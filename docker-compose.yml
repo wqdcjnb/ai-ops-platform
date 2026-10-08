@@ -1,4 +1,36 @@
 services:
+  postgres:
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ai_ops
+      POSTGRES_DB: ai_ops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run start-docker.cmd to generate the local database password}
+    volumes:
+      - postgres-v2-data:/var/lib/postgresql
+    networks: [storage]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_ops -d ai_ops"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine@sha256:3811787313eba226a2ef38658c6ccb91cd5e110edc89c37767de373120a0e5a0
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Run start-docker.cmd to generate the local Redis password}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Run start-docker.cmd to generate the local Redis password}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\" --maxmemory 256mb --maxmemory-policy noeviction"]
+    volumes:
+      - redis-v2-data:/data
+    networks: [storage]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   server:
     restart: unless-stopped
     build:
@@ -10,6 +42,15 @@ services:
       HOST: 0.0.0.0
       PORT: 4175
       PLATFORM_DB_PATH: /app/data/platform.sqlite
+      DATABASE_URL: postgresql://ai_ops:${POSTGRES_PASSWORD}@postgres:5432/ai_ops
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      AI_OPS_DB_POOL_SIZE: ${AI_OPS_DB_POOL_SIZE:-20}
+      AI_OPS_GATEWAY_CONCURRENCY: ${AI_OPS_GATEWAY_CONCURRENCY:-200}
+      AI_OPS_EMPLOYEE_CONCURRENCY: ${AI_OPS_EMPLOYEE_CONCURRENCY:-4}
+      AI_OPS_PROVIDER_CONCURRENCY: ${AI_OPS_PROVIDER_CONCURRENCY:-12}
+      AI_OPS_EMPLOYEE_RPM: ${AI_OPS_EMPLOYEE_RPM:-120}
+      AI_OPS_MAX_WAITING: ${AI_OPS_MAX_WAITING:-100}
+      AI_OPS_RELAY_MAX_ATTEMPTS: ${AI_OPS_RELAY_MAX_ATTEMPTS:-3}
       AUTH_MODE: required
       AUTH_ADMIN_USERNAME: ${AUTH_ADMIN_USERNAME:?Set AUTH_ADMIN_USERNAME in the local .env file}
       AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:?Set AUTH_ADMIN_PASSWORD in the local .env file}
@@ -33,6 +74,13 @@ services:
       - "${AI_OPS_BIND_ADDRESS:-127.0.0.1}:${AI_OPS_GATEWAY_PORT:-4175}:4175"
     volumes:
       - platform-data:/app/data
+    networks: [default, storage]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    stop_grace_period: 90s
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4175/health').then((r)=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s
@@ -63,3 +111,9 @@ services:
 
 volumes:
   platform-data:
+  postgres-v2-data:
+  redis-v2-data:
+
+networks:
+  storage:
+    internal: true

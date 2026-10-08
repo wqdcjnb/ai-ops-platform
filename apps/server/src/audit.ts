@@ -100,12 +100,12 @@ function normalizeAction(value: string): z.infer<typeof actionSchema> {
 }
 
 function normalizeResource(value: string): z.infer<typeof resourceTypeSchema> {
-  if (value === 'docker-service') return 'service'
+  if(value === 'docker-service') return 'service'
   return validResources.has(value) ? value as z.infer<typeof resourceTypeSchema> : 'service'
 }
 
 function safeText(value: unknown, max = 240) {
-  if (typeof value !== 'string') return ''
+  if(typeof value !== 'string') return ''
   return value.replace(/(?:bearer\s+\S+|sk-[a-z0-9_-]{8,})/giu, '[已脱敏]').replace(/[\r\n\t]+/gu, ' ').trim().slice(0, max)
 }
 
@@ -118,7 +118,7 @@ function safeChanges(value: unknown) {
   })) : []
 }
 
-type DatabaseAuditRow = ReturnType<PlatformDatabase['listAuditEvents']>[number]
+type DatabaseAuditRow = Awaited<ReturnType<PlatformDatabase['listAuditEvents']>>[number]
 
 function eventFromDatabase(row: DatabaseAuditRow): AuditEvent {
   const summary = row.summary
@@ -172,8 +172,8 @@ function integrity(chain: AuditChainVerification) {
     eventCount: chain.eventCount,
     firstInvalidEventId: chain.firstInvalidEventId,
     notice: chain.verified
-      ? '本地 SQLite 审计哈希链与检查点校验通过。'
-      : '本地 SQLite 审计哈希链或检查点尚未通过校验。',
+      ? 'PostgreSQL 审计哈希链与检查点校验通过。'
+      : 'PostgreSQL 审计哈希链或检查点尚未通过校验。',
   }
 }
 
@@ -198,8 +198,8 @@ function filterEvents(events: AuditEvent[], query: AuditQuery, now: Date) {
   })
 }
 
-export function createDatabaseAudit(database: PlatformDatabase, query: AuditQuery, now = new Date()) {
-  const all = database.listAuditEvents().map(eventFromDatabase)
+export async function createDatabaseAudit(database: PlatformDatabase, query: AuditQuery, now = new Date()) {
+  const all = (await database.listAuditEvents()).map(eventFromDatabase)
   const filtered = filterEvents(all, query, now)
   const start = (query.page - 1) * query.pageSize
   return {
@@ -226,14 +226,14 @@ export function createDatabaseAudit(database: PlatformDatabase, query: AuditQuer
       appendOnlyVerified: false as const,
       notice: `系统审计日志最多保留 ${SYSTEM_AUDIT_RETENTION_DAYS} 天；服务端启动后及每小时自动清理到期记录，并重建保留记录的本地哈希链。`,
     },
-    integrity: integrity(database.verifyAuditChain(now)),
+    integrity: integrity((await database.verifyAuditChain(now))),
   }
 }
 
-export function createDatabaseAuditDetail(database: PlatformDatabase, id: string, now = new Date()) {
-  const all = database.listAuditEvents().map(eventFromDatabase)
+export async function createDatabaseAuditDetail(database: PlatformDatabase, id: string, now = new Date()) {
+  const all = (await database.listAuditEvents()).map(eventFromDatabase)
   const index = all.findIndex((item) => item.id === id)
-  if (index < 0) return null
+  if(index < 0) return null
   const event = all[index]!
   return {
     meta: { source: 'database' as const, generatedAt: now.toISOString(), notice: '详情仅显示脱敏的字段级摘要，不包含完整 Key、凭据或对话正文。' },
@@ -244,7 +244,7 @@ export function createDatabaseAuditDetail(database: PlatformDatabase, id: string
       responseCode: event.result.status === 'success' ? 200 : event.result.status === 'denied' ? 403 : 503,
       durationMs: 0,
     },
-    integrity: integrity(database.verifyAuditChain(now)),
+    integrity: integrity((await database.verifyAuditChain(now))),
     relatedAuditIds: index > 0 ? [all[index - 1]!.id] : [],
   }
 }
