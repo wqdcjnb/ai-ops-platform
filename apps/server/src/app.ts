@@ -24,6 +24,23 @@ import { registerReportingRoutes } from './routes/reporting.js'
 import { registerSystemRoutes, registerSystemStatusRoutes } from './routes/system.js'
 import type { ApiRouteContext, BuildAppOptions } from './http/context.js'
 
+function configuredCorsOrigins() {
+  const values = [
+    'http://127.0.0.1:4174',
+    'http://localhost:4174',
+    process.env.AI_OPS_PUBLIC_WEB_BASE_URL,
+    ...(process.env.AI_OPS_CORS_ORIGINS?.split(',') ?? []),
+  ]
+  const origins = values.flatMap((value) => {
+    if(!value?.trim()) return []
+    try {
+      const url = new URL(value.trim())
+      return ['http:', 'https:'].includes(url.protocol) ? [url.origin] : []
+    } catch { return [] }
+  })
+  return [...new Set(origins)]
+}
+
 export type { BuildAppOptions }
 
 /** Thin composition layer: wiring, lifecycle hooks and route-module registration only. */
@@ -38,7 +55,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   app.setSerializerCompiler(serializerCompiler)
   app.register(helmet, { contentSecurityPolicy: false })
   app.register(cors, {
-    origin: ['http://127.0.0.1:4174', 'http://localhost:4174'],
+    origin: configuredCorsOrigins(),
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
   })
   const runtime = new RuntimeCoordinator()

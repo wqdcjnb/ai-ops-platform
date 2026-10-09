@@ -35,29 +35,36 @@ function New-AiOpsPassword {
 function Get-AiOpsEnvironmentValue {
   param([string]$Name)
   if (-not (Test-Path -LiteralPath $environmentPath)) { return $null }
-  foreach ($line in Get-Content -LiteralPath $environmentPath) {
+  $value = $null
+  # .env is UTF-8 without BOM. Windows PowerShell 5.1 otherwise reads ANSI,
+  # corrupting Chinese values every time another setting is written.
+  foreach ($line in Get-Content -LiteralPath $environmentPath -Encoding UTF8) {
     if ($line -match ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.*)\s*$')) {
-      return $Matches[1].Trim().Trim('"').Trim("'")
+      $value = $Matches[1].Trim().Trim('"').Trim("'")
     }
   }
-  return $null
+  # Match Compose's last-assignment-wins behavior for older duplicate keys.
+  return $value
 }
 
 function Set-AiOpsEnvironmentValue {
   param([string]$Name, [string]$Value)
   $lines = [System.Collections.Generic.List[string]]::new()
   if (Test-Path -LiteralPath $environmentPath) {
-    foreach ($existingLine in Get-Content -LiteralPath $environmentPath) {
+    foreach ($existingLine in Get-Content -LiteralPath $environmentPath -Encoding UTF8) {
       [void]$lines.Add([string]$existingLine)
     }
   }
   $expression = '^\s*' + [regex]::Escape($Name) + '\s*='
   $updated = $false
-  for ($index = 0; $index -lt $lines.Count; $index += 1) {
+  for ($index = $lines.Count - 1; $index -ge 0; $index -= 1) {
     if ($lines[$index] -match $expression) {
-      $lines[$index] = "$Name=$Value"
-      $updated = $true
-      break
+      if ($updated) {
+        $lines.RemoveAt($index)
+      } else {
+        $lines[$index] = "$Name=$Value"
+        $updated = $true
+      }
     }
   }
   if (-not $updated) {
@@ -95,16 +102,40 @@ function Read-AiOpsAdminPassword {
 }
 
 function Read-AiOpsDeploymentSettings {
-  $mode = Read-Host '访问范围：1=仅本机（推荐）  2=可信局域网 [1]'
+  $mode = Read-Host '访问范围：1=仅本机（推荐）  2=可信局域网  3=公开测试（临时） [1]'
+  if ($mode -eq '3') {
+    Write-Host '请配置 HTTPS 反向代理；临时直连测试才需要转发 4174/4175。' -ForegroundColor Yellow
+    do {
+      $webUrl = Read-Host '请输入公网网页地址，例如 https://demo.example.com:4174'
+      try {
+        $parsedWebUrl = [Uri]::new($webUrl.Trim().TrimEnd('/'))
+        if ($parsedWebUrl.Scheme -notin @('http', 'https') -or [string]::IsNullOrWhiteSpace($parsedWebUrl.Host) -or $parsedWebUrl.AbsolutePath -ne '/' -or $parsedWebUrl.UserInfo -or $parsedWebUrl.Query -or $parsedWebUrl.Fragment) { throw 'invalid' }
+        $normalizedWebUrl = $parsedWebUrl.GetLeftPart([UriPartial]::Authority)
+        break
+      } catch { Write-Host '请输入不带路径的 http:// 或 https:// 地址。' -ForegroundColor Yellow }
+    } while ($true)
+    do {
+      $gatewayUrl = Read-Host '请输入公网网关地址，例如 https://demo.example.com:4175'
+      try {
+        $parsedGatewayUrl = [Uri]::new($gatewayUrl.Trim().TrimEnd('/'))
+        if ($parsedGatewayUrl.Scheme -notin @('http', 'https') -or [string]::IsNullOrWhiteSpace($parsedGatewayUrl.Host) -or $parsedGatewayUrl.AbsolutePath -ne '/' -or $parsedGatewayUrl.UserInfo -or $parsedGatewayUrl.Query -or $parsedGatewayUrl.Fragment) { throw 'invalid' }
+        $normalizedGatewayUrl = $parsedGatewayUrl.GetLeftPart([UriPartial]::Authority)
+        break
+      } catch { Write-Host '请输入不带路径的 http:// 或 https:// 地址。' -ForegroundColor Yellow }
+    } while ($true)
+    $cookieSecure = if ($parsedWebUrl.Scheme -eq 'https') { 'true' } else { 'false' }
+    if ($cookieSecure -eq 'false') { Write-Host '警告：HTTP 公开测试会明文传输登录会话，请仅短时间使用。' -ForegroundColor Yellow }
+    return @{ bindAddress = '0.0.0.0'; gatewayBaseUrl = $normalizedGatewayUrl; webBaseUrl = $normalizedWebUrl; cookieSecure = $cookieSecure }
+  }
   if ($mode -ne '2') {
-    return @{ bindAddress = '127.0.0.1'; gatewayBaseUrl = 'http://127.0.0.1:4175' }
+    return @{ bindAddress = '127.0.0.1'; gatewayBaseUrl = 'http://127.0.0.1:4175'; webBaseUrl = 'http://127.0.0.1:4174'; cookieSecure = 'false' }
   }
 
   do {
     $hostName = Read-Host '请输入其他电脑可访问的服务器 IP 或域名，例如 192.168.1.20'
     $hostName = $hostName.Trim().TrimEnd('/')
     if ($hostName -match '^[A-Za-z0-9.-]+$') {
-      return @{ bindAddress = '0.0.0.0'; gatewayBaseUrl = "http://${hostName}:4175" }
+      return @{ bindAddress = '0.0.0.0'; gatewayBaseUrl = "http://${hostName}:4175"; webBaseUrl = "http://${hostName}:4174"; cookieSecure = 'false' }
     }
     Write-Host '请输入 IP 或域名，不要包含 http://、端口或路径。' -ForegroundColor Yellow
   } while ($true)
@@ -140,6 +171,8 @@ function Initialize-AiOpsEnvironment {
       "AI_OPS_AUDIT_ENCRYPTION_SECRET=$(New-AiOpsSecret)",
       '',
       "AI_OPS_PUBLIC_GATEWAY_BASE_URL=$($settings.gatewayBaseUrl)",
+      "AI_OPS_PUBLIC_WEB_BASE_URL=$($settings.webBaseUrl)",
+      "AI_OPS_COOKIE_SECURE=$($settings.cookieSecure)",
       'AI_OPS_GATEWAY_MODE=relay',
       'AI_OPS_GATEWAY_TIMEOUT_MS=60000',
       'AI_OPS_GATEWAY_DEFAULT_STREAMING=false',
@@ -162,6 +195,8 @@ function Initialize-AiOpsEnvironment {
     AUTH_ADMIN_USERNAME = 'admin@aiops.local'
     AUTH_ADMIN_DISPLAY_NAME = '超级管理员'
     AI_OPS_PUBLIC_GATEWAY_BASE_URL = 'http://127.0.0.1:4175'
+    AI_OPS_PUBLIC_WEB_BASE_URL = 'http://127.0.0.1:4174'
+    AI_OPS_CORS_ORIGINS = ''
     AI_OPS_GATEWAY_MODE = 'relay'
     AI_OPS_GATEWAY_TIMEOUT_MS = '60000'
     AI_OPS_GATEWAY_DEFAULT_STREAMING = 'false'
@@ -176,6 +211,12 @@ function Initialize-AiOpsEnvironment {
     if ($null -eq (Get-AiOpsEnvironmentValue -Name $entry.Key)) {
       Set-AiOpsEnvironmentValue -Name $entry.Key -Value $entry.Value
     }
+  }
+
+  if ($null -eq (Get-AiOpsEnvironmentValue -Name 'AI_OPS_COOKIE_SECURE')) {
+    $webUrl = [Uri]::new((Get-AiOpsEnvironmentValue -Name 'AI_OPS_PUBLIC_WEB_BASE_URL'))
+    $cookieSecure = if ($webUrl.Scheme -eq 'https') { 'true' } else { 'false' }
+    Set-AiOpsEnvironmentValue -Name 'AI_OPS_COOKIE_SECURE' -Value $cookieSecure
   }
 
   foreach ($secretName in @('AI_OPS_KEY_ENCRYPTION_SECRET', 'AI_OPS_AUDIT_ENCRYPTION_SECRET')) {
@@ -265,9 +306,10 @@ try {
 
   $webPort = Get-AiOpsEnvironmentValue -Name 'AI_OPS_WEB_PORT'
   $gatewayPort = Get-AiOpsEnvironmentValue -Name 'AI_OPS_GATEWAY_PORT'
-  $webUrl = "http://127.0.0.1:$webPort/"
+  $localWebUrl = "http://127.0.0.1:$webPort/"
   Wait-AiOpsHttpService -Url "http://127.0.0.1:$gatewayPort/health" -ServiceName 'AI OPS 网关'
-  Wait-AiOpsHttpService -Url $webUrl -ServiceName 'AI OPS 管理界面'
+  Wait-AiOpsHttpService -Url $localWebUrl -ServiceName 'AI OPS 管理界面'
+  $webUrl = (Get-AiOpsEnvironmentValue -Name 'AI_OPS_PUBLIC_WEB_BASE_URL').TrimEnd('/') + '/'
 
   Write-Host ''
   Write-Host "AI OPS 已启动：$webUrl" -ForegroundColor Green

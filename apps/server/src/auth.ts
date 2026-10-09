@@ -100,11 +100,23 @@ function csrfHeader(request: FastifyRequest) {
   return Array.isArray(value) ? value[0] ?? null : value ?? null
 }
 
+function secureCookieSuffix() {
+  const configured = process.env.AI_OPS_COOKIE_SECURE?.trim().toLowerCase()
+  if(configured === 'true') return '; Secure'
+  if(configured === 'false') return ''
+  return process.env.NODE_ENV === 'production' ? '; Secure' : ''
+}
+
 function configuredAdminPassword() {
   const password = process.env.AUTH_ADMIN_PASSWORD
   if(password) return password
   if(process.env.NODE_ENV === 'test') return 'test-admin-password'
   throw new Error('AUTH_ADMIN_PASSWORD is required to create the bootstrap super administrator.')
+}
+
+function configuredAdminDisplayName() {
+  const displayName = process.env.AUTH_ADMIN_DISPLAY_NAME?.trim()
+  return displayName && displayName.length <= 40 ? displayName : '超级管理员'
 }
 
 function bootstrapAdminAccount(): BootstrapAccount {
@@ -114,7 +126,7 @@ function bootstrapAdminAccount(): BootstrapAccount {
       id: 'user-super-admin',
       email: username,
       username,
-      displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
+      displayName: configuredAdminDisplayName(),
       role: 'super_admin',
       roleLabel: '超级管理员',
     },
@@ -153,7 +165,7 @@ export async function ensureBootstrapSuperAdmin(database: PlatformDatabase) {
       // a legacy username that employees can never use.
       username: process.env.AUTH_ADMIN_USERNAME ?? 'admin@aiops.local',
       password: configuredAdminPassword(),
-      displayName: process.env.AUTH_ADMIN_DISPLAY_NAME ?? '超级管理员',
+      displayName: configuredAdminDisplayName(),
       role: 'super_admin',
       roleLabel: roleLabels.super_admin,
     })
@@ -250,14 +262,14 @@ export function createAuthService(options: { database?: PlatformDatabase } = {})
     },
     setSessionCookie(reply, token, csrfToken, expiresAt) {
       const maxAge = Math.max(0, Math.floor((Date.parse(expiresAt) - Date.now()) / 1000))
-      const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+      const secure = secureCookieSuffix()
       reply.header('set-cookie', [
         `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`,
         `${CSRF_COOKIE}=${csrfToken}; Path=/; SameSite=Strict; Max-Age=${maxAge}${secure}`,
       ])
     },
     clearSessionCookie(reply) {
-      const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+      const secure = secureCookieSuffix()
       reply.header('set-cookie', [
         `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure}`,
         `${CSRF_COOKIE}=; Path=/; SameSite=Strict; Max-Age=0${secure}`,

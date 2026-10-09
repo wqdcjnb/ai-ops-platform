@@ -17,6 +17,7 @@
 3. 首次运行时，脚本会依次询问访问范围、超级管理员邮箱和密码：
    - 选择“仅本机”时，只能从部署电脑访问。
    - 选择“可信局域网”时，输入服务器的固定局域网 IP 或域名；员工客户端将通过该地址访问模型网关。
+   - 选择“公开测试”时，输入公网网页地址和公网网关地址；启动器会绑定 `0.0.0.0`。使用 HTTPS 反向代理时只对外开放代理入口；临时直连测试才转发 `4174`、`4175`。
 4. 脚本会创建私有 `.env`、随机加密密钥、数据库密码和管理员账号，构建镜像并启动 `web`、`server`、`postgres`、`redis` 四个服务。
 5. 浏览器会打开管理页面，默认地址为 `http://127.0.0.1:4174`；模型网关默认端口为 `4175`。
 
@@ -31,6 +32,63 @@
 - 对外网、非受控网络或正式生产环境，请在反向代理后配置 HTTPS，再向员工发放地址。
 
 不要把 `.env` 中的管理员密码、加密密钥、第三方账号凭据或员工平台 Key 发给任何人。
+
+## 临时公开测试
+
+公开测试只适合短期、少量受邀用户验证功能，不等同于生产部署。建议准备一个域名和 HTTPS 反向代理；若直接使用公网 IP 加 HTTP，登录会话和模型请求都可能被窃听。
+
+首次启动选择“公开测试”后，填写：
+
+- 公网网页地址，例如 `https://demo.example.com` 或 `http://公网IP:4174`；
+- 公网网关地址，例如 `https://demo.example.com:4175` 或 `http://公网IP:4175`。
+
+如果使用 HTTPS，保持 `.env` 中的 `AI_OPS_COOKIE_SECURE=true`。只有在临时 HTTP 测试时才使用 `false`，并在测试结束后关闭端口、停止服务或恢复本机模式。无论哪种方式，都不要把 PostgreSQL/Redis 端口暴露到公网。
+
+公开测试还需要：
+
+1. 配置 HTTPS 反向代理入口，或仅在临时直连测试时开放 `4174`、`4175`；
+2. 把 `.env` 中的 `AI_OPS_PUBLIC_GATEWAY_BASE_URL` 设置成用户真正能访问的网关地址；
+3. 使用超级管理员登录后配置第三方账号和模型，再把员工页面地址发给测试人员；
+4. 测试结束后执行 `stop-docker.cmd`，并撤销端口映射和防火墙规则。
+
+## 从测试环境迁移到正式部署
+
+仓库只保存通用代码、配置示例与说明。服务器真实 IP、正式域名、管理员凭据和密钥均写在部署机器的私有 `.env`，不需要改业务代码或提交到 GitHub。本机测试成功不等于已完成生产验收。
+
+### 正式部署需要调整什么
+
+| 项目 | 正式部署要求 |
+| --- | --- |
+| 网页与网关地址 | 将 `AI_OPS_PUBLIC_WEB_BASE_URL`、`AI_OPS_PUBLIC_GATEWAY_BASE_URL` 改成用户可达的正式 HTTPS 域名。已有客户端需重新导入更新后的网关地址。 |
+| HTTPS 与登录 | 为正式域名配置有效证书，并设置 `AI_OPS_COOKIE_SECURE=true`；`false` 仅用于 HTTP 测试。 |
+| 网页服务 | 当前 Docker `web` 使用 `vite preview`，只适合测试。正式部署需使用 Nginx/Caddy 托管 `apps/web/dist`，为前端路由提供 `index.html` 回退，并将同域 `/api/` 原样代理到 server。不能只在预览服务前套 HTTPS 就视为完成生产改造。[Vite 部署说明](https://vite.dev/guide/static-deploy)明确区分了预览服务与生产服务器。 |
+| 网关代理 | 独立网关域名转发到 server 的 `4175`；保留路径、查询参数及鉴权头，关闭流式响应缓冲，代理超时应覆盖应用的请求时限。 |
+| 监听与开放端口 | 若反向代理运行在同一宿主机，设置 `AI_OPS_BIND_ADDRESS=127.0.0.1`，对外只开放 HTTPS 入口（按证书方案需要开放 HTTP）。数据库和 Redis 保持 Docker 内网访问。 |
+| 管理员与密钥 | 全新正式环境生成独立管理员密码、两组加密密钥以及 PostgreSQL/Redis 密码，不能复用测试凭据。`AUTH_ADMIN_*` 只负责新库初始化，不会改写已有管理员。 |
+| 存储与备份 | 使用持久卷，安排异机加密备份并做实际恢复演练；监控磁盘、健康接口、证书和数据库状态。 |
+| 容量与来源 IP | 按实际并发、上游配额、长请求与流式请求压测。当前 Fastify 没有配置 `trustProxy`，登录限流看到的是代理 IP；放量前需按实际代理链配置受信任代理并验证，不能无条件信任外部 `X-Forwarded-For`。 |
+
+下面仅是“反向代理与应用在同一宿主机”的配置片段，域名均为占位符，不是可直接上线的完整 `.env`：
+
+```dotenv
+AI_OPS_BIND_ADDRESS=127.0.0.1
+AI_OPS_WEB_PORT=4174
+AI_OPS_GATEWAY_PORT=4175
+AI_OPS_PUBLIC_WEB_BASE_URL=https://ops.example.com
+AI_OPS_PUBLIC_GATEWAY_BASE_URL=https://gateway.example.com
+AI_OPS_COOKIE_SECURE=true
+AI_OPS_CORS_ORIGINS=
+```
+
+网页按同域 `/api/` 访问时通常不需额外跨域配置。确有额外浏览器来源时，将其精确写入 `AI_OPS_CORS_ORIGINS`，用逗号分隔；它不是任意网站的开放访问开关。如果代理运行在 Docker 内，应通过共享 Docker 网络连接 `server:4175`，不能把宿主机回环地址当成容器内的 server。
+
+全新正式环境可参考 `docker-compose.env.example` 创建私有 `.env` 并替换所有占位密码/密钥，再启动服务。Windows 上也可先运行 `start-docker.cmd -PrepareOnly` 生成配置，设置正式域名及 HTTPS 后再启动。已有测试数据若要迁移，按下文“备份与恢复”携带原加密密钥及数据库凭据；不要直接用新随机密钥连接旧数据。测试账号随数据库一并恢复时，需要另行修改数据库中的管理员凭据，仅修改 `.env` 不会更改它。
+
+### 代码发布边界
+
+提交源代码、`docker-compose.yml`、配置示例、启动脚本与文档。`.env`、`.env.local`、真实证书私钥、备份、数据库文件及 Docker 数据卷仅在部署环境保存。Git 已忽略这些本机配置与运行数据，不要使用 `git add -f` 强制提交。
+
+启动器显式以 UTF-8 读取与写入 `.env`，防止 Windows PowerShell 5.1 在补充配置时反复损坏中文。旧文件若有同名项，读取采用最后一项；更新该项时会移除重复项。已损坏的数据库名称需要单独修复，启动器不会自动覆盖已有账号。
 
 ## 日常操作
 
@@ -128,6 +186,7 @@
 - `/api/system/status`：仅超级管理员可读，包含数据库连接池、Redis 状态、等待数、进程内存与运行时长，不返回凭据。
 - `docker compose ps`：检查四个服务状态；容器异常退出自动重启，但 `unhealthy` 本身不会触发 Docker 自动重启，需部署方监控告警。
 - `npm run typecheck`、`npm run build`、`npm test`：静态检查、构建与测试。完整存储测试需单独提供 `TEST_DATABASE_URL`/`TEST_REDIS_URL`，不要指向线上；测试会建删自己的 PostgreSQL schema，并写入测试 Redis 键。
+- `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/tests/start-docker.test.ps1`：在独立临时文件中验证启动器 UTF-8 读写、重复配置和 HTTP/HTTPS 设置，不接触实际 `.env` 或 Docker 数据。
 - 当前没有自动执行真实第三方模型的付费压测。迁移测试、模拟上游流式测试不能代替生产容量验收。
 
 ## 常见问题
