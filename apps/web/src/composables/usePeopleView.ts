@@ -3,6 +3,7 @@ import { IconAlertTriangle, IconDotsVertical, IconKey, IconRefresh, IconTrash, I
 import { deletePerson, disablePerson, enablePerson, fetchPeople, PeopleApiError, resetPersonKey, resetPersonPassword, type PeopleFilters, type PeopleResponse, type Person } from '../people-api'
 import AppPagination from '../components/AppPagination.vue'
 import { useDebouncedSearch } from '../composables/useDebouncedSearch'
+import { createIdempotencyKey } from '../idempotency'
 
 export function usePeopleView() {
 /**
@@ -91,7 +92,7 @@ function sortIcon(key: PeopleSortKey) {
 }
 
 function operationKey(prefix: string) {
-  return `${prefix}-${crypto.randomUUID()}`
+  return createIdempotencyKey(prefix)
 }
 
 async function loadPeople() {

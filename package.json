@@ -15,7 +15,7 @@
     "dev:server": "npm run dev --workspace @ai-ops/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "test": "node --import tsx --test apps/server/tests/*.test.ts"
+    "test": "node --import tsx --test apps/server/tests/*.test.ts apps/web/tests/*.test.ts"
   },
   "devDependencies": {
     "typescript": "~5.9.3"

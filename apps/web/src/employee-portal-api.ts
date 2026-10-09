@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { withCsrfHeader } from './csrf'
+import { createIdempotencyKey } from './idempotency'
 
 const keySchema = z.object({ id: z.string(), masked: z.string(), status: z.enum(['active', 'expiring']), createdAt: z.string(), lastUsedAt: z.string().nullable() })
 const deviceSetupTargetSchema = z.enum(['codex', 'workbuddy'])
@@ -49,7 +50,7 @@ export async function fetchEmployeePortalKey(signal?: AbortSignal) {
 }
 
 function idempotencyKey(action: 'create' | 'reset') {
-  return `employee-key-${action}-${crypto.randomUUID()}`
+  return createIdempotencyKey(`employee-key-${action}`)
 }
 
 export async function createEmployeePortalKey() {
