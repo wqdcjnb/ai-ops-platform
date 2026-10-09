@@ -140,7 +140,6 @@ export type ConversationAuditResponse = z.infer<typeof conversationAuditResponse
 export type ConversationAccessResponse = z.infer<typeof conversationAccessResponseSchema>
 export type ConversationAccessHistoryResponse = z.infer<typeof conversationAccessHistoryResponseSchema>
 export type ConversationDeleteBody = z.infer<typeof conversationDeleteBodySchema>
-export type ConversationDeleteResponse = z.infer<typeof conversationDeleteResponseSchema>
 
 export class ConversationAuditApiError extends Error {
   constructor(message: string, readonly requestId?: string) { super(message) }
@@ -167,10 +166,6 @@ async function parseBlobResponse(response: Response, fallback: string) {
 
 export async function fetchConversationAudits(filters: ConversationAuditFilters, signal?: AbortSignal) {
   return parseResponse(await fetch(`/api/conversation-audits?${queryString(filters)}`, { headers: { accept: 'application/json' }, signal }), conversationAuditResponseSchema, '对话审计暂时无法加载')
-}
-
-export async function fetchConversationAuditsByKey(keyId: string, filters: ConversationAuditFilters, signal?: AbortSignal) {
-  return parseResponse(await fetch(`/api/keys/${encodeURIComponent(keyId)}/audits?${queryString({ ...filters, key: keyId })}`, { headers: { accept: 'application/json' }, signal }), conversationAuditResponseSchema, '该 Key 的对话审计暂时无法加载')
 }
 
 export async function requestConversationAccess(id: string, signal?: AbortSignal) {

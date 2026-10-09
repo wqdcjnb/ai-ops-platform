@@ -56,12 +56,6 @@ async function getResource<T>(url: string, schema: z.ZodType<T>, signal?: AbortS
   return parsed.data
 }
 
-export async function fetchUsage(filters: UsageFilters, signal?: AbortSignal): Promise<UsageResponse> {
-  const value = usageFiltersSchema.parse(filters)
-  const params = new URLSearchParams(Object.entries(value).map(([key, item]) => [key, String(item)]))
-  return getResource(`/api/usage?${params}`, usageResponseSchema, signal)
-}
-export async function fetchUsageDetail(requestId: string, signal?: AbortSignal): Promise<UsageDetail> { return getResource(`/api/usage/${encodeURIComponent(requestId)}`, usageDetailResponseSchema, signal) }
 
 export async function fetchModelAnalytics(filters: ModelAnalyticsQuery, signal?: AbortSignal): Promise<ModelAnalyticsResponse> {
   const value = modelAnalyticsQuerySchema.parse(filters)

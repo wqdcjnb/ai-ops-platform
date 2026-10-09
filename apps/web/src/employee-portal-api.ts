@@ -21,7 +21,6 @@ export const employeePortalKeyResponseSchema = z.object({
 })
 export const employeePortalKeyIssueResponseSchema = employeePortalKeyResponseSchema.extend({ secret: z.string().min(24) })
 export type EmployeePortalKeyResponse = z.infer<typeof employeePortalKeyResponseSchema>
-export type EmployeePortalKeyIssueResponse = z.infer<typeof employeePortalKeyIssueResponseSchema>
 export type DeviceSetupTarget = z.infer<typeof deviceSetupTargetSchema>
 export type DeviceSetupTicket = z.infer<typeof deviceSetupTicketSchema>
 

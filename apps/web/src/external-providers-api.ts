@@ -73,9 +73,7 @@ export const externalProviderModelTestResponseSchema = z.object({
   requestId: z.string(),
 })
 
-export type ExternalProviderDiscoveryResponse = z.infer<typeof externalProviderDiscoveryResponseSchema>
 export type ExternalProviderModelTest = z.infer<typeof externalProviderModelTestSchema>
-export type ExternalProviderModelTestResponse = z.infer<typeof externalProviderModelTestResponseSchema>
 
 export class ExternalProvidersApiError extends Error {
   constructor(message: string, readonly requestId?: string) {
@@ -95,15 +93,6 @@ export async function fetchExternalProviders(signal?: AbortSignal): Promise<Exte
   if (!response.ok) throw await errorFrom(response, '第三方模型供应商暂时无法加载', requestId)
   const parsed = externalProvidersResponseSchema.safeParse(await response.json())
   if (!parsed.success) throw new ExternalProvidersApiError('第三方模型供应商响应格式不符合接口约定', requestId)
-  return parsed.data
-}
-
-export async function fetchExternalProviderPresets(signal?: AbortSignal): Promise<ExternalProviderPresetsResponse> {
-  const response = await fetch('/api/external-providers/presets', { headers: { accept: 'application/json' }, signal })
-  const requestId = response.headers.get('x-request-id') ?? undefined
-  if (!response.ok) throw await errorFrom(response, '第三方模型预设暂时无法加载', requestId)
-  const parsed = externalProviderPresetsResponseSchema.safeParse(await response.json())
-  if (!parsed.success) throw new ExternalProvidersApiError('第三方模型预设响应格式不符合接口约定', requestId)
   return parsed.data
 }
 
